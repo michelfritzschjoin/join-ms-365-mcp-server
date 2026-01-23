@@ -11,7 +11,7 @@ export default defineConfig({
   sourcemap: false,
   dts: false,
   publicDir: false,
-  onSuccess: 'chmod +x dist/index.js',
+  onSuccess: 'node bin/make-executable.mjs',
   loader: {
     '.json': 'copy',
   },
