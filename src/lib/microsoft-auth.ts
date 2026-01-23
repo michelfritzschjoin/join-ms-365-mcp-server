@@ -5,7 +5,7 @@ import { getCloudEndpoints, type CloudType } from '../cloud-config.js';
 /**
  * Microsoft Bearer Token Auth Middleware validates that the request has a valid Microsoft access token
  * The token is passed in the Authorization header as a Bearer token
- * 
+ *
  * This middleware is OPTIONAL - if no token is provided, the request continues without authentication.
  * This allows MCP Inspector and other tools to connect without requiring OAuth tokens upfront.
  * The actual API calls will fail if authentication is required but no token is available.
@@ -35,7 +35,9 @@ export const microsoftBearerTokenAuthMiddleware = (
   } else {
     // No token provided - this is OK for inspector/testing mode
     // The request will continue, but API calls may fail if they require authentication
-    logger.debug('Request without Bearer token - continuing without authentication (OK for inspector/testing)');
+    logger.debug(
+      'Request without Bearer token - continuing without authentication (OK for inspector/testing)'
+    );
   }
 
   next();

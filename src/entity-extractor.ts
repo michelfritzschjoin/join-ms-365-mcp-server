@@ -351,4 +351,3 @@ export class EntityExtractor {
 }
 
 export default EntityExtractor;
-

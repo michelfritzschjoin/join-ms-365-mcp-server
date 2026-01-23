@@ -231,10 +231,7 @@ async function executeGraphTool(
         let nextLink = combinedResponse['@odata.nextLink'];
         let pageCount = 1;
 
-        const maxPages = parseInt(
-          process.env.MS365_MCP_MAX_PAGES || '500',
-          10
-        ); // Default 500, configurable via ENV
+        const maxPages = parseInt(process.env.MS365_MCP_MAX_PAGES || '500', 10); // Default 500, configurable via ENV
 
         while (nextLink && pageCount < maxPages) {
           logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);

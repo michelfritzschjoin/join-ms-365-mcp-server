@@ -36,4 +36,3 @@ if (platform() !== 'win32') {
     // File doesn't exist yet, that's okay
   }
 }
-

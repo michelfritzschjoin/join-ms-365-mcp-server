@@ -6,6 +6,7 @@ import GraphClient from './graph-client.js';
 import logger from './logger.js';
 import { getCloudEndpoints } from './cloud-config.js';
 import type { AppSecrets } from './secrets.js';
+import { getRequestTokens } from './request-context.js';
 
 export interface DownloadLink {
   fileId: string;
@@ -81,12 +82,9 @@ export class DownloadLinkGenerator {
   ): Promise<DownloadLink | null> {
     try {
       // Get file metadata
-      const fileMetadata = await this.graphClient.makeRequest(
-        `/sites/${siteId}/items/${itemId}`,
-        {
-          accessToken,
-        }
-      );
+      const fileMetadata = await this.graphClient.makeRequest(`/sites/${siteId}/items/${itemId}`, {
+        accessToken,
+      });
 
       if (!fileMetadata || typeof fileMetadata !== 'object') {
         return null;
@@ -116,8 +114,8 @@ export class DownloadLinkGenerator {
   ): Promise<DownloadLink | null> {
     try {
       // Extract site and item ID from webUrl
-      const siteMatch = webUrl.match(/\/sites\/([^\/]+)/);
-      const itemMatch = webUrl.match(/\/items\/([^\/\?]+)/);
+      const siteMatch = webUrl.match(/\/sites\/([^/]+)/);
+      const itemMatch = webUrl.match(/\/items\/([^/?]+)/);
 
       if (siteMatch && itemMatch) {
         const siteId = siteMatch[1];
@@ -162,7 +160,7 @@ export class DownloadLinkGenerator {
     try {
       // Get download URL from content endpoint
       const cloudEndpoints = getCloudEndpoints(this.secrets.cloudType);
-      
+
       // Use access token from context if not provided
       const token = accessToken || getRequestTokens()?.accessToken;
       if (!token) {
@@ -264,4 +262,3 @@ export class DownloadLinkGenerator {
 }
 
 export default DownloadLinkGenerator;
-

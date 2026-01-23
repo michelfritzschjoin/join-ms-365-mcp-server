@@ -122,12 +122,7 @@ export class SynonymExpander {
   /**
    * Learn a synonym from search results
    */
-  learnSynonym(
-    original: string,
-    synonym: string,
-    success: boolean,
-    context?: string
-  ): void {
+  learnSynonym(original: string, synonym: string, success: boolean, context?: string): void {
     const key = original.toLowerCase();
     if (!this.learnedSynonyms.has(key)) {
       this.learnedSynonyms.set(key, []);
@@ -203,4 +198,3 @@ export class SynonymExpander {
 }
 
 export default SynonymExpander;
-

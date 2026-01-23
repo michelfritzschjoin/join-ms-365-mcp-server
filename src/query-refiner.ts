@@ -38,7 +38,10 @@ export class QueryRefiner {
     const variants = new Set<string>([originalQuery]);
 
     // 1. Try synonym expansion
-    const synonymVariants = this.synonymExpander.expandQuery(originalQuery, context?.entityTypes?.join(','));
+    const synonymVariants = this.synonymExpander.expandQuery(
+      originalQuery,
+      context?.entityTypes?.join(',')
+    );
     for (const variant of synonymVariants) {
       variants.add(variant);
     }
@@ -241,4 +244,3 @@ export class QueryRefiner {
 }
 
 export default QueryRefiner;
-

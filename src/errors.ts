@@ -30,12 +30,7 @@ export class GraphApiError extends Error {
 }
 
 export class RetryableError extends GraphApiError {
-  constructor(
-    message: string,
-    statusCode: number,
-    retryAfter?: number,
-    originalError?: unknown
-  ) {
+  constructor(message: string, statusCode: number, retryAfter?: number, originalError?: unknown) {
     super(message, statusCode, true, retryAfter, originalError);
     this.name = 'RetryableError';
   }
@@ -55,12 +50,7 @@ export class RateLimitError extends RetryableError {
 
 export class ServiceUnavailableError extends RetryableError {
   constructor(retryAfter?: number, originalError?: unknown) {
-    super(
-      'Microsoft Graph API service temporarily unavailable.',
-      503,
-      retryAfter,
-      originalError
-    );
+    super('Microsoft Graph API service temporarily unavailable.', 503, retryAfter, originalError);
     this.name = 'ServiceUnavailableError';
   }
 }
@@ -105,4 +95,3 @@ export function getRetryAfter(error: unknown): number | undefined {
   }
   return undefined;
 }
-

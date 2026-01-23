@@ -67,9 +67,7 @@ export class ToolCombiner {
 
       // Execute ready tools in parallel (limited by maxConcurrent)
       const batch = readyTools.slice(0, this.maxConcurrent);
-      const batchResults = await Promise.allSettled(
-        batch.map((tool) => this.executeTool(tool))
-      );
+      const batchResults = await Promise.allSettled(batch.map((tool) => this.executeTool(tool)));
 
       // Process batch results
       for (let i = 0; i < batch.length; i++) {
@@ -247,9 +245,7 @@ export class ToolCombiner {
 
     const allResults: ToolResult[] = [];
     for (const batch of batches) {
-      const batchResults = await Promise.allSettled(
-        batch.map((tool) => this.executeTool(tool))
-      );
+      const batchResults = await Promise.allSettled(batch.map((tool) => this.executeTool(tool)));
 
       for (let i = 0; i < batch.length; i++) {
         const result = batchResults[i];
@@ -283,4 +279,3 @@ export class ToolCombiner {
 }
 
 export default ToolCombiner;
-

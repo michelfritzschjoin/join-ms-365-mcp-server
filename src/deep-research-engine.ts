@@ -86,16 +86,21 @@ export class DeepResearchEngine {
     logger.info(`Starting deep research for: "${question.question}"`);
 
     // Iterative research loop
-    while (iteration < (question.maxIterations || this.maxIterations) && depth < (question.maxDepth || this.maxDepth)) {
+    while (
+      iteration < (question.maxIterations || this.maxIterations) &&
+      depth < (question.maxDepth || this.maxDepth)
+    ) {
       iteration++;
-      logger.info(`Research iteration ${iteration}/${question.maxIterations || this.maxIterations}`);
+      logger.info(
+        `Research iteration ${iteration}/${question.maxIterations || this.maxIterations}`
+      );
 
       // 1. Execute search-first strategy
       const itemsPerIteration = parseInt(
         process.env.MS365_MCP_DEEP_RESEARCH_ITEMS_PER_ITERATION || '100',
         10
       );
-      
+
       // Use learning system recommendations for better entity types
       const searchStrategy = this.searchStrategy as unknown as {
         learningSystem?: LearningSystem;
@@ -107,14 +112,16 @@ export class DeepResearchEngine {
           `deep-research-${iteration}`
         );
       }
-      
+
       const searchResult = await this.searchStrategy.execute(currentQuery, {
         maxResults: itemsPerIteration,
         entityTypes: recommendedEntityTypes,
       });
 
       // 2. Extract entities and information
-      const extractedInfo = this.entityExtractor.extractFromResults(searchResult.searchResults.items);
+      const extractedInfo = this.entityExtractor.extractFromResults(
+        searchResult.searchResults.items
+      );
 
       // 3. Determine next steps based on results
       const reasoning = this.generateReasoning(searchResult, extractedInfo, question.question);
@@ -307,7 +314,7 @@ export class DeepResearchEngine {
       learningSystem?: LearningSystem;
       queryRefiner?: QueryRefiner;
     };
-    
+
     // If we have a query refiner, use it to get better variants
     if (searchStrategy.queryRefiner) {
       try {
@@ -400,4 +407,3 @@ export class DeepResearchEngine {
 }
 
 export default DeepResearchEngine;
-

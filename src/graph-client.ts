@@ -64,7 +64,7 @@ class GraphClient {
     maxRetries = 3
   ): Promise<unknown> {
     const contextTokens = getRequestTokens();
-    
+
     // Try to get token from various sources
     let accessToken: string | null = null;
     try {
@@ -76,7 +76,7 @@ class GraphClient {
         error: (error as Error).message,
       });
     }
-    
+
     const refreshToken = options.refreshToken ?? contextTokens?.refreshToken;
 
     if (!accessToken) {

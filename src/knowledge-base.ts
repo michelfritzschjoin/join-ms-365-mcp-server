@@ -161,12 +161,7 @@ export class KnowledgeBase {
   /**
    * Record a successful query
    */
-  recordSuccessfulQuery(
-    query: string,
-    results: number,
-    sources: string[],
-    context?: string
-  ): void {
+  recordSuccessfulQuery(query: string, results: number, sources: string[], context?: string): void {
     const key = this.normalizeKey(query);
     this.data.successfulQueries[key] = {
       query,
@@ -383,4 +378,3 @@ export class KnowledgeBase {
 }
 
 export default KnowledgeBase;
-

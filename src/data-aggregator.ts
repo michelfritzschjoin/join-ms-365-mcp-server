@@ -95,11 +95,12 @@ export class DataAggregator {
         case 'relevance':
           comparison = a.relevanceScore - b.relevanceScore;
           break;
-        case 'timestamp':
+        case 'timestamp': {
           const aTime = a.timestamp?.getTime() || 0;
           const bTime = b.timestamp?.getTime() || 0;
           comparison = aTime - bTime;
           break;
+        }
         case 'source':
           comparison = a.source.localeCompare(b.source);
           break;
@@ -309,10 +310,7 @@ export class DataAggregator {
   /**
    * Remove duplicates based on similarity
    */
-  deduplicateBySimilarity(
-    items: AggregatedItem[],
-    similarityThreshold = 0.8
-  ): AggregatedItem[] {
+  deduplicateBySimilarity(items: AggregatedItem[], similarityThreshold = 0.8): AggregatedItem[] {
     const unique: AggregatedItem[] = [];
     const seen = new Set<string>();
 
@@ -350,4 +348,3 @@ export class DataAggregator {
 }
 
 export default DataAggregator;
-

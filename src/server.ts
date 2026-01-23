@@ -760,13 +760,14 @@ class MicrosoftGraphServer {
             
             // If we have a client URL, redirect to the MCP client
             if (clientUrl) {
-              // Use client_url as the base, but append /callback if it's just an origin
+              // Use client_url as the base, but append /oauth/callback if it's just an origin
+              // MCP clients expect the callback at /oauth/callback per MCP OAuth spec
               let redirectUrl: URL;
               try {
                 redirectUrl = new URL(clientUrl);
-                // If client_url is just an origin (no path), append /callback
+                // If client_url is just an origin (no path), append /oauth/callback
                 if (redirectUrl.pathname === '/' || redirectUrl.pathname === '') {
-                  redirectUrl.pathname = '/callback';
+                  redirectUrl.pathname = '/oauth/callback';
                 }
               } catch {
                 // Invalid URL, try to construct from redirect_uri

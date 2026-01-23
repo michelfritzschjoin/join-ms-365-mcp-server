@@ -26,10 +26,7 @@ let downloadLinkGenerator: DownloadLinkGenerator | null = null;
 /**
  * Initialize discovery components
  */
-function initializeDiscoveryComponents(
-  graphClient: GraphClient,
-  secrets: AppSecrets
-): void {
+function initializeDiscoveryComponents(graphClient: GraphClient, secrets: AppSecrets): void {
   const knowledgeBase = new KnowledgeBase();
   const synonymExpander = new SynonymExpander();
   const learningSystem = new LearningSystem(knowledgeBase, synonymExpander);
@@ -580,7 +577,10 @@ export function registerDiscoveryTools(
     {
       contractQuery: z.string().describe('Contract name, number, or party'),
       includeRenewals: z.boolean().optional().describe('Include renewal information'),
-      includeDownloadLink: z.boolean().optional().describe('Include download link for contract file'),
+      includeDownloadLink: z
+        .boolean()
+        .optional()
+        .describe('Include download link for contract file'),
     },
     async ({ contractQuery, includeRenewals, includeDownloadLink }) => {
       if (!searchStrategy || !dataAggregator) {
@@ -721,4 +721,3 @@ export function registerDiscoveryTools(
 
   logger.info('Discovery tools registered successfully');
 }
-

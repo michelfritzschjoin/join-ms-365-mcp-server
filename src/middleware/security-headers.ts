@@ -24,11 +24,14 @@ export function securityHeadersMiddleware(req: Request, res: Response, next: Nex
   res.setHeader('Referrer-Policy', referrerPolicy);
 
   // Permissions-Policy: Control browser features
-  const permissionsPolicy = process.env.MS365_MCP_PERMISSIONS_POLICY || 'geolocation=(), microphone=(), camera=()';
+  const permissionsPolicy =
+    process.env.MS365_MCP_PERMISSIONS_POLICY || 'geolocation=(), microphone=(), camera=()';
   res.setHeader('Permissions-Policy', permissionsPolicy);
 
   // Content-Security-Policy: Control resource loading
-  const csp = process.env.MS365_MCP_CSP || "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';";
+  const csp =
+    process.env.MS365_MCP_CSP ||
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';";
   res.setHeader('Content-Security-Policy', csp);
 
   // Strict-Transport-Security: Force HTTPS (only if HTTPS is used)
@@ -41,4 +44,3 @@ export function securityHeadersMiddleware(req: Request, res: Response, next: Nex
 }
 
 export default securityHeadersMiddleware;
-

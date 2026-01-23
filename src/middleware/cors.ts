@@ -52,7 +52,9 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction):
   res.setHeader('Access-Control-Allow-Headers', allowedHeaders);
 
   // Set exposed headers
-  const exposedHeaders = process.env.MS365_MCP_CORS_EXPOSED_HEADERS || 'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset';
+  const exposedHeaders =
+    process.env.MS365_MCP_CORS_EXPOSED_HEADERS ||
+    'X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset';
   res.setHeader('Access-Control-Expose-Headers', exposedHeaders);
 
   // Set max age for preflight
@@ -85,13 +87,13 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction):
           hasLegacyOrigin: !!legacyOrigin,
           method: req.method,
           path: req.path,
-          corsAllowed: !!allowedOrigin
+          corsAllowed: !!allowedOrigin,
         },
         timestamp: Date.now(),
         sessionId: 'debug-session',
         runId: 'run1',
-        hypothesisId: 'F'
-      })
+        hypothesisId: 'F',
+      }),
     }).catch(() => {});
   }
   // #endregion
@@ -100,4 +102,3 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 export default corsMiddleware;
-

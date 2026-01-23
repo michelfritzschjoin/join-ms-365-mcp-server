@@ -83,7 +83,12 @@ export class SearchFirstStrategy {
     const specificResults = await this.querySpecificProducts(extractedInfo, context);
 
     // 5. Learn from results
-    await this.learningSystem.learnFromSearch(query, searchResults, undefined, context?.entityTypes?.join(','));
+    await this.learningSystem.learnFromSearch(
+      query,
+      searchResults,
+      undefined,
+      context?.entityTypes?.join(',')
+    );
 
     // 6. Aggregate and return
     const totalItems = searchResults.items.length + Object.values(specificResults).flat().length;
@@ -132,7 +137,9 @@ export class SearchFirstStrategy {
       const sources: string[] = [];
 
       if (response && typeof response === 'object' && 'value' in response) {
-        const searchResponse = response as { value: Array<{ hitsContainers?: Array<{ hits?: unknown[]; total?: number }> }> };
+        const searchResponse = response as {
+          value: Array<{ hitsContainers?: Array<{ hits?: unknown[]; total?: number }> }>;
+        };
         if (Array.isArray(searchResponse.value)) {
           for (const container of searchResponse.value) {
             if (container.hitsContainers && Array.isArray(container.hitsContainers)) {
@@ -222,7 +229,9 @@ export class SearchFirstStrategy {
         for (const fileId of extractedInfo.files.slice(0, 10)) {
           // Limit to 10 files
           try {
-            const fileResponse = await this.graphClient.makeRequest(`/drives/${extractedInfo.drives[0]}/items/${fileId}`);
+            const fileResponse = await this.graphClient.makeRequest(
+              `/drives/${extractedInfo.drives[0]}/items/${fileId}`
+            );
             if (fileResponse) {
               if (!results['files']) {
                 results['files'] = [];
@@ -357,4 +366,3 @@ export class SearchFirstStrategy {
 }
 
 export default SearchFirstStrategy;
-

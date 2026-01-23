@@ -62,12 +62,7 @@ export class LearningSystem {
 
         // Record query pattern if entity types are known
         if (results.entityTypes && results.entityTypes.length > 0) {
-          this.knowledgeBase.recordQueryPattern(
-            query,
-            results.entityTypes,
-            true,
-            context
-          );
+          this.knowledgeBase.recordQueryPattern(query, results.entityTypes, true, context);
         }
       }
 
@@ -93,7 +88,9 @@ export class LearningSystem {
         logger.warn(`Failed to persist knowledge base: ${error}`);
       });
 
-      logger.debug(`Learning system: recorded ${success ? 'successful' : 'failed'} search for "${query}"`);
+      logger.debug(
+        `Learning system: recorded ${success ? 'successful' : 'failed'} search for "${query}"`
+      );
     } catch (error) {
       logger.warn(`Learning system error: ${error}`);
     }
@@ -285,4 +282,3 @@ export class LearningSystem {
 }
 
 export default LearningSystem;
-
