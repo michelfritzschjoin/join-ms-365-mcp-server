@@ -303,14 +303,57 @@ class MicrosoftGraphServer {
         const originalRedirectUri = url.searchParams.get('redirect_uri');
         const originalState = url.searchParams.get('state');
         
-        // Encode the original redirect_uri and state in a new state parameter
+        // Determine the actual client URL
+        // If redirect_uri is our own callback endpoint, extract client URL from Referer header
+        const protocol = req.secure ? 'https' : 'http';
+        const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
+        let clientUrl = originalRedirectUri || null;
+        
+        // If redirect_uri is our own callback, try to get client URL from Referer or Origin
+        if (originalRedirectUri === ourCallbackUrl || !originalRedirectUri) {
+          const referer = req.get('Referer') || req.get('Referrer');
+          const origin = req.get('Origin');
+          
+          // Prefer Referer over Origin, as it's more likely to be the actual client page
+          if (referer) {
+            try {
+              const refererUrl = new URL(referer);
+              // Use the referer's origin as the client URL
+              clientUrl = refererUrl.origin;
+              logger.info('Extracted client URL from Referer header', {
+                referer,
+                clientUrl,
+              });
+            } catch {
+              // Invalid referer URL, ignore
+            }
+          } else if (origin) {
+            clientUrl = origin;
+            logger.info('Extracted client URL from Origin header', {
+              origin,
+              clientUrl,
+            });
+          }
+        }
+        
+        // Encode the client URL and state in a new state parameter
         let enhancedState = originalState || '';
-        if (originalRedirectUri) {
+        if (clientUrl) {
+          const stateData = {
+            client_url: clientUrl,
+            redirect_uri: originalRedirectUri || ourCallbackUrl,
+            original_state: originalState || null,
+          };
+          // Encode as base64url (URL-safe base64)
+          const base64 = Buffer.from(JSON.stringify(stateData)).toString('base64');
+          const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+          enhancedState = base64url;
+        } else if (originalRedirectUri && originalRedirectUri !== ourCallbackUrl) {
+          // Fallback: use original redirect_uri if it's not our callback
           const stateData = {
             redirect_uri: originalRedirectUri,
             original_state: originalState || null,
           };
-          // Encode as base64url (URL-safe base64)
           const base64 = Buffer.from(JSON.stringify(stateData)).toString('base64');
           const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
           enhancedState = base64url;
@@ -691,8 +734,9 @@ class MicrosoftGraphServer {
               }
             }
 
-            // Extract the original redirect_uri from the state parameter
-            // The state parameter contains base64url-encoded JSON with redirect_uri and original_state
+            // Extract the client URL from the state parameter
+            // The state parameter contains base64url-encoded JSON with client_url, redirect_uri and original_state
+            let clientUrl: string | undefined;
             let originalRedirectUri: string | undefined;
             let originalState: string | null = null;
             
@@ -704,31 +748,71 @@ class MicrosoftGraphServer {
                 const padding = base64.length % 4;
                 const paddedBase64 = base64 + (padding ? '='.repeat(4 - padding) : '');
                 const stateData = JSON.parse(Buffer.from(paddedBase64, 'base64').toString('utf8'));
-                if (stateData.redirect_uri) {
-                  originalRedirectUri = stateData.redirect_uri;
-                  originalState = stateData.original_state || null;
-                }
+                
+                // Prefer client_url (extracted from Referer) over redirect_uri
+                clientUrl = stateData.client_url || stateData.redirect_uri;
+                originalRedirectUri = stateData.redirect_uri;
+                originalState = stateData.original_state || null;
               } catch {
                 // State is not encoded, use it as-is
                 originalState = state;
               }
             }
             
-            // If we have the original redirect_uri, redirect to the MCP client
-            if (originalRedirectUri) {
-              const redirectUrl = new URL(originalRedirectUri);
+            // If we have a client URL, redirect to the MCP client
+            if (clientUrl) {
+              // Use client_url as the base, but append /callback if it's just an origin
+              let redirectUrl: URL;
+              try {
+                redirectUrl = new URL(clientUrl);
+                // If client_url is just an origin (no path), append /callback
+                if (redirectUrl.pathname === '/' || redirectUrl.pathname === '') {
+                  redirectUrl.pathname = '/callback';
+                }
+              } catch {
+                // Invalid URL, try to construct from redirect_uri
+                if (originalRedirectUri) {
+                  redirectUrl = new URL(originalRedirectUri);
+                } else {
+                  throw new Error('Invalid client URL');
+                }
+              }
+              
               redirectUrl.searchParams.set('code', code);
               if (originalState) {
                 redirectUrl.searchParams.set('state', originalState);
               }
               
               logger.info('Redirecting to MCP client with authorization code', {
-                redirectUri: originalRedirectUri,
+                clientUrl: redirectUrl.toString(),
                 codeLength: code.length,
                 originalState,
               });
               
               return res.redirect(redirectUrl.toString());
+            }
+            
+            // Fallback: if we have originalRedirectUri but it's not our callback, use it
+            if (originalRedirectUri) {
+              const protocol = req.secure ? 'https' : 'http';
+              const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
+              
+              // Only redirect if it's not our own callback (to avoid loops)
+              if (originalRedirectUri !== ourCallbackUrl) {
+                const redirectUrl = new URL(originalRedirectUri);
+                redirectUrl.searchParams.set('code', code);
+                if (originalState) {
+                  redirectUrl.searchParams.set('state', originalState);
+                }
+                
+                logger.info('Redirecting to original redirect_uri with authorization code', {
+                  redirectUri: originalRedirectUri,
+                  codeLength: code.length,
+                  originalState,
+                });
+                
+                return res.redirect(redirectUrl.toString());
+              }
             }
 
             // Fallback: If no redirect_uri is provided, return JSON for programmatic clients
