@@ -382,8 +382,7 @@ class MicrosoftGraphServer {
         microsoftAuthUrl.searchParams.set('client_id', clientId);
         
         // Set our own callback URL as redirect_uri (Microsoft will redirect here)
-        const protocol = req.secure ? 'https' : 'http';
-        const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
+        // Note: protocol and ourCallbackUrl are already defined above
         microsoftAuthUrl.searchParams.set('redirect_uri', ourCallbackUrl);
         
         // Set the enhanced state parameter (contains original redirect_uri)
