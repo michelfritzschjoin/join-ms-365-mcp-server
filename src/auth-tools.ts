@@ -5,7 +5,9 @@ import AuthManager from './auth.js';
 export function registerAuthTools(server: McpServer, authManager: AuthManager): void {
   server.tool(
     'login',
-    'Authenticate with Microsoft using device code flow',
+    'REQUIRED: Authenticate with Microsoft 365 using device code flow. ' +
+      'This tool MUST be called before using any other Microsoft 365 tools. ' +
+      'It will provide a URL and code that the user must enter in a browser to authenticate.',
     {
       force: z.boolean().default(false).describe('Force a new login even if already logged in'),
     },
@@ -78,18 +80,24 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
     }
   });
 
-  server.tool('verify-login', 'Check current Microsoft authentication status', {}, async () => {
-    const testResult = await authManager.testLogin();
+  server.tool(
+    'verify-login',
+    'Check if the user is currently authenticated with Microsoft 365. ' +
+      'Use this to verify login status before attempting to use other tools.',
+    {},
+    async () => {
+      const testResult = await authManager.testLogin();
 
-    return {
-      content: [
-        {
-          type: 'text',
-          text: JSON.stringify(testResult),
-        },
-      ],
-    };
-  });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(testResult),
+          },
+        ],
+      };
+    }
+  );
 
   server.tool('list-accounts', 'List all available Microsoft accounts', {}, async () => {
     try {

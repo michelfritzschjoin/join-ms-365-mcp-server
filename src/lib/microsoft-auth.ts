@@ -3,12 +3,99 @@ import logger from '../logger.js';
 import { getCloudEndpoints, type CloudType } from '../cloud-config.js';
 
 /**
- * Microsoft Bearer Token Auth Middleware validates that the request has a valid Microsoft access token
+ * Configuration for Microsoft Bearer Token Auth Middleware
+ */
+export interface MicrosoftAuthMiddlewareConfig {
+  /** Whether to require OAuth authentication (default: true in production) */
+  requireAuth?: boolean;
+  /** Base URL for OAuth discovery endpoints */
+  baseUrl?: string;
+}
+
+/**
+ * Creates Microsoft Bearer Token Auth Middleware that validates access tokens
  * The token is passed in the Authorization header as a Bearer token
  *
- * This middleware is OPTIONAL - if no token is provided, the request continues without authentication.
- * This allows MCP Inspector and other tools to connect without requiring OAuth tokens upfront.
- * The actual API calls will fail if authentication is required but no token is available.
+ * IMPORTANT: By default, authentication is REQUIRED. The middleware will return
+ * a 401 Unauthorized response with WWW-Authenticate header pointing to the
+ * OAuth discovery endpoint, as required by RFC 9728 (Protected Resource Metadata).
+ */
+export function createMicrosoftBearerTokenAuthMiddleware(
+  config: MicrosoftAuthMiddlewareConfig = {}
+) {
+  const requireAuth = config.requireAuth ?? true;
+  const baseUrl = config.baseUrl ?? '';
+
+  return (
+    req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
+    res: Response,
+    next: NextFunction
+  ): void => {
+    const authHeader = req.headers.authorization;
+
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const accessToken = authHeader.substring(7);
+
+      // For Microsoft Graph, we don't validate the token here - we'll let the API calls fail if it's invalid
+      // and handle token refresh in the GraphClient
+
+      // Extract refresh token from a custom header (if provided)
+      const refreshToken = (req.headers['x-microsoft-refresh-token'] as string) || '';
+
+      // Store tokens in request for later use
+      req.microsoftAuth = {
+        accessToken,
+        refreshToken,
+      };
+
+      next();
+    } else if (!requireAuth) {
+      // Authentication not required - allow request to continue (ONLY for explicit testing mode)
+      logger.debug('Request without Bearer token - authentication not required in current mode');
+      next();
+    } else {
+      // Authentication REQUIRED but no token provided
+      // Return 401 with WWW-Authenticate header per RFC 9728
+      logger.warn('Authentication required but no Bearer token provided');
+
+      // Determine the resource-metadata URL for OAuth discovery
+      const protocol = req.secure ? 'https' : 'http';
+      const host = req.get('host') || 'localhost';
+      const discoveryUrl = baseUrl || `${protocol}://${host}`;
+
+      // Set WWW-Authenticate header as per RFC 9728 (OAuth 2.0 Protected Resource Metadata)
+      res.set(
+        'WWW-Authenticate',
+        `Bearer resource_metadata="${discoveryUrl}/.well-known/oauth-protected-resource"`
+      );
+
+      res.status(401).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32001,
+          message: 'Authentication required',
+          data: {
+            type: 'oauth_required',
+            description:
+              'You must authenticate with Microsoft 365 before accessing this resource. ' +
+              'Please complete the OAuth flow to obtain an access token.',
+            oauth_discovery: `${discoveryUrl}/.well-known/oauth-protected-resource`,
+            authorization_endpoint: `${discoveryUrl}/authorize`,
+          },
+        },
+        id: null,
+      });
+    }
+  };
+}
+
+/**
+ * Legacy middleware for backward compatibility
+ * @deprecated Use createMicrosoftBearerTokenAuthMiddleware instead
+ *
+ * SECURITY WARNING: This middleware does NOT require authentication and should
+ * only be used for local testing/development. In production, use
+ * createMicrosoftBearerTokenAuthMiddleware with requireAuth: true.
  */
 export const microsoftBearerTokenAuthMiddleware = (
   req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
@@ -17,7 +104,6 @@ export const microsoftBearerTokenAuthMiddleware = (
 ): void => {
   const authHeader = req.headers.authorization;
 
-  // Token is optional - allow requests without token for inspector/testing
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const accessToken = authHeader.substring(7);
 

@@ -12,7 +12,7 @@ import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import { MicrosoftOAuthProvider } from './oauth-provider.js';
 import {
   exchangeCodeForToken,
-  microsoftBearerTokenAuthMiddleware,
+  createMicrosoftBearerTokenAuthMiddleware,
   refreshAccessToken,
 } from './lib/microsoft-auth.js';
 import type { CommandOptions } from './cli.ts';
@@ -174,6 +174,12 @@ class MicrosoftGraphServer {
       const oauthProvider = new MicrosoftOAuthProvider(this.authManager, this.secrets!, {
         port,
         scopes: availableScopes,
+      });
+
+      // Create authentication middleware that REQUIRES OAuth
+      // This ensures all MCP endpoints require valid Bearer tokens
+      const requireOAuthMiddleware = createMicrosoftBearerTokenAuthMiddleware({
+        requireAuth: true,
       });
 
       // OAuth Authorization Server Discovery (RFC 8414)
@@ -1358,9 +1364,10 @@ class MicrosoftGraphServer {
 
       // Microsoft Graph MCP endpoints with bearer token auth
       // Handle both GET and POST methods as required by MCP Streamable HTTP specification
+      // IMPORTANT: OAuth authentication is REQUIRED - no access without valid Bearer token
       app.get(
         '/mcp',
-        microsoftBearerTokenAuthMiddleware,
+        requireOAuthMiddleware,
         async (
           req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
           res: Response
@@ -1471,7 +1478,7 @@ class MicrosoftGraphServer {
 
       app.post(
         '/mcp',
-        microsoftBearerTokenAuthMiddleware,
+        requireOAuthMiddleware,
         async (
           req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
           res: Response

@@ -364,13 +364,41 @@ async function executeGraphTool(
       isError: response.isError,
     };
   } catch (error) {
-    logger.error(`Error in tool ${tool.alias}: ${(error as Error).message}`);
+    const errorMessage = (error as Error).message;
+    logger.error(`Error in tool ${tool.alias}: ${errorMessage}`);
+
+    // Check if this is an authentication error and provide a clear message
+    const isAuthError =
+      errorMessage.includes('AUTHENTICATION REQUIRED') ||
+      errorMessage.includes('No access token') ||
+      errorMessage.includes('not logged in') ||
+      (error as { name?: string }).name === 'AuthenticationError';
+
+    if (isAuthError) {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({
+              error: 'AUTHENTICATION REQUIRED',
+              message:
+                'You must log in to Microsoft 365 before using this tool. ' +
+                'Please call the "login" tool first and follow the device code instructions.',
+              action_required: 'Call the "login" tool to authenticate',
+              tool_to_call: 'login',
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify({
-            error: `Error in tool ${tool.alias}: ${(error as Error).message}`,
+            error: `Error in tool ${tool.alias}: ${errorMessage}`,
           }),
         },
       ],
@@ -462,6 +490,10 @@ export function registerGraphTools(
     if (endpointConfig?.llmTip) {
       toolDescription += `\n\n💡 TIP: ${endpointConfig.llmTip}`;
     }
+
+    // Add authentication reminder to tool description
+    toolDescription +=
+      '\n\n⚠️ REQUIRES AUTHENTICATION: You must call the "login" tool first if not already authenticated.';
 
     try {
       server.tool(
