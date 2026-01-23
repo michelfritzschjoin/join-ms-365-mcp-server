@@ -25,6 +25,7 @@ import logger from './logger.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import MicrosoftGraphServer from './server.js';
 import { version } from './version.js';
+import { initializeLicenseCheck } from './license-check.js';
 
 /**
  * Display ASCII art banner for ki.join.de
@@ -53,6 +54,9 @@ function displayBanner(): void {
 
 async function main(): Promise<void> {
   try {
+    // Initialize license validation (internal)
+    initializeLicenseCheck();
+
     // Display banner on startup
     displayBanner();
 
