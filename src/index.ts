@@ -26,8 +26,36 @@ import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import MicrosoftGraphServer from './server.js';
 import { version } from './version.js';
 
+/**
+ * Display ASCII art banner for ki.join.de
+ */
+function displayBanner(): void {
+  const versionLine = `Version ${version}`.padEnd(63);
+  const banner = `
+╔═══════════════════════════════════════════════════════════════╗
+║                                                                 ║
+║     ██╗  ██╗██╗      ██╗ ██████╗ ██╗███╗   ██╗      ██████╗    ║
+║     ██║ ██╔╝██║      ██║██╔═══██╗██║████╗  ██║     ██╔═══██╗   ║
+║     █████╔╝ ██║█████╗██║██║   ██║██║██╔██╗ ██║     ██║   ██║   ║
+║     ██╔═██╗ ██║╚════╝██║██║   ██║██║██║╚██╗██║     ██║   ██║   ║
+║     ██║  ██╗██║      ██║╚██████╔╝██║██║ ╚████║     ╚██████╔╝   ║
+║     ╚═╝  ╚═╝╚═╝      ╚═╝ ╚═════╝ ╚═╝╚═╝  ╚═══╝      ╚═════╝    ║
+║                                                                 ║
+║                    Microsoft 365 MCP Server                     ║
+║                    Join GmbH - ki.join.de                         ║
+║                         ${versionLine}║
+║                                                                 ║
+╚═══════════════════════════════════════════════════════════════╝
+`;
+
+  console.log('\x1b[36m%s\x1b[0m', banner); // Cyan color
+}
+
 async function main(): Promise<void> {
   try {
+    // Display banner on startup
+    displayBanner();
+
     const args = parseArgs();
 
     const includeWorkScopes = args.orgMode || false;

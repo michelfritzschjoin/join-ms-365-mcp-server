@@ -140,7 +140,9 @@ export class MicrosoftOAuthProvider extends ProxyOAuthServerProvider {
    * @param request - Client registration request
    * @returns Registration response or error
    */
-  registerClient(request: ClientRegistrationRequest): ClientRegistrationResponse | ClientRegistrationError {
+  registerClient(
+    request: ClientRegistrationRequest
+  ): ClientRegistrationResponse | ClientRegistrationError {
     return this.clientStore.registerClient(request, {
       baseUrl: this.options.baseUrl,
       isConfidential: false, // MCP clients are typically public clients

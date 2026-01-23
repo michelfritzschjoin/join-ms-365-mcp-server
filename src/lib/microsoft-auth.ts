@@ -89,14 +89,13 @@ export async function exchangeCodeForToken(
 
   if (!response.ok) {
     const errorText = await response.text();
-    let microsoftError: { error?: string; error_description?: string; error_uri?: string } | null = null;
     let errorMessage = `Token exchange failed: ${response.status}`;
-    
+
     try {
       // Try to parse error as JSON for better error messages
-      microsoftError = JSON.parse(errorText);
-      if (microsoftError.error) {
-        errorMessage = `Token exchange failed: ${microsoftError.error} - ${microsoftError.error_description || errorText}`;
+      const errorJson = JSON.parse(errorText);
+      if (errorJson.error) {
+        errorMessage = `Token exchange failed: ${errorJson.error} - ${errorJson.error_description || errorText}`;
       } else {
         errorMessage = `Token exchange failed: ${response.status} - ${errorText}`;
       }
@@ -104,29 +103,17 @@ export async function exchangeCodeForToken(
       // Not JSON, use text as-is
       errorMessage = `Token exchange failed: ${response.status} - ${errorText}`;
     }
-    
-    // Log detailed error information for debugging
+
     logger.error(`Failed to exchange code for token:`, {
       status: response.status,
       statusText: response.statusText,
-      microsoftError: microsoftError || errorText,
+      error: errorText,
       redirectUri,
       hasCodeVerifier: !!codeVerifier,
-      codeVerifierLength: codeVerifier?.length,
       hasClientSecret: !!clientSecret,
-      clientId: clientId.substring(0, 8) + '...',
-      tenantId,
     });
-    
-    // Create error with Microsoft error details attached
-    const error = new Error(errorMessage) as Error & {
-      statusCode: number;
-      microsoftError?: { error?: string; error_description?: string; error_uri?: string };
-    };
-    error.statusCode = response.status;
-    error.microsoftError = microsoftError;
-    
-    throw error;
+
+    throw new Error(errorMessage);
   }
 
   return response.json();

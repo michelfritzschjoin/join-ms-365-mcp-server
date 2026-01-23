@@ -1,0 +1,73 @@
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+docs
+*.md
+README*.md
+LICENSE
+
+# Development files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Node modules (will be installed in container)
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.example.env
+
+# Test files
+test
+*.test.ts
+*.test.js
+*.spec.ts
+*.spec.js
+coverage
+.nyc_output
+
+# Build artifacts (will be built in container)
+dist
+build
+
+# Logs
+logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CI/CD
+.github
+.gitlab-ci.yml
+.travis.yml
+
+# Temporary files
+tmp
+temp
+*.tmp
+
+# IDE
+.cursor
+*.code-workspace
+
+# OpenAPI files (large, not needed in container)
+openapi
+
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+

@@ -167,6 +167,39 @@ async function executeGraphTool(
       }
     }
 
+    // Handle search parameter for list-users tool - requires property:value format
+    if (tool.alias === 'list-users' && queryParams['$search']) {
+      let searchValue = queryParams['$search'];
+
+      // Remove surrounding quotes if present (handles both single and double quotes)
+      // Match quotes at start AND end, or just start, or just end
+      const quotePattern = /^(["'])(.*)\1$/;
+      const match = searchValue.match(quotePattern);
+      const cleanSearchValue = match ? match[2] : searchValue;
+
+      // Check if search value is already in property:value format
+      // Format: property:value (e.g., "displayName:John" or displayName:John)
+      const propertyValuePattern = /^[a-zA-Z]+:/i;
+
+      if (!propertyValuePattern.test(cleanSearchValue)) {
+        // Auto-format: prepend displayName: if not already formatted
+        queryParams['$search'] = `"displayName:${cleanSearchValue}"`;
+        logger.info(
+          `Auto-formatted search query for list-users: "${searchValue}" -> "${queryParams['$search']}"`
+        );
+      } else {
+        // Already in property:value format, ensure it's wrapped in double quotes
+        queryParams['$search'] = `"${cleanSearchValue}"`;
+        logger.info(
+          `Search query already formatted, ensuring quotes: "${searchValue}" -> "${queryParams['$search']}"`
+        );
+      }
+
+      // Set ConsistencyLevel header for search queries on /users endpoint
+      headers['ConsistencyLevel'] = 'eventual';
+      logger.info('Setting ConsistencyLevel header to "eventual" for user search');
+    }
+
     // Handle timezone parameter for calendar endpoints
     if (config?.supportsTimezone && params.timezone) {
       headers['Prefer'] = `outlook.timezone="${params.timezone}"`;

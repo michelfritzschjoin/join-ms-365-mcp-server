@@ -316,6 +316,66 @@ npm audit
 npm audit fix
 ```
 
+## Docker CI/CD
+
+### GitHub Actions Setup
+
+The project includes automated Docker builds via GitHub Actions. Images are automatically built and pushed to Docker Hub on:
+
+- Push to `main` or `master` branch
+- Tag creation (e.g., `v1.0.0`)
+- Manual workflow dispatch
+
+### Required Secrets
+
+Configure the following secrets in GitHub repository settings (`Settings` → `Secrets and variables` → `Actions`):
+
+| Secret Name           | Description              |
+| --------------------- | ------------------------ |
+| `DOCKER_HUB_USERNAME` | Your Docker Hub username |
+| `DOCKER_HUB_TOKEN`    | Docker Hub access token  |
+
+### Creating Docker Hub Token
+
+1. Log in to [Docker Hub](https://hub.docker.com)
+2. Go to `Account Settings` → `Security`
+3. Click `New Access Token`
+4. Name it (e.g., "GitHub Actions")
+5. Copy the token and add it as `DOCKER_HUB_TOKEN` secret
+
+### Image Tags
+
+The workflow automatically creates multiple tags:
+
+- `latest` - Latest build from main branch
+- `main` or `master` - Branch-specific tag
+- `v1.0.0` - Semantic version tag
+- `v1.0` - Major.minor tag
+- `v1` - Major version tag
+- `main-<sha>` - Commit SHA tag
+
+### Manual Build
+
+You can manually trigger the workflow:
+
+1. Go to `Actions` tab in GitHub
+2. Select `Docker Build and Push` workflow
+3. Click `Run workflow`
+4. Select branch and click `Run workflow`
+
+### Local Docker Build
+
+```bash
+# Build image
+docker build -t join-ms-365-mcp-server:latest .
+
+# Run container
+docker run -p 3000:3000 \
+  -e CLIENT_ID=your-client-id \
+  -e CLIENT_SECRET=your-client-secret \
+  join-ms-365-mcp-server:latest
+```
+
 ## Release Process
 
 1. Update version in `package.json`
@@ -325,7 +385,7 @@ npm audit fix
 5. Tag release: `git tag vX.Y.Z`
 6. Push: `git push && git push --tags`
 
-Semantic Release handles npm publishing automatically.
+Semantic Release handles npm publishing automatically. Docker images are built automatically via GitHub Actions.
 
 ## Contributing
 

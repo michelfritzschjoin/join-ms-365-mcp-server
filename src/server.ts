@@ -165,7 +165,10 @@ class MicrosoftGraphServer {
       app.use(corsMiddleware);
 
       // Build available scopes from endpoints
-      const availableScopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+      const availableScopes = buildScopesFromEndpoints(
+        this.options.orgMode,
+        this.options.enabledTools
+      );
 
       // Initialize OAuth provider with configuration
       const oauthProvider = new MicrosoftOAuthProvider(this.authManager, this.secrets!, {
@@ -303,18 +306,18 @@ class MicrosoftGraphServer {
         // so we can redirect back to it after receiving the authorization code
         const originalRedirectUri = url.searchParams.get('redirect_uri');
         const originalState = url.searchParams.get('state');
-        
+
         // Determine the actual client URL
         // If redirect_uri is our own callback endpoint, extract client URL from Referer header
         const protocol = req.secure ? 'https' : 'http';
         const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
         let clientUrl = originalRedirectUri || null;
-        
+
         // If redirect_uri is our own callback, try to get client URL from Referer or Origin
         if (originalRedirectUri === ourCallbackUrl || !originalRedirectUri) {
           const referer = req.get('Referer') || req.get('Referrer');
           const origin = req.get('Origin');
-          
+
           // Prefer Referer over Origin, as it's more likely to be the actual client page
           if (referer) {
             try {
@@ -336,7 +339,7 @@ class MicrosoftGraphServer {
             });
           }
         }
-        
+
         // Encode the client URL and state in a new state parameter
         // IMPORTANT: Preserve originalState exactly, including empty strings, for CSRF protection
         let enhancedState = originalState ?? '';
@@ -351,7 +354,7 @@ class MicrosoftGraphServer {
           const base64 = Buffer.from(JSON.stringify(stateData)).toString('base64');
           const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
           enhancedState = base64url;
-          
+
           logger.info('Encoded enhanced state for Microsoft OAuth', {
             hasClientUrl: true,
             hasRedirectUri: !!originalRedirectUri,
@@ -366,7 +369,7 @@ class MicrosoftGraphServer {
           const base64 = Buffer.from(JSON.stringify(stateData)).toString('base64');
           const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
           enhancedState = base64url;
-          
+
           logger.info('Encoded enhanced state for Microsoft OAuth (redirect_uri only)', {
             hasRedirectUri: true,
             originalStatePreserved: originalState !== undefined,
@@ -394,11 +397,11 @@ class MicrosoftGraphServer {
 
         // Use our Microsoft app's client_id
         microsoftAuthUrl.searchParams.set('client_id', clientId);
-        
+
         // Set our own callback URL as redirect_uri (Microsoft will redirect here)
         // Note: protocol and ourCallbackUrl are already defined above
         microsoftAuthUrl.searchParams.set('redirect_uri', ourCallbackUrl);
-        
+
         // Set the enhanced state parameter (contains original redirect_uri)
         if (enhancedState) {
           microsoftAuthUrl.searchParams.set('state', enhancedState);
@@ -752,7 +755,7 @@ class MicrosoftGraphServer {
             let clientUrl: string | undefined;
             let originalRedirectUri: string | undefined;
             let originalState: string | null = null;
-            
+
             if (state) {
               try {
                 // Try to decode the state parameter as base64url-encoded JSON
@@ -761,20 +764,22 @@ class MicrosoftGraphServer {
                 const padding = base64.length % 4;
                 const paddedBase64 = base64 + (padding ? '='.repeat(4 - padding) : '');
                 const stateData = JSON.parse(Buffer.from(paddedBase64, 'base64').toString('utf8'));
-                
+
                 // Extract the client URL and redirect_uri separately
                 clientUrl = stateData.client_url;
                 originalRedirectUri = stateData.redirect_uri;
                 // IMPORTANT: Preserve original_state exactly as sent, including empty strings
                 // Use explicit check for undefined to avoid losing empty string values
                 // This is critical for CSRF protection - state must match exactly
-                originalState = stateData.original_state !== undefined ? stateData.original_state : null;
-                
+                originalState =
+                  stateData.original_state !== undefined ? stateData.original_state : null;
+
                 logger.info('Decoded state parameter from Microsoft callback', {
                   hasClientUrl: !!clientUrl,
                   hasRedirectUri: !!originalRedirectUri,
                   originalStatePresent: stateData.original_state !== undefined,
-                  originalStateValue: originalState !== null ? `[${originalState.length} chars]` : 'null',
+                  originalStateValue:
+                    originalState !== null ? `[${originalState.length} chars]` : 'null',
                 });
               } catch {
                 // State is not encoded, use it as-is (raw state from client)
@@ -782,13 +787,13 @@ class MicrosoftGraphServer {
                 originalState = state;
               }
             }
-            
+
             // PRIORITY 1: Always prefer originalRedirectUri from the MCP client's OAuth request
             // This is the redirect_uri the client specified and expects to receive the callback
             if (originalRedirectUri) {
               const protocol = req.secure ? 'https' : 'http';
               const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
-              
+
               // Only redirect if it's not our own callback (to avoid infinite loops)
               if (originalRedirectUri !== ourCallbackUrl) {
                 try {
@@ -799,14 +804,14 @@ class MicrosoftGraphServer {
                   if (originalState !== null) {
                     redirectUrl.searchParams.set('state', originalState);
                   }
-                  
+
                   logger.info('Redirecting to MCP client redirect_uri with authorization code', {
                     redirectUri: originalRedirectUri,
                     codeLength: code.length,
                     stateIncluded: originalState !== null,
                     stateLength: originalState?.length ?? 0,
                   });
-                  
+
                   return res.redirect(redirectUrl.toString());
                 } catch (urlError) {
                   logger.warn('Invalid originalRedirectUri, falling back', {
@@ -816,7 +821,7 @@ class MicrosoftGraphServer {
                 }
               }
             }
-            
+
             // PRIORITY 2: Use clientUrl (from Referer header) if no valid redirect_uri
             if (clientUrl) {
               try {
@@ -826,18 +831,18 @@ class MicrosoftGraphServer {
                 if (redirectUrl.pathname === '/' || redirectUrl.pathname === '') {
                   redirectUrl.pathname = '/oauth/callback';
                 }
-                
+
                 redirectUrl.searchParams.set('code', code);
                 if (originalState !== null) {
                   redirectUrl.searchParams.set('state', originalState);
                 }
-                
+
                 logger.info('Redirecting to MCP client (from Referer) with authorization code', {
                   clientUrl: redirectUrl.toString(),
                   codeLength: code.length,
                   stateIncluded: originalState !== null,
                 });
-                
+
                 return res.redirect(redirectUrl.toString());
               } catch {
                 logger.warn('Invalid clientUrl from Referer', { clientUrl });
@@ -1193,11 +1198,11 @@ class MicrosoftGraphServer {
             // Microsoft redirects to OUR callback URL, so we must use OUR callback URL here
             const protocol = req.secure ? 'https' : 'http';
             const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
-            
+
             // Use our callback URL (what Microsoft redirected to) instead of client's redirect_uri
             // The client's redirect_uri is only used for the initial authorization redirect
             const redirectUri = ourCallbackUrl;
-            
+
             logger.info('Token exchange request', {
               hasCode: !!body.code,
               hasCodeVerifier: !!body.code_verifier,
@@ -1244,25 +1249,31 @@ class MicrosoftGraphServer {
           }
         } catch (error) {
           logger.error('Token endpoint error:', error);
-          
+
           // Extract more details from the error
           let errorDescription = 'Internal server error during token exchange';
           let statusCode = 500;
-          
+
           if (error instanceof Error) {
             errorDescription = error.message;
             // Check if it's a Microsoft API error (400/401/403)
-            if (error.message.includes('400') || error.message.includes('401') || error.message.includes('403')) {
+            if (
+              error.message.includes('400') ||
+              error.message.includes('401') ||
+              error.message.includes('403')
+            ) {
               statusCode = 400; // Return 400 for client errors from Microsoft
             }
             // Log the full error for debugging
             logger.error('Token exchange error details:', {
               message: error.message,
               stack: error.stack,
-              body: req.body ? { ...req.body, code: req.body.code ? '[REDACTED]' : undefined } : undefined,
+              body: req.body
+                ? { ...req.body, code: req.body.code ? '[REDACTED]' : undefined }
+                : undefined,
             });
           }
-          
+
           res.status(statusCode).json({
             error: 'server_error',
             error_description: errorDescription,

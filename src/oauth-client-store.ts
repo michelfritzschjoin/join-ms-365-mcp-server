@@ -111,7 +111,11 @@ export interface ClientRegistrationResponse extends RegisteredClient {
  * Client registration error as per RFC 7591 Section 3.2.2
  */
 export interface ClientRegistrationError {
-  error: 'invalid_redirect_uri' | 'invalid_client_metadata' | 'invalid_software_statement' | 'unapproved_software_statement';
+  error:
+    | 'invalid_redirect_uri'
+    | 'invalid_client_metadata'
+    | 'invalid_software_statement'
+    | 'unapproved_software_statement';
   error_description?: string;
 }
 
@@ -215,8 +219,8 @@ export class OAuthClientStore {
     // Default grant types and response types
     const grantTypes = request.grant_types || ['authorization_code'];
     const responseTypes = request.response_types || ['code'];
-    const tokenEndpointAuthMethod = request.token_endpoint_auth_method ||
-      (isConfidential ? 'client_secret_post' : 'none');
+    const tokenEndpointAuthMethod =
+      request.token_endpoint_auth_method || (isConfidential ? 'client_secret_post' : 'none');
 
     // Create registered client
     const registeredClient: RegisteredClient = {
@@ -381,7 +385,10 @@ let clientStoreInstance: OAuthClientStore | null = null;
 /**
  * Initialize the OAuth client store
  */
-export function initializeClientStore(azureClientId: string, azureClientSecret?: string): OAuthClientStore {
+export function initializeClientStore(
+  azureClientId: string,
+  azureClientSecret?: string
+): OAuthClientStore {
   clientStoreInstance = new OAuthClientStore(azureClientId, azureClientSecret);
   return clientStoreInstance;
 }
@@ -394,4 +401,3 @@ export function getClientStore(): OAuthClientStore | null {
 }
 
 export default OAuthClientStore;
-
