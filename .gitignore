@@ -79,6 +79,9 @@ web_modules/
 .env.production.local
 .env.local
 
+# Docker Compose stack environment file
+stack.env
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

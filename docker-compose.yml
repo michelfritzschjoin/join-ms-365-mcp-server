@@ -1,0 +1,111 @@
+# ==============================================================================
+# Microsoft 365 MCP Server - Docker Compose Configuration
+# ==============================================================================
+# This file provides a production-ready Docker Compose setup with Traefik
+# reverse proxy support for HTTPS/TLS termination.
+#
+# Usage:
+#   1. Copy stack.env.example to stack.env and configure your values
+#   2. Adjust the Traefik labels (host, entrypoints, certresolver) as needed
+#   3. Run: docker compose up -d
+#
+# For development/testing without Traefik:
+#   docker compose --profile standalone up -d
+# ==============================================================================
+
+version: '3.9'
+
+services:
+  # =============================================================================
+  # Production Configuration (with Traefik)
+  # =============================================================================
+  ms365-mcp-server:
+    image: aijoin/join-ms-365-mcp-server:latest
+    container_name: ms365-mcp
+    restart: unless-stopped
+    env_file:
+      - stack.env
+    # Command: Start HTTP server on port 3000 with verbose logging
+    # Options:
+    #   --http <port>  : Start in HTTP server mode (Streamable HTTP transport)
+    #   -v, --verbose  : Enable verbose logging
+    #   --read-only    : Disable all write operations
+    command: ["--http", "3000", "-v"]
+    volumes:
+      # Persist knowledge base and learning data
+      - ./data:/app/data
+      # Optional: Mount custom configuration
+      # - ./config:/app/config:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    labels:
+      # Traefik Configuration
+      - "traefik.enable=true"
+      # Router configuration
+      - "traefik.http.routers.ms365-mcp.rule=Host(`ms365-mcp.yourdomain.com`)"
+      - "traefik.http.routers.ms365-mcp.entrypoints=websecure"
+      - "traefik.http.routers.ms365-mcp.tls.certresolver=myresolver"
+      # Service configuration
+      - "traefik.http.services.ms365-mcp.loadbalancer.server.port=3000"
+      # Optional: Middleware for additional security
+      - "traefik.http.routers.ms365-mcp.middlewares=ms365-mcp-headers"
+      - "traefik.http.middlewares.ms365-mcp-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.ms365-mcp-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.ms365-mcp-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.ms365-mcp-headers.headers.forceSTSHeader=true"
+    networks:
+      - web
+    # Resource limits (adjust based on your workload)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # =============================================================================
+  # Standalone Configuration (without Traefik - for development/testing)
+  # =============================================================================
+  ms365-mcp-standalone:
+    image: aijoin/join-ms-365-mcp-server:latest
+    container_name: ms365-mcp-standalone
+    restart: unless-stopped
+    profiles:
+      - standalone
+    env_file:
+      - stack.env
+    command: ["--http", "3000", "-v"]
+    ports:
+      # Expose port directly (use only in development or behind your own proxy)
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# ==============================================================================
+# Networks
+# ==============================================================================
+networks:
+  web:
+    external: true
+    # This assumes you have an external "web" network created by Traefik
+    # Create it with: docker network create web
+
+# ==============================================================================
+# Volumes (optional - for persistent data)
+# ==============================================================================
+# volumes:
+#   ms365-data:
+#     driver: local
+
