@@ -7,6 +7,7 @@ import logger, { enableConsoleLogging } from './logger.js';
 import { registerAuthTools } from './auth-tools.js';
 import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
 import { registerDiscoveryTools as registerIntelligentDiscoveryTools } from './discovery-tools.js';
+import { registerCompoundTools } from './compound-tools.js';
 import GraphClient from './graph-client.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import { MicrosoftOAuthProvider } from './oauth-provider.js';
@@ -111,6 +112,15 @@ class MicrosoftGraphServer {
       }
       registerIntelligentDiscoveryTools(this.server, this.graphClient, this.secrets);
     }
+
+    // Register compound tools (multi-step contextual tools)
+    // These are always enabled as they provide essential functionality for natural language queries
+    const compoundToolCount = registerCompoundTools(
+      this.server,
+      this.graphClient,
+      this.options.readOnly
+    );
+    logger.info(`Registered ${compoundToolCount} compound tools (multi-step contextual tools)`);
   }
 
   async start(): Promise<void> {

@@ -163,6 +163,165 @@ The Join Microsoft 365 MCP Server provides a comprehensive set of tools for inte
 | -------------- | ---------------------------- | ---- |
 | `search-query` | Unified Microsoft 365 search | All  |
 
+### Compound Tools (Intelligent Multi-Step)
+
+These tools automatically chain multiple API calls to answer complex contextual questions. They are designed for natural language queries and eliminate the need for the AI to manually orchestrate multiple tool calls.
+
+#### Person-Focused Tools
+
+| Tool                        | Description                                            | Mode |
+| --------------------------- | ------------------------------------------------------ | ---- |
+| `find-messages-with-person` | Find all Teams chat messages with a specific person    | All  |
+| `find-emails-with-person`   | Find all email conversations with a specific person    | All  |
+| `find-meetings-with-person` | Find past and upcoming meetings with a specific person | All  |
+| `find-files-from-person`    | Find files shared by or from a specific person         | All  |
+| `get-communication-summary` | Get complete communication overview with a person      | All  |
+
+#### Business & Productivity Tools
+
+| Tool                   | Description                                                    | Mode |
+| ---------------------- | -------------------------------------------------------------- | ---- |
+| `search-everything`    | Search across all M365 products (mail, files, calendar, Teams) | All  |
+| `prepare-for-meeting`  | Gather all context for an upcoming meeting (history, emails)   | All  |
+| `get-my-week-summary`  | Weekly productivity digest (meetings, emails, tasks)           | All  |
+| `get-all-my-tasks`     | Unified task view from To-Do and Planner                       | All  |
+| `get-project-overview` | Complete project overview (files, meetings, emails, tasks)     | All  |
+| `get-company-contacts` | Find all contacts and interactions with a company              | All  |
+| `get-follow-up-items`  | Items needing attention (flagged emails, overdue tasks, etc.)  | All  |
+
+#### Usage Examples for Compound Tools
+
+**Find Messages with Person:**
+
+Perfect for queries like "What were my last messages with Ricardo Rohland?"
+
+```json
+{
+  "tool": "find-messages-with-person",
+  "arguments": {
+    "person": "Ricardo Rohland",
+    "limit": 20
+  }
+}
+```
+
+**Get Communication Summary:**
+
+Perfect for queries like "Tell me everything about my interactions with John Smith"
+
+```json
+{
+  "tool": "get-communication-summary",
+  "arguments": {
+    "person": "John Smith",
+    "includeEmails": true,
+    "includeChats": true,
+    "includeMeetings": true,
+    "includeFiles": true
+  }
+}
+```
+
+**Search Everything:**
+
+Perfect for queries like "Find everything about Project Apollo"
+
+```json
+{
+  "tool": "search-everything",
+  "arguments": {
+    "query": "Project Apollo",
+    "limit": 15
+  }
+}
+```
+
+**Prepare for Meeting:**
+
+Perfect for "Prepare me for my meeting with the marketing team"
+
+```json
+{
+  "tool": "prepare-for-meeting",
+  "arguments": {
+    "meetingSubject": "Marketing",
+    "hoursAhead": 48
+  }
+}
+```
+
+**Get My Week Summary:**
+
+Perfect for "What did I accomplish this week?" or "Summarize my productivity"
+
+```json
+{
+  "tool": "get-my-week-summary",
+  "arguments": {
+    "weekOffset": 0
+  }
+}
+```
+
+**Get All My Tasks:**
+
+Perfect for "What do I need to work on?" or "Show me all my tasks"
+
+```json
+{
+  "tool": "get-all-my-tasks",
+  "arguments": {
+    "includeCompleted": false,
+    "dueSoon": true
+  }
+}
+```
+
+**Get Project Overview:**
+
+Perfect for "What's the status of Project Apollo?" or "Summarize the Q4 Budget project"
+
+```json
+{
+  "tool": "get-project-overview",
+  "arguments": {
+    "projectName": "Q4 Budget",
+    "includeFiles": true,
+    "includeMeetings": true,
+    "includeEmails": true,
+    "includeTasks": true
+  }
+}
+```
+
+**Get Company Contacts:**
+
+Perfect for "Who do we know at Microsoft?" or "Find all contacts from Acme Corp"
+
+```json
+{
+  "tool": "get-company-contacts",
+  "arguments": {
+    "companyName": "Microsoft"
+  }
+}
+```
+
+**Get Follow-Up Items:**
+
+Perfect for "What needs my attention?" or "Show me urgent items"
+
+```json
+{
+  "tool": "get-follow-up-items",
+  "arguments": {
+    "includeEmails": true,
+    "includeTasks": true,
+    "includeMeetings": true
+  }
+}
+```
+
 ## Common Parameters
 
 ### Pagination Parameters

@@ -221,6 +221,16 @@ async function executeGraphTool(
         headers['ConsistencyLevel'] = 'eventual';
         logger.info(`Setting ConsistencyLevel header to "eventual" for ${tool.alias} search`);
       }
+
+      // Microsoft Graph API limitation: $orderby is NOT supported with $search
+      // When both are present, remove $orderby (search results use relevance ranking)
+      if (queryParams['$orderby']) {
+        logger.warn(
+          `Removing $orderby parameter for ${tool.alias}: Microsoft Graph API does not support $orderby with $search. ` +
+            `Search results will be ordered by relevance instead of "${queryParams['$orderby']}".`
+        );
+        delete queryParams['$orderby'];
+      }
     }
 
     // Handle timezone parameter for calendar endpoints

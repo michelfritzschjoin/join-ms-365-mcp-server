@@ -59,7 +59,7 @@ export class KnowledgeBase {
     this.filePath =
       filePath ||
       process.env.MS365_MCP_KNOWLEDGE_BASE_PATH ||
-      path.join(__dirname, '..', 'knowledge-base.json');
+      path.join(__dirname, '..', 'data', 'knowledge-base.json');
     this.data = this.load();
   }
 

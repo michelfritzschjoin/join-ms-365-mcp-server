@@ -5,6 +5,7 @@
 import logger from './logger.js';
 import KnowledgeBase, { type KnowledgeBaseData } from './knowledge-base.js';
 import SynonymExpander from './synonym-expander.js';
+import type { RepairHistoryEntry } from './graph-api-repair.js';
 
 export interface SearchResult {
   items: unknown[];
@@ -278,6 +279,95 @@ export class LearningSystem {
     this.knowledgeBase.save().catch((error) => {
       logger.warn(`Failed to clear knowledge base: ${error}`);
     });
+  }
+
+  /**
+   * Learn from repair history
+   * Records successful repair patterns for future use
+   */
+  async learnFromRepair(repairEntry: RepairHistoryEntry): Promise<void> {
+    if (!this.learningEnabled) {
+      return;
+    }
+
+    try {
+      // Extract endpoint pattern
+      const endpointPattern = this.extractEndpointPattern(repairEntry.endpoint);
+
+      // Record successful repair pattern
+      if (repairEntry.success) {
+        this.knowledgeBase.recordSuccessfulQuery(
+          `repair:${repairEntry.strategy}:${endpointPattern}`,
+          1,
+          [repairEntry.strategy],
+          `error:${repairEntry.error.errorCode || repairEntry.error.statusCode}`
+        );
+
+        logger.debug(`Learning system: recorded successful repair`, {
+          strategy: repairEntry.strategy,
+          endpoint: repairEntry.endpoint,
+          errorCode: repairEntry.error.errorCode,
+        });
+      } else {
+        // Record failed repair for analysis
+        logger.debug(`Learning system: recorded failed repair`, {
+          strategy: repairEntry.strategy,
+          endpoint: repairEntry.endpoint,
+          errorCode: repairEntry.error.errorCode,
+        });
+      }
+
+      // Persist knowledge (async, don't wait)
+      this.knowledgeBase.save().catch((error) => {
+        logger.warn(`Failed to persist repair knowledge: ${error}`);
+      });
+    } catch (error) {
+      logger.warn(`Learning system repair error: ${error}`);
+    }
+  }
+
+  /**
+   * Extract endpoint pattern from full endpoint path
+   */
+  private extractEndpointPattern(endpoint: string): string {
+    // Remove IDs and specific values to get pattern
+    // e.g., /users/123/messages -> /users/{id}/messages
+    return endpoint
+      .replace(/\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '/{id}')
+      .replace(/\/[^/]+-id\//gi, '/{id}/')
+      .replace(/\/[^/]+Id\//gi, '/{id}/')
+      .replace(/\/\d+\//g, '/{id}/')
+      .replace(/\/\d+$/g, '/{id}');
+  }
+
+  /**
+   * Get recommended repair strategy for an endpoint and error
+   */
+  getRecommendedRepairStrategy(
+    endpoint: string,
+    errorCode?: string,
+    statusCode?: number
+  ): string | null {
+    if (!this.learningEnabled) {
+      return null;
+    }
+
+    const endpointPattern = this.extractEndpointPattern(endpoint);
+    const query = `repair:${endpointPattern}`;
+    const context = errorCode
+      ? `error:${errorCode}`
+      : statusCode
+        ? `error:${statusCode}`
+        : undefined;
+
+    // Check knowledge base for successful repair patterns
+    const patterns = this.knowledgeBase.getQueryPattern(query);
+    if (patterns && patterns.entityTypes.length > 0) {
+      // entityTypes in this context represent repair strategies
+      return patterns.entityTypes[0];
+    }
+
+    return null;
   }
 }
 

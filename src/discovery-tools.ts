@@ -67,6 +67,132 @@ export function registerDiscoveryTools(
   // Initialize components
   initializeDiscoveryComponents(graphClient, secrets);
 
+  // ============================================================================
+  // PRIMARY SEARCH TOOL - MUST BE CALLED FOR ANY USER QUESTION
+  // ============================================================================
+
+  server.tool(
+    'ms365-search',
+    `🔍 UNIVERSAL MICROSOFT 365 SEARCH - ALWAYS USE THIS TOOL FIRST!
+
+This is the primary search tool for finding ANY information in Microsoft 365.
+CRITICAL: You MUST call this tool for EVERY user question before answering from general knowledge!
+
+This tool searches across ALL Microsoft 365 data sources:
+- Emails and mail messages
+- Files (OneDrive, SharePoint)
+- Teams chat messages and channels
+- Calendar events and meetings
+- People and contacts
+- OneNote pages
+- SharePoint sites and lists
+
+Examples of when to use this tool:
+- "What do you know about DZBANK?" → Search for "DZBANK"
+- "Tell me about Project Alpha" → Search for "Project Alpha"
+- "What did we discuss about budget?" → Search for "budget"
+- "Find info about customer ABC" → Search for "customer ABC"
+
+The tool will ALWAYS return results or explicitly state that no information was found in Microsoft 365.
+Even if no results are found, this confirms the information is not in the user's Microsoft 365 data.`,
+    {
+      query: z
+        .string()
+        .describe(
+          'The search query - can be any topic, person, company, project, keyword, or phrase the user is asking about'
+        ),
+      entityTypes: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Optional: Specific entity types to search (message, driveItem, event, chatMessage, site, person). Defaults to all types.'
+        ),
+      maxResults: z
+        .number()
+        .optional()
+        .describe('Maximum number of results to return (default: 50, max: 500)'),
+    },
+    async ({ query, entityTypes, maxResults }) => {
+      if (!searchStrategy || !dataAggregator) {
+        throw new Error('Search components not initialized');
+      }
+
+      logger.info(`MS365 Universal Search: "${query}"`);
+
+      const configuredMaxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
+      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const effectiveMaxResults = Math.min(maxResults || 50, configuredMaxResults);
+
+      // Default to all entity types for comprehensive search
+      const searchEntityTypes = entityTypes || [
+        'message',
+        'driveItem',
+        'event',
+        'chatMessage',
+        'site',
+        'person',
+        'listItem',
+      ];
+
+      const result = await searchStrategy.execute(query, {
+        entityTypes: searchEntityTypes,
+        maxResults: effectiveMaxResults,
+      });
+
+      // Aggregate results
+      const aggregated = dataAggregator.aggregate(
+        [
+          {
+            source: 'search',
+            items: result.searchResults.items,
+          },
+          ...Object.entries(result.specificResults).map(([source, items]) => ({
+            source,
+            items: items as unknown[],
+          })),
+        ],
+        {
+          sortBy: 'relevance',
+          sortOrder: 'desc',
+          maxItems: Math.min(effectiveMaxResults, maxAggregateItems),
+          deduplicate: true,
+          formatForLLM: true,
+        }
+      );
+
+      // Build response with explicit messaging
+      const hasResults = result.totalItems > 0;
+
+      const response = {
+        query,
+        searchPerformed: true,
+        searchedSources: searchEntityTypes,
+        totalItemsFound: result.totalItems,
+        hasResults,
+        message: hasResults
+          ? `Found ${result.totalItems} items in Microsoft 365 matching "${query}".`
+          : `No items found in Microsoft 365 matching "${query}". This query was searched across all connected Microsoft 365 data sources (emails, files, chats, calendar, etc.) but no matching content was found.`,
+        sources: aggregated.sources,
+        items: aggregated.items,
+        formattedSummary: hasResults
+          ? aggregated.formattedForLLM
+          : `Microsoft 365 Search Results for "${query}": No matching items found in any data source. The user's Microsoft 365 tenant does not contain any emails, files, messages, events, or other content matching this search query.`,
+        tip: hasResults
+          ? 'Use the specific items above to answer the user question with information from their Microsoft 365 data.'
+          : 'No Microsoft 365 data found. You may inform the user that no information about this topic exists in their Microsoft 365 environment, or answer from your general knowledge while noting that no specific company data was found.',
+      };
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(response, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
   // Deep Research Tool
   server.tool(
     'deep-research',

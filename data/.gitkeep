@@ -1,0 +1,3 @@
+# This directory contains runtime data files
+# knowledge-base.json - Persisted learning data for synonyms, query patterns, and entity mappings
+

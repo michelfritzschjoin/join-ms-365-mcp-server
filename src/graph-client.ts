@@ -14,6 +14,7 @@ import {
   isRetryableError,
   getRetryAfter,
 } from './errors.js';
+import { GraphApiRepairManager } from './graph-api-repair.js';
 
 interface GraphRequestOptions {
   headers?: Record<string, string>;
@@ -47,6 +48,7 @@ class GraphClient {
   private authManager: AuthManager;
   private secrets: AppSecrets;
   private readonly outputFormat: 'json' | 'toon' = 'json';
+  private repairManager: GraphApiRepairManager | null = null;
 
   constructor(
     authManager: AuthManager,
@@ -56,6 +58,16 @@ class GraphClient {
     this.authManager = authManager;
     this.secrets = secrets;
     this.outputFormat = outputFormat;
+
+    // Initialize repair manager if enabled
+    try {
+      this.repairManager = new GraphApiRepairManager();
+      if (this.repairManager.isEnabled()) {
+        logger.info('Graph API Self-Repair system enabled');
+      }
+    } catch (error) {
+      logger.warn(`Failed to initialize repair manager: ${error}`);
+    }
   }
 
   async makeRequest(
@@ -104,42 +116,82 @@ class GraphClient {
           response = await this.performRequest(endpoint, accessToken, options);
         }
 
-        // Handle 403 - Authorization error
-        if (response.status === 403) {
-          const errorText = await response.text();
-          if (errorText.includes('scope') || errorText.includes('permission')) {
-            throw new AuthorizationError(
-              `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
-            );
-          }
-          throw new AuthorizationError(
-            `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
-          );
-        }
-
-        // Handle 429 - Rate limit
-        if (response.status === 429) {
-          const retryAfterHeader = response.headers.get('Retry-After');
-          const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
-          throw new RateLimitError(retryAfter, response);
-        }
-
-        // Handle 503 - Service unavailable
-        if (response.status === 503) {
-          const retryAfterHeader = response.headers.get('Retry-After');
-          const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
-          throw new ServiceUnavailableError(retryAfter, response);
-        }
-
+        // Handle non-OK responses - try self-repair before throwing
         if (!response.ok) {
           const errorText = await response.text();
-          throw new GraphApiError(
-            `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`,
-            response.status,
-            false,
-            undefined,
-            response
-          );
+          let error: GraphApiError;
+
+          // Create appropriate error type
+          if (response.status === 403) {
+            if (errorText.includes('scope') || errorText.includes('permission')) {
+              error = new AuthorizationError(
+                `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`,
+                response
+              );
+            } else {
+              error = new AuthorizationError(
+                `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`,
+                response
+              );
+            }
+          } else if (response.status === 429) {
+            const retryAfterHeader = response.headers.get('Retry-After');
+            const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+            error = new RateLimitError(retryAfter, response);
+          } else if (response.status === 503) {
+            const retryAfterHeader = response.headers.get('Retry-After');
+            const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+            error = new ServiceUnavailableError(retryAfter, response);
+          } else {
+            error = new GraphApiError(
+              `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`,
+              response.status,
+              false,
+              undefined,
+              response
+            );
+          }
+
+          // Try self-repair if enabled and not authentication error
+          if (
+            this.repairManager?.isEnabled() &&
+            !(error instanceof AuthenticationError) &&
+            attempt < maxRetries
+          ) {
+            try {
+              const repairRequest = this.repairManager.createRepairRequest(
+                endpoint,
+                options,
+                error,
+                errorText
+              );
+
+              const repairResult = await this.repairManager.attemptRepair(repairRequest);
+
+              if (repairResult?.success && repairResult.repairedRequest) {
+                const repaired = repairResult.repairedRequest;
+                logger.info(`Self-repair successful, retrying with repaired request`, {
+                  strategy: repairResult.strategy,
+                  originalEndpoint: endpoint,
+                  repairedEndpoint: repaired.endpoint,
+                });
+
+                // Update endpoint and options from repair
+                endpoint = repaired.endpoint;
+                Object.assign(options, repaired.options);
+
+                // Retry with repaired request
+                attempt++;
+                continue;
+              }
+            } catch (repairError) {
+              logger.warn(`Self-repair attempt failed: ${repairError}`);
+              // Continue to throw original error
+            }
+          }
+
+          // No repair or repair failed, throw error
+          throw error;
         }
 
         const text = await response.text();
