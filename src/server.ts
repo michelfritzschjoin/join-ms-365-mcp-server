@@ -101,7 +101,10 @@ class MicrosoftGraphServer {
     }
 
     // Register intelligent discovery tools if enabled
-    if (process.env.MS365_MCP_ENABLE_DISCOVERY_TOOLS === 'true' || this.options.enableDiscoveryTools) {
+    if (
+      process.env.MS365_MCP_ENABLE_DISCOVERY_TOOLS === 'true' ||
+      this.options.enableDiscoveryTools
+    ) {
       logger.info('Intelligent discovery tools enabled');
       if (!this.secrets) {
         throw new Error('Secrets not loaded');
@@ -194,6 +197,71 @@ class MicrosoftGraphServer {
         });
       });
 
+      // Resource-specific OAuth Authorization Server Discovery (for /mcp resource)
+      // OpenWebUI and other MCP clients may request this endpoint
+      app.get('/.well-known/oauth-authorization-server/mcp', async (req, res) => {
+        const protocol = req.secure ? 'https' : 'http';
+        const url = new URL(`${protocol}://${req.get('host')}`);
+
+        const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+
+        res.json({
+          issuer: url.origin,
+          authorization_endpoint: `${url.origin}/authorize`,
+          token_endpoint: `${url.origin}/token`,
+          response_types_supported: ['code'],
+          response_modes_supported: ['query'],
+          grant_types_supported: ['authorization_code', 'refresh_token'],
+          token_endpoint_auth_methods_supported: ['none'],
+          code_challenge_methods_supported: ['S256'],
+          scopes_supported: scopes,
+          resource: `${url.origin}/mcp`,
+        });
+      });
+
+      // OpenID Connect Configuration Discovery (for /mcp resource)
+      // Some MCP clients may request OpenID Connect discovery endpoints
+      app.get('/.well-known/openid-configuration/mcp', async (req, res) => {
+        const protocol = req.secure ? 'https' : 'http';
+        const url = new URL(`${protocol}://${req.get('host')}`);
+
+        const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+
+        res.json({
+          issuer: url.origin,
+          authorization_endpoint: `${url.origin}/authorize`,
+          token_endpoint: `${url.origin}/token`,
+          response_types_supported: ['code'],
+          response_modes_supported: ['query'],
+          grant_types_supported: ['authorization_code', 'refresh_token'],
+          token_endpoint_auth_methods_supported: ['none'],
+          code_challenge_methods_supported: ['S256'],
+          scopes_supported: scopes,
+          resource: `${url.origin}/mcp`,
+        });
+      });
+
+      // OpenID Connect Configuration Discovery (alternative path)
+      app.get('/mcp/.well-known/openid-configuration', async (req, res) => {
+        const protocol = req.secure ? 'https' : 'http';
+        const url = new URL(`${protocol}://${req.get('host')}`);
+
+        const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+
+        res.json({
+          issuer: url.origin,
+          authorization_endpoint: `${url.origin}/authorize`,
+          token_endpoint: `${url.origin}/token`,
+          response_types_supported: ['code'],
+          response_modes_supported: ['query'],
+          grant_types_supported: ['authorization_code', 'refresh_token'],
+          token_endpoint_auth_methods_supported: ['none'],
+          code_challenge_methods_supported: ['S256'],
+          scopes_supported: scopes,
+          resource: `${url.origin}/mcp`,
+        });
+      });
+
       // Authorization endpoint - redirects to Microsoft
       app.get('/authorize', async (req, res) => {
         const url = new URL(req.url!, `${req.protocol}://${req.get('host')}`);
@@ -215,21 +283,43 @@ class MicrosoftGraphServer {
           body: JSON.stringify({
             location: 'server.ts:189',
             message: 'OAuth authorize request',
-            data: { requestHost, requestProtocol, requestUrl, redirectUriParam, isNgrok: requestHost?.includes('ngrok') || false },
+            data: {
+              requestHost,
+              requestProtocol,
+              requestUrl,
+              redirectUriParam,
+              isNgrok: requestHost?.includes('ngrok') || false,
+            },
             timestamp: Date.now(),
             sessionId: 'debug-session',
             runId: 'run1',
-            hypothesisId: 'D'
-          })
+            hypothesisId: 'D',
+          }),
         }).catch(() => {});
         // #endregion
+
+        // Store the original redirect_uri from the MCP client in the state parameter
+        // so we can redirect back to it after receiving the authorization code
+        const originalRedirectUri = url.searchParams.get('redirect_uri');
+        const originalState = url.searchParams.get('state');
+        
+        // Encode the original redirect_uri and state in a new state parameter
+        let enhancedState = originalState || '';
+        if (originalRedirectUri) {
+          const stateData = {
+            redirect_uri: originalRedirectUri,
+            original_state: originalState || null,
+          };
+          // Encode as base64url (URL-safe base64)
+          const base64 = Buffer.from(JSON.stringify(stateData)).toString('base64');
+          const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+          enhancedState = base64url;
+        }
 
         // Only forward parameters that Microsoft OAuth 2.0 v2.0 supports
         const allowedParams = [
           'response_type',
-          'redirect_uri',
           'scope',
-          'state',
           'response_mode',
           'code_challenge',
           'code_challenge_method',
@@ -247,6 +337,16 @@ class MicrosoftGraphServer {
 
         // Use our Microsoft app's client_id
         microsoftAuthUrl.searchParams.set('client_id', clientId);
+        
+        // Set our own callback URL as redirect_uri (Microsoft will redirect here)
+        const protocol = req.secure ? 'https' : 'http';
+        const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
+        microsoftAuthUrl.searchParams.set('redirect_uri', ourCallbackUrl);
+        
+        // Set the enhanced state parameter (contains original redirect_uri)
+        if (enhancedState) {
+          microsoftAuthUrl.searchParams.set('state', enhancedState);
+        }
 
         // Ensure we have the minimal required scopes if none provided
         if (!microsoftAuthUrl.searchParams.get('scope')) {
@@ -262,7 +362,7 @@ class MicrosoftGraphServer {
         provider: oauthProvider,
         issuerUrl: new URL(`http://localhost:${port}`),
       });
-      
+
       // #region agent log
       // Instrumentation: Track requests before router
       app.use((req, res, next) => {
@@ -273,21 +373,26 @@ class MicrosoftGraphServer {
             body: JSON.stringify({
               location: 'server.ts:238',
               message: 'Request to /callback before router',
-              data: { path: req.path, url: req.url, method: req.method, headersSent: res.headersSent },
+              data: {
+                path: req.path,
+                url: req.url,
+                method: req.method,
+                headersSent: res.headersSent,
+              },
               timestamp: Date.now(),
               sessionId: 'debug-session',
               runId: 'run1',
-              hypothesisId: 'A'
-            })
+              hypothesisId: 'A',
+            }),
           }).catch(() => {});
         }
         next();
       });
       // #endregion
-      
+
       // Mount the auth router BEFORE custom handlers so it can handle callbacks first
       app.use(authRouter);
-      
+
       // #region agent log
       // Instrumentation: Track requests after router
       app.use((req, res, next) => {
@@ -298,18 +403,23 @@ class MicrosoftGraphServer {
             body: JSON.stringify({
               location: 'server.ts:252',
               message: 'Request to /callback after router',
-              data: { path: req.path, url: req.url, method: req.method, headersSent: res.headersSent },
+              data: {
+                path: req.path,
+                url: req.url,
+                method: req.method,
+                headersSent: res.headersSent,
+              },
               timestamp: Date.now(),
               sessionId: 'debug-session',
               runId: 'run1',
-              hypothesisId: 'A'
-            })
+              hypothesisId: 'A',
+            }),
           }).catch(() => {});
         }
         next();
       });
       // #endregion
-      
+
       // OAuth callback endpoint - receives authorization code from Microsoft
       // The mcpAuthRouter is mounted before this handler, so it will handle the callback first if it matches
       // If the router doesn't handle /callback (it likely handles /auth/callback instead), our handler will execute
@@ -325,12 +435,20 @@ class MicrosoftGraphServer {
           body: JSON.stringify({
             location: 'server.ts:243',
             message: 'Custom /callback handler executing',
-            data: { headersSent: res.headersSent, hasCode: !!req.query.code, url: req.url, requestHost, requestProtocol, requestUrl, isNgrok },
+            data: {
+              headersSent: res.headersSent,
+              hasCode: !!req.query.code,
+              url: req.url,
+              requestHost,
+              requestProtocol,
+              requestUrl,
+              isNgrok,
+            },
             timestamp: Date.now(),
             sessionId: 'debug-session',
             runId: 'run1',
-            hypothesisId: 'D'
-          })
+            hypothesisId: 'D',
+          }),
         }).catch(() => {});
         // #endregion
         try {
@@ -429,10 +547,14 @@ class MicrosoftGraphServer {
             // Only return HTML if:
             // 1. format=html is explicitly set, OR
             // 2. Accept header includes text/html AND doesn't include application/json
-            const wantsHtml = formatParam === 'html' || (acceptHeader.includes('text/html') && !acceptHeader.includes('application/json') && formatParam !== 'json');
+            const wantsHtml =
+              formatParam === 'html' ||
+              (acceptHeader.includes('text/html') &&
+                !acceptHeader.includes('application/json') &&
+                formatParam !== 'json');
             // Default to JSON for all MCP clients - HTML only if explicitly requested
             const wantsJson = !wantsHtml;
-            
+
             // #region agent log
             const userAgent = req.get('User-Agent') || '';
             fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
@@ -441,21 +563,29 @@ class MicrosoftGraphServer {
               body: JSON.stringify({
                 location: 'server.ts:394',
                 message: 'Checking response format',
-                data: { wantsJson, wantsHtml, acceptHeader: req.get('Accept'), userAgent: userAgent.substring(0, 100), formatParam: req.query.format, headersSent: res.headersSent },
+                data: {
+                  wantsJson,
+                  wantsHtml,
+                  acceptHeader: req.get('Accept'),
+                  userAgent: userAgent.substring(0, 100),
+                  formatParam: req.query.format,
+                  headersSent: res.headersSent,
+                },
                 timestamp: Date.now(),
                 sessionId: 'debug-session',
                 runId: 'run1',
-                hypothesisId: 'B'
-              })
+                hypothesisId: 'B',
+              }),
             }).catch(() => {});
             // #endregion
-            
+
             // Default to JSON for programmatic clients (MCP protocol expects structured responses)
             // Only return HTML if explicitly requested (browsers with text/html Accept header)
-            
+
             // Check if client explicitly requests token exchange (via query parameter)
-            const requestToken = req.query.exchange_token === 'true' || req.query.exchange_token === '1';
-            
+            const requestToken =
+              req.query.exchange_token === 'true' || req.query.exchange_token === '1';
+
             // Try to automatically exchange code for token ONLY if:
             // 1. Client explicitly requests it (exchange_token=true), AND
             // 2. We have a code_verifier (for PKCE flows) OR client_secret (for confidential clients)
@@ -463,21 +593,21 @@ class MicrosoftGraphServer {
             const codeVerifier = req.query.code_verifier as string | undefined;
             const hasCodeVerifier = !!codeVerifier;
             const hasClientSecret = !!this.secrets?.clientSecret;
-            
+
             // Only attempt automatic token exchange if explicitly requested AND we have the necessary credentials
             const shouldAttemptAutoExchange = requestToken && (hasCodeVerifier || hasClientSecret);
-            
+
             if (shouldAttemptAutoExchange) {
               const protocol = req.secure ? 'https' : 'http';
               const baseUrl = `${protocol}://${req.get('host')}`;
-              const redirectUri = req.query.redirect_uri as string || `${baseUrl}/callback`;
-              
+              const redirectUri = (req.query.redirect_uri as string) || `${baseUrl}/callback`;
+
               // Attempt automatic token exchange for MCP clients
               try {
                 const tenantId = this.secrets?.tenantId || 'common';
                 const clientId = this.secrets!.clientId;
                 const clientSecret = this.secrets?.clientSecret;
-                
+
                 logger.info('Attempting automatic token exchange for MCP client', {
                   redirectUri,
                   hasClientSecret: !!clientSecret,
@@ -540,12 +670,18 @@ class MicrosoftGraphServer {
                 `);
               } catch (tokenError) {
                 const errorMessage = (tokenError as Error).message;
-                const isPKCEError = errorMessage.includes('code_verifier') || errorMessage.includes('code_challenge') || errorMessage.includes('AADSTS50148');
-                
+                const isPKCEError =
+                  errorMessage.includes('code_verifier') ||
+                  errorMessage.includes('code_challenge') ||
+                  errorMessage.includes('AADSTS50148');
+
                 if (isPKCEError) {
-                  logger.info('PKCE detected - skipping automatic token exchange, returning code to client', {
-                    error: errorMessage,
-                  });
+                  logger.info(
+                    'PKCE detected - skipping automatic token exchange, returning code to client',
+                    {
+                      error: errorMessage,
+                    }
+                  );
                 } else {
                   logger.warn('Automatic token exchange failed, falling back to code return', {
                     error: errorMessage,
@@ -554,8 +690,48 @@ class MicrosoftGraphServer {
                 // Fall through to return code (JSON or HTML based on wantsJson)
               }
             }
+
+            // Extract the original redirect_uri from the state parameter
+            // The state parameter contains base64url-encoded JSON with redirect_uri and original_state
+            let originalRedirectUri: string | undefined;
+            let originalState: string | null = null;
             
-            // For MCP clients, always return JSON - never HTML
+            if (state) {
+              try {
+                // Try to decode the state parameter as base64url-encoded JSON
+                // base64url uses - and _ instead of + and /, and no padding
+                const base64 = state.replace(/-/g, '+').replace(/_/g, '/');
+                const padding = base64.length % 4;
+                const paddedBase64 = base64 + (padding ? '='.repeat(4 - padding) : '');
+                const stateData = JSON.parse(Buffer.from(paddedBase64, 'base64').toString('utf8'));
+                if (stateData.redirect_uri) {
+                  originalRedirectUri = stateData.redirect_uri;
+                  originalState = stateData.original_state || null;
+                }
+              } catch {
+                // State is not encoded, use it as-is
+                originalState = state;
+              }
+            }
+            
+            // If we have the original redirect_uri, redirect to the MCP client
+            if (originalRedirectUri) {
+              const redirectUrl = new URL(originalRedirectUri);
+              redirectUrl.searchParams.set('code', code);
+              if (originalState) {
+                redirectUrl.searchParams.set('state', originalState);
+              }
+              
+              logger.info('Redirecting to MCP client with authorization code', {
+                redirectUri: originalRedirectUri,
+                codeLength: code.length,
+                originalState,
+              });
+              
+              return res.redirect(redirectUrl.toString());
+            }
+
+            // Fallback: If no redirect_uri is provided, return JSON for programmatic clients
             if (wantsJson) {
               logger.info('Returning authorization code as JSON response for MCP client');
               return res.json({
@@ -564,15 +740,18 @@ class MicrosoftGraphServer {
                 message: 'Authorization code received successfully',
               });
             }
-            
-            // Only return HTML if explicitly requested (browsers with text/html Accept header)
+
+            // Last resort: Return HTML only if explicitly requested (browsers with text/html Accept header)
             const protocol = req.secure ? 'https' : 'http';
             const baseUrl = `${protocol}://${req.get('host')}`;
-            
-            logger.info('Returning authorization code to MCP client via HTML page with postMessage', {
-              codeLength: code.length,
-              state,
-            });
+
+            logger.info(
+              'No redirect_uri provided, returning authorization code via HTML page with postMessage',
+              {
+                codeLength: code.length,
+                state,
+              }
+            );
 
             // Return success page - code is in URL, client can extract it
             // Also provide multiple ways for the client to receive the code
@@ -968,8 +1147,8 @@ class MicrosoftGraphServer {
               timestamp: Date.now(),
               sessionId: 'debug-session',
               runId: 'run1',
-              hypothesisId: 'D'
-            })
+              hypothesisId: 'D',
+            }),
           }).catch(() => {});
           // #endregion
 
@@ -1031,22 +1210,24 @@ class MicrosoftGraphServer {
                 userAgent: req.get('user-agent')?.substring(0, 100),
                 hasAuth: !!req.microsoftAuth,
                 query: req.query,
-                url: req.url
+                url: req.url,
               },
               timestamp: Date.now(),
               sessionId: 'debug-session',
               runId: 'run1',
-              hypothesisId: 'E'
-            })
+              hypothesisId: 'E',
+            }),
           }).catch(() => {});
           // #endregion
-          
+
           // Handle simple verification requests (GET requests without query params are likely verification)
           const hasQueryParams = Object.keys(req.query).length > 0;
           const isVerificationRequest = !hasQueryParams || req.query.verify === 'true';
 
           if (isVerificationRequest) {
-            logger.info('Simple verification GET request detected, returning verification response');
+            logger.info(
+              'Simple verification GET request detected, returning verification response'
+            );
             return res.json({
               status: 'ok',
               service: 'Microsoft 365 MCP Server',
@@ -1097,13 +1278,13 @@ class MicrosoftGraphServer {
                   errorMessage: error instanceof Error ? error.message : 'Unknown error',
                   headersSent: res.headersSent,
                   origin: req.headers.origin,
-                  host: req.get('host')
+                  host: req.get('host'),
                 },
                 timestamp: Date.now(),
                 sessionId: 'debug-session',
                 runId: 'run1',
-                hypothesisId: 'G'
-              })
+                hypothesisId: 'G',
+              }),
             }).catch(() => {});
             // #endregion
             if (!res.headersSent) {
@@ -1143,16 +1324,16 @@ class MicrosoftGraphServer {
                 hasAuth: !!req.microsoftAuth,
                 method: req.body?.method,
                 jsonrpc: req.body?.jsonrpc,
-                url: req.url
+                url: req.url,
               },
               timestamp: Date.now(),
               sessionId: 'debug-session',
               runId: 'run1',
-              hypothesisId: 'E'
-            })
+              hypothesisId: 'E',
+            }),
           }).catch(() => {});
           // #endregion
-          
+
           // Log incoming request for debugging
           logger.info('MCP POST request received', {
             contentType: req.get('Content-Type'),
@@ -1167,7 +1348,7 @@ class MicrosoftGraphServer {
           const body = req.body;
           const contentType = req.get('Content-Type') || '';
           const userAgent = req.get('User-Agent') || '';
-          
+
           // Check if this is a verification request from Open WebUI or similar tools
           const isVerificationRequest =
             !body ||
@@ -1178,7 +1359,10 @@ class MicrosoftGraphServer {
             userAgent.includes('open-webui') ||
             req.query?.verify === 'true';
 
-          if (isVerificationRequest && (!body?.jsonrpc || !body?.method || body?.method === 'initialize' && !body?.params)) {
+          if (
+            isVerificationRequest &&
+            (!body?.jsonrpc || !body?.method || (body?.method === 'initialize' && !body?.params))
+          ) {
             logger.info('Verification request detected, returning verification response', {
               hasBody: !!body,
               method: body?.method,
@@ -1205,12 +1389,12 @@ class MicrosoftGraphServer {
             });
 
             await this.server!.connect(transport);
-            
+
             // Ensure response headers are set before handling request
             if (!res.headersSent) {
               res.setHeader('Content-Type', 'application/json');
             }
-            
+
             await transport.handleRequest(req as any, res as any, req.body);
           };
 
@@ -1241,13 +1425,13 @@ class MicrosoftGraphServer {
                   headersSent: res.headersSent,
                   origin: req.headers.origin,
                   host: req.get('host'),
-                  hasAuth: !!req.microsoftAuth
+                  hasAuth: !!req.microsoftAuth,
                 },
                 timestamp: Date.now(),
                 sessionId: 'debug-session',
                 runId: 'run1',
-                hypothesisId: 'G'
-              })
+                hypothesisId: 'G',
+              }),
             }).catch(() => {});
             // #endregion
             if (!res.headersSent) {
@@ -1342,8 +1526,12 @@ class MicrosoftGraphServer {
         app.listen(port, host, () => {
           if (isAllInterfaces) {
             logger.info(`Server listening on all interfaces (${host}:${port})`);
-            logger.info(`  - MCP endpoint: http://0.0.0.0:${port}/mcp (accessible from any interface)`);
-            logger.info(`  - OAuth endpoints: http://0.0.0.0:${port}/auth/* (accessible from any interface)`);
+            logger.info(
+              `  - MCP endpoint: http://0.0.0.0:${port}/mcp (accessible from any interface)`
+            );
+            logger.info(
+              `  - OAuth endpoints: http://0.0.0.0:${port}/auth/* (accessible from any interface)`
+            );
             logger.info(
               `  - OAuth discovery: http://0.0.0.0:${port}/.well-known/oauth-authorization-server (accessible from any interface)`
             );
@@ -1359,8 +1547,12 @@ class MicrosoftGraphServer {
       } else {
         app.listen(port, () => {
           logger.info(`Server listening on all interfaces (0.0.0.0:${port})`);
-          logger.info(`  - MCP endpoint: http://0.0.0.0:${port}/mcp (accessible from any interface)`);
-          logger.info(`  - OAuth endpoints: http://0.0.0.0:${port}/auth/* (accessible from any interface)`);
+          logger.info(
+            `  - MCP endpoint: http://0.0.0.0:${port}/mcp (accessible from any interface)`
+          );
+          logger.info(
+            `  - OAuth endpoints: http://0.0.0.0:${port}/auth/* (accessible from any interface)`
+          );
           logger.info(
             `  - OAuth discovery: http://0.0.0.0:${port}/.well-known/oauth-authorization-server (accessible from any interface)`
           );

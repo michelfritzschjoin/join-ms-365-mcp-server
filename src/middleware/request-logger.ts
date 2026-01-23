@@ -9,6 +9,7 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
   try {
     const startTime = Date.now();
     const requestId = Math.random().toString(36).substring(7);
+    let responseLogged = false; // Track if response has been logged to prevent duplicates
 
     // Log request details
     const requestInfo: Record<string, unknown> = {
@@ -47,7 +48,10 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
 
     res.send = function (body: unknown) {
       try {
-        logResponse(requestId, req, res, startTime, body);
+        if (!responseLogged) {
+          logResponse(requestId, req, res, startTime, body);
+          responseLogged = true;
+        }
       } catch (error) {
         logger.error(`[${requestId}] Error logging response:`, error);
       }
@@ -56,7 +60,10 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
 
     res.json = function (body: unknown) {
       try {
-        logResponse(requestId, req, res, startTime, body);
+        if (!responseLogged) {
+          logResponse(requestId, req, res, startTime, body);
+          responseLogged = true;
+        }
       } catch (error) {
         logger.error(`[${requestId}] Error logging response:`, error);
       }
@@ -65,8 +72,9 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
 
     res.end = function (chunk?: unknown, encoding?: unknown) {
       try {
-        if (chunk && !res.headersSent) {
+        if (chunk && !res.headersSent && !responseLogged) {
           logResponse(requestId, req, res, startTime, chunk);
+          responseLogged = true;
         }
       } catch (error) {
         logger.error(`[${requestId}] Error logging response:`, error);
@@ -115,7 +123,27 @@ function logResponse(
 
   // Log response body if it's small enough
   if (body) {
-    if (typeof body === 'string' && body.length < 5000) {
+    // Handle Buffer objects (common in Express responses)
+    if (Buffer.isBuffer(body)) {
+      try {
+        const bodyStr = body.toString('utf8');
+        if (bodyStr.length < 5000) {
+          try {
+            const parsed = JSON.parse(bodyStr);
+            responseInfo.body = sanitizeResponseBody(parsed);
+          } catch {
+            // Not JSON, log first 500 chars
+            responseInfo.bodyPreview = bodyStr.substring(0, 500) + '... (truncated)';
+          }
+        } else {
+          responseInfo.bodySize = bodyStr.length;
+          responseInfo.bodyPreview = bodyStr.substring(0, 200) + '... (truncated)';
+        }
+      } catch {
+        responseInfo.bodyType = 'Buffer';
+        responseInfo.bodySize = body.length;
+      }
+    } else if (typeof body === 'string' && body.length < 5000) {
       try {
         const parsed = JSON.parse(body);
         responseInfo.body = sanitizeResponseBody(parsed);
@@ -126,17 +154,34 @@ function logResponse(
     } else if (typeof body === 'string') {
       responseInfo.bodySize = body.length;
       responseInfo.bodyPreview = body.substring(0, 200) + '... (truncated)';
-    } else if (typeof body === 'object') {
-      try {
-        const bodyStr = JSON.stringify(body);
-        if (bodyStr.length < 5000) {
-          responseInfo.body = sanitizeResponseBody(body);
-        } else {
-          responseInfo.bodySize = bodyStr.length;
-          responseInfo.bodyPreview = bodyStr.substring(0, 200) + '... (truncated)';
+    } else if (typeof body === 'object' && body !== null) {
+      // Check if it's a Buffer-like object (has numeric indices)
+      if (Array.isArray(body) || (body.constructor?.name === 'Object' && Object.keys(body).some(key => /^\d+$/.test(key)))) {
+        // Might be a serialized Buffer, try to reconstruct
+        try {
+          const bodyStr = JSON.stringify(body);
+          if (bodyStr.length < 5000) {
+            responseInfo.body = sanitizeResponseBody(body);
+          } else {
+            responseInfo.bodySize = bodyStr.length;
+            responseInfo.bodyPreview = bodyStr.substring(0, 200) + '... (truncated)';
+          }
+        } catch {
+          responseInfo.bodyType = typeof body;
         }
-      } catch {
-        responseInfo.bodyType = typeof body;
+      } else {
+        // Regular object
+        try {
+          const bodyStr = JSON.stringify(body);
+          if (bodyStr.length < 5000) {
+            responseInfo.body = sanitizeResponseBody(body);
+          } else {
+            responseInfo.bodySize = bodyStr.length;
+            responseInfo.bodyPreview = bodyStr.substring(0, 200) + '... (truncated)';
+          }
+        } catch {
+          responseInfo.bodyType = typeof body;
+        }
       }
     }
   }
@@ -235,4 +280,3 @@ function sanitizeResponseBody(body: unknown): unknown {
 
   return sanitized;
 }
-
