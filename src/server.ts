@@ -333,26 +333,39 @@ class MicrosoftGraphServer {
         }
         
         // Encode the client URL and state in a new state parameter
-        let enhancedState = originalState || '';
+        // IMPORTANT: Preserve originalState exactly, including empty strings, for CSRF protection
+        let enhancedState = originalState ?? '';
         if (clientUrl) {
           const stateData = {
             client_url: clientUrl,
             redirect_uri: originalRedirectUri || ourCallbackUrl,
-            original_state: originalState || null,
+            // Use undefined check to preserve empty string values
+            original_state: originalState !== undefined ? originalState : null,
           };
           // Encode as base64url (URL-safe base64)
           const base64 = Buffer.from(JSON.stringify(stateData)).toString('base64');
           const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
           enhancedState = base64url;
+          
+          logger.info('Encoded enhanced state for Microsoft OAuth', {
+            hasClientUrl: true,
+            hasRedirectUri: !!originalRedirectUri,
+            originalStatePreserved: originalState !== undefined,
+          });
         } else if (originalRedirectUri && originalRedirectUri !== ourCallbackUrl) {
           // Fallback: use original redirect_uri if it's not our callback
           const stateData = {
             redirect_uri: originalRedirectUri,
-            original_state: originalState || null,
+            original_state: originalState !== undefined ? originalState : null,
           };
           const base64 = Buffer.from(JSON.stringify(stateData)).toString('base64');
           const base64url = base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
           enhancedState = base64url;
+          
+          logger.info('Encoded enhanced state for Microsoft OAuth (redirect_uri only)', {
+            hasRedirectUri: true,
+            originalStatePreserved: originalState !== undefined,
+          });
         }
 
         // Only forward parameters that Microsoft OAuth 2.0 v2.0 supports
@@ -744,70 +757,85 @@ class MicrosoftGraphServer {
                 const paddedBase64 = base64 + (padding ? '='.repeat(4 - padding) : '');
                 const stateData = JSON.parse(Buffer.from(paddedBase64, 'base64').toString('utf8'));
                 
-                // Prefer client_url (extracted from Referer) over redirect_uri
-                clientUrl = stateData.client_url || stateData.redirect_uri;
+                // Extract the client URL and redirect_uri separately
+                clientUrl = stateData.client_url;
                 originalRedirectUri = stateData.redirect_uri;
-                originalState = stateData.original_state || null;
+                // IMPORTANT: Preserve original_state exactly as sent, including empty strings
+                // Use explicit check for undefined to avoid losing empty string values
+                // This is critical for CSRF protection - state must match exactly
+                originalState = stateData.original_state !== undefined ? stateData.original_state : null;
+                
+                logger.info('Decoded state parameter from Microsoft callback', {
+                  hasClientUrl: !!clientUrl,
+                  hasRedirectUri: !!originalRedirectUri,
+                  originalStatePresent: stateData.original_state !== undefined,
+                  originalStateValue: originalState !== null ? `[${originalState.length} chars]` : 'null',
+                });
               } catch {
-                // State is not encoded, use it as-is
+                // State is not encoded, use it as-is (raw state from client)
+                logger.info('State is not base64url-encoded, using raw value');
                 originalState = state;
               }
             }
             
-            // If we have a client URL, redirect to the MCP client
-            if (clientUrl) {
-              // Use client_url as the base, but append /oauth/callback if it's just an origin
-              // MCP clients expect the callback at /oauth/callback per MCP OAuth spec
-              let redirectUrl: URL;
-              try {
-                redirectUrl = new URL(clientUrl);
-                // If client_url is just an origin (no path), append /oauth/callback
-                if (redirectUrl.pathname === '/' || redirectUrl.pathname === '') {
-                  redirectUrl.pathname = '/oauth/callback';
-                }
-              } catch {
-                // Invalid URL, try to construct from redirect_uri
-                if (originalRedirectUri) {
-                  redirectUrl = new URL(originalRedirectUri);
-                } else {
-                  throw new Error('Invalid client URL');
-                }
-              }
-              
-              redirectUrl.searchParams.set('code', code);
-              if (originalState) {
-                redirectUrl.searchParams.set('state', originalState);
-              }
-              
-              logger.info('Redirecting to MCP client with authorization code', {
-                clientUrl: redirectUrl.toString(),
-                codeLength: code.length,
-                originalState,
-              });
-              
-              return res.redirect(redirectUrl.toString());
-            }
-            
-            // Fallback: if we have originalRedirectUri but it's not our callback, use it
+            // PRIORITY 1: Always prefer originalRedirectUri from the MCP client's OAuth request
+            // This is the redirect_uri the client specified and expects to receive the callback
             if (originalRedirectUri) {
               const protocol = req.secure ? 'https' : 'http';
               const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
               
-              // Only redirect if it's not our own callback (to avoid loops)
+              // Only redirect if it's not our own callback (to avoid infinite loops)
               if (originalRedirectUri !== ourCallbackUrl) {
-                const redirectUrl = new URL(originalRedirectUri);
+                try {
+                  const redirectUrl = new URL(originalRedirectUri);
+                  redirectUrl.searchParams.set('code', code);
+                  // CRITICAL: Always include state if it was provided, even if empty string
+                  // MCP clients perform CSRF validation - state must match exactly
+                  if (originalState !== null) {
+                    redirectUrl.searchParams.set('state', originalState);
+                  }
+                  
+                  logger.info('Redirecting to MCP client redirect_uri with authorization code', {
+                    redirectUri: originalRedirectUri,
+                    codeLength: code.length,
+                    stateIncluded: originalState !== null,
+                    stateLength: originalState?.length ?? 0,
+                  });
+                  
+                  return res.redirect(redirectUrl.toString());
+                } catch (urlError) {
+                  logger.warn('Invalid originalRedirectUri, falling back', {
+                    originalRedirectUri,
+                    error: (urlError as Error).message,
+                  });
+                }
+              }
+            }
+            
+            // PRIORITY 2: Use clientUrl (from Referer header) if no valid redirect_uri
+            if (clientUrl) {
+              try {
+                const redirectUrl = new URL(clientUrl);
+                // If client_url is just an origin (no path), append /oauth/callback
+                // per MCP OAuth specification
+                if (redirectUrl.pathname === '/' || redirectUrl.pathname === '') {
+                  redirectUrl.pathname = '/oauth/callback';
+                }
+                
                 redirectUrl.searchParams.set('code', code);
-                if (originalState) {
+                if (originalState !== null) {
                   redirectUrl.searchParams.set('state', originalState);
                 }
                 
-                logger.info('Redirecting to original redirect_uri with authorization code', {
-                  redirectUri: originalRedirectUri,
+                logger.info('Redirecting to MCP client (from Referer) with authorization code', {
+                  clientUrl: redirectUrl.toString(),
                   codeLength: code.length,
-                  originalState,
+                  stateIncluded: originalState !== null,
                 });
                 
                 return res.redirect(redirectUrl.toString());
+              } catch {
+                logger.warn('Invalid clientUrl from Referer', { clientUrl });
               }
             }
 
