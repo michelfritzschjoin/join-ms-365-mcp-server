@@ -156,7 +156,10 @@ function logResponse(
       responseInfo.bodyPreview = body.substring(0, 200) + '... (truncated)';
     } else if (typeof body === 'object' && body !== null) {
       // Check if it's a Buffer-like object (has numeric indices)
-      if (Array.isArray(body) || (body.constructor?.name === 'Object' && Object.keys(body).some(key => /^\d+$/.test(key)))) {
+      if (
+        Array.isArray(body) ||
+        (body.constructor?.name === 'Object' && Object.keys(body).some((key) => /^\d+$/.test(key)))
+      ) {
         // Might be a serialized Buffer, try to reconstruct
         try {
           const bodyStr = JSON.stringify(body);

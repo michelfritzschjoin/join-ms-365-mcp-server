@@ -22,4 +22,3 @@ if (!existsSync(clientPath)) {
     process.exit(1);
   }
 }
-

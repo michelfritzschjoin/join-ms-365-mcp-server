@@ -136,7 +136,12 @@ class MicrosoftGraphServer {
       const { host, port } = parseHttpOption(this.options.http);
 
       const app = express();
-      app.set('trust proxy', true);
+      // Configure trust proxy securely for rate limiting
+      // Use number of proxies instead of 'true' to prevent IP spoofing
+      // In production behind a reverse proxy (nginx/traefik), typically 1 proxy
+      // Set via TRUST_PROXY_COUNT env var or default to 1
+      const trustProxyCount = parseInt(process.env.TRUST_PROXY_COUNT || '1', 10);
+      app.set('trust proxy', trustProxyCount);
 
       // Import middleware
       const { securityHeadersMiddleware } = await import('./middleware/security-headers.js');
@@ -1184,9 +1189,26 @@ class MicrosoftGraphServer {
               logger.info('Token endpoint: Using public client without client_secret');
             }
 
+            // CRITICAL: redirect_uri must match EXACTLY what was sent to Microsoft in /authorize
+            // Microsoft redirects to OUR callback URL, so we must use OUR callback URL here
+            const protocol = req.secure ? 'https' : 'http';
+            const ourCallbackUrl = `${protocol}://${req.get('host')}/callback`;
+            
+            // Use our callback URL (what Microsoft redirected to) instead of client's redirect_uri
+            // The client's redirect_uri is only used for the initial authorization redirect
+            const redirectUri = ourCallbackUrl;
+            
+            logger.info('Token exchange request', {
+              hasCode: !!body.code,
+              hasCodeVerifier: !!body.code_verifier,
+              hasClientSecret: !!clientSecret,
+              redirectUri,
+              clientRedirectUri: body.redirect_uri,
+            });
+
             const result = await exchangeCodeForToken(
               body.code as string,
-              body.redirect_uri as string,
+              redirectUri, // Use our callback URL, not the client's redirect_uri
               clientId,
               clientSecret,
               tenantId,
@@ -1222,9 +1244,28 @@ class MicrosoftGraphServer {
           }
         } catch (error) {
           logger.error('Token endpoint error:', error);
-          res.status(500).json({
+          
+          // Extract more details from the error
+          let errorDescription = 'Internal server error during token exchange';
+          let statusCode = 500;
+          
+          if (error instanceof Error) {
+            errorDescription = error.message;
+            // Check if it's a Microsoft API error (400/401/403)
+            if (error.message.includes('400') || error.message.includes('401') || error.message.includes('403')) {
+              statusCode = 400; // Return 400 for client errors from Microsoft
+            }
+            // Log the full error for debugging
+            logger.error('Token exchange error details:', {
+              message: error.message,
+              stack: error.stack,
+              body: req.body ? { ...req.body, code: req.body.code ? '[REDACTED]' : undefined } : undefined,
+            });
+          }
+          
+          res.status(statusCode).json({
             error: 'server_error',
-            error_description: 'Internal server error during token exchange',
+            error_description: errorDescription,
           });
         }
       });

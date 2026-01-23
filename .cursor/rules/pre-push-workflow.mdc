@@ -1,0 +1,111 @@
+---
+description: Pre-Push Quality Checks - MUST run before every git push
+globs:
+  - "**/*.ts"
+  - "**/*.mts"
+  - "**/*.js"
+  - "**/*.mjs"
+  - "**/*.json"
+  - "**/*.md"
+alwaysApply: true
+---
+
+# Pre-Push Quality Workflow
+
+**CRITICAL**: Before EVERY `git push`, you MUST run these checks in order. Never push code that fails any of these checks.
+
+## Required Pre-Push Checklist
+
+### 1. Code Formatting (REQUIRED)
+
+```bash
+# Check formatting first
+npm run format:check
+
+# If formatting issues found, fix them:
+npm run format
+
+# Then verify no issues remain
+npm run format:check
+```
+
+### 2. Linting (REQUIRED)
+
+```bash
+# Check for linting errors
+npm run lint
+
+# Auto-fix if possible
+npm run lint:fix
+```
+
+### 3. Build Verification (REQUIRED)
+
+```bash
+# Ensure project builds without errors
+npm run build
+```
+
+### 4. Test Suite (REQUIRED)
+
+```bash
+# Run all tests
+npm test
+```
+
+### 5. Full Verification (RECOMMENDED)
+
+```bash
+# Run complete verification pipeline
+npm run verify
+```
+
+## Quick Pre-Push Command
+
+Run this single command before pushing (PowerShell):
+
+```powershell
+npm run format; npm run lint; npm run build; npm test
+```
+
+Or use the verify script which includes all checks:
+
+```bash
+npm run verify
+```
+
+## Common Issues
+
+### Format Check Fails
+
+```
+[warn] Code style issues found in X files. Run Prettier with --write to fix.
+```
+
+**Solution**: Run `npm run format` to auto-fix, then commit the changes.
+
+### Lint Errors
+
+**Solution**: Run `npm run lint:fix` for auto-fixable issues, manually fix others.
+
+### Build Fails
+
+**Solution**: Check TypeScript errors in the output, fix them before pushing.
+
+## Git Hooks (Optional but Recommended)
+
+Install husky for automatic pre-push checks:
+
+```bash
+npm install -D husky
+npx husky init
+echo "npm run verify" > .husky/pre-push
+```
+
+## Remember
+
+- ❌ NEVER push without running `npm run format:check`
+- ❌ NEVER push with failing tests
+- ❌ NEVER push with build errors
+- ✅ ALWAYS run `npm run verify` for complete validation
+- ✅ ALWAYS commit formatting fixes separately with message: `style: fix code formatting`

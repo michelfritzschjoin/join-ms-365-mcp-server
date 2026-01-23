@@ -88,9 +88,32 @@ export async function exchangeCodeForToken(
   });
 
   if (!response.ok) {
-    const error = await response.text();
-    logger.error(`Failed to exchange code for token: ${error}`);
-    throw new Error(`Failed to exchange code for token: ${error}`);
+    const errorText = await response.text();
+    let errorMessage = `Token exchange failed: ${response.status}`;
+    
+    try {
+      // Try to parse error as JSON for better error messages
+      const errorJson = JSON.parse(errorText);
+      if (errorJson.error) {
+        errorMessage = `Token exchange failed: ${errorJson.error} - ${errorJson.error_description || errorText}`;
+      } else {
+        errorMessage = `Token exchange failed: ${response.status} - ${errorText}`;
+      }
+    } catch {
+      // Not JSON, use text as-is
+      errorMessage = `Token exchange failed: ${response.status} - ${errorText}`;
+    }
+    
+    logger.error(`Failed to exchange code for token:`, {
+      status: response.status,
+      statusText: response.statusText,
+      error: errorText,
+      redirectUri,
+      hasCodeVerifier: !!codeVerifier,
+      hasClientSecret: !!clientSecret,
+    });
+    
+    throw new Error(errorMessage);
   }
 
   return response.json();
