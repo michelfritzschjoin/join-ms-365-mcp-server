@@ -167,37 +167,60 @@ async function executeGraphTool(
       }
     }
 
-    // Handle search parameter for list-users tool - requires property:value format
-    if (tool.alias === 'list-users' && queryParams['$search']) {
+    // Handle search parameter for directory endpoints that require special formatting
+    // Microsoft Graph API requirements:
+    // - /users: requires property:value format (e.g., "displayName:John") + ConsistencyLevel: eventual
+    // - /groups: requires property:value format (e.g., "displayName:Team") + ConsistencyLevel: eventual
+    // - /sites: requires ConsistencyLevel: eventual (but supports free-text search)
+
+    // Endpoints that require ConsistencyLevel: eventual header for $search
+    const requiresConsistencyLevelHeader = ['list-users', 'search-sharepoint-sites'];
+
+    // Endpoints that require property:value format for $search
+    const requiresPropertyValueFormat = ['list-users'];
+
+    if (queryParams['$search']) {
       let searchValue = queryParams['$search'];
 
       // Remove surrounding quotes if present (handles both single and double quotes)
-      // Match quotes at start AND end, or just start, or just end
       const quotePattern = /^(["'])(.*)\1$/;
       const match = searchValue.match(quotePattern);
       const cleanSearchValue = match ? match[2] : searchValue;
 
-      // Check if search value is already in property:value format
-      // Format: property:value (e.g., "displayName:John" or displayName:John)
-      const propertyValuePattern = /^[a-zA-Z]+:/i;
+      // Check if this endpoint requires property:value format
+      if (requiresPropertyValueFormat.includes(tool.alias)) {
+        // Check if search value is already in property:value format
+        const propertyValuePattern = /^[a-zA-Z]+:/i;
 
-      if (!propertyValuePattern.test(cleanSearchValue)) {
-        // Auto-format: prepend displayName: if not already formatted
-        queryParams['$search'] = `"displayName:${cleanSearchValue}"`;
-        logger.info(
-          `Auto-formatted search query for list-users: "${searchValue}" -> "${queryParams['$search']}"`
-        );
+        if (!propertyValuePattern.test(cleanSearchValue)) {
+          // Auto-format: prepend displayName: if not already formatted
+          queryParams['$search'] = `"displayName:${cleanSearchValue}"`;
+          logger.info(
+            `Auto-formatted search query for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
+          );
+        } else {
+          // Already in property:value format, ensure it's wrapped in double quotes
+          queryParams['$search'] = `"${cleanSearchValue}"`;
+          logger.info(
+            `Search query already formatted, ensuring quotes: "${searchValue}" -> "${queryParams['$search']}"`
+          );
+        }
       } else {
-        // Already in property:value format, ensure it's wrapped in double quotes
-        queryParams['$search'] = `"${cleanSearchValue}"`;
-        logger.info(
-          `Search query already formatted, ensuring quotes: "${searchValue}" -> "${queryParams['$search']}"`
-        );
+        // For endpoints that don't require property:value format (like SharePoint sites)
+        // Just ensure the value is wrapped in double quotes
+        if (!searchValue.startsWith('"') || !searchValue.endsWith('"')) {
+          queryParams['$search'] = `"${cleanSearchValue}"`;
+          logger.info(
+            `Wrapped search query in quotes for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
+          );
+        }
       }
 
-      // Set ConsistencyLevel header for search queries on /users endpoint
-      headers['ConsistencyLevel'] = 'eventual';
-      logger.info('Setting ConsistencyLevel header to "eventual" for user search');
+      // Set ConsistencyLevel header if required for this endpoint
+      if (requiresConsistencyLevelHeader.includes(tool.alias)) {
+        headers['ConsistencyLevel'] = 'eventual';
+        logger.info(`Setting ConsistencyLevel header to "eventual" for ${tool.alias} search`);
+      }
     }
 
     // Handle timezone parameter for calendar endpoints
