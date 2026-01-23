@@ -6,6 +6,7 @@ import logger from './logger.js';
 import KnowledgeBase, { type KnowledgeBaseData } from './knowledge-base.js';
 import SynonymExpander from './synonym-expander.js';
 import type { RepairHistoryEntry } from './graph-api-repair.js';
+import LearningAnalytics, { type PerformanceMetrics } from './learning-analytics.js';
 
 export interface SearchResult {
   items: unknown[];
@@ -25,11 +26,13 @@ export interface QueryPattern {
 export class LearningSystem {
   private knowledgeBase: KnowledgeBase;
   private synonymExpander: SynonymExpander;
+  private analytics: LearningAnalytics;
   private readonly learningEnabled: boolean;
 
   constructor(knowledgeBase: KnowledgeBase, synonymExpander: SynonymExpander) {
     this.knowledgeBase = knowledgeBase;
     this.synonymExpander = synonymExpander;
+    this.analytics = new LearningAnalytics(knowledgeBase);
     this.learningEnabled =
       process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
       process.env.MS365_MCP_LEARNING_ENABLED !== '0';
@@ -52,8 +55,11 @@ export class LearningSystem {
       const success = results.items.length > 0 || userFeedback === 'success';
       const failure = results.items.length === 0 || userFeedback === 'failure';
 
+      // User feedback is weighted higher - if provided, use it directly
+      const weight = userFeedback ? 2 : 1; // User feedback counts double
+
       // 1. Record successful query pattern
-      if (success && results.items.length > 0) {
+      if (success && (results.items.length > 0 || userFeedback === 'success')) {
         this.knowledgeBase.recordSuccessfulQuery(
           query,
           results.items.length,
@@ -63,7 +69,10 @@ export class LearningSystem {
 
         // Record query pattern if entity types are known
         if (results.entityTypes && results.entityTypes.length > 0) {
-          this.knowledgeBase.recordQueryPattern(query, results.entityTypes, true, context);
+          // Record multiple times if user feedback provided (weighted learning)
+          for (let i = 0; i < weight; i++) {
+            this.knowledgeBase.recordQueryPattern(query, results.entityTypes, true, context);
+          }
         }
       }
 
@@ -77,23 +86,86 @@ export class LearningSystem {
         this.learnDataLocations(query, results);
       }
 
-      // 4. Update entity mappings
+      // 4. Update entity mappings (weighted if user feedback)
       if (success && results.entityTypes) {
         for (const et of results.entityTypes) {
-          this.knowledgeBase.recordEntityMapping(query, [et], true);
+          for (let i = 0; i < weight; i++) {
+            this.knowledgeBase.recordEntityMapping(query, [et], true);
+          }
         }
       }
 
-      // 5. Persist knowledge (async, don't wait)
+      // 5. Apply time decay before saving
+      this.applyTimeDecayIfEnabled();
+
+      // 6. Persist knowledge (async, don't wait)
       this.knowledgeBase.save().catch((error) => {
         logger.warn(`Failed to persist knowledge base: ${error}`);
       });
 
       logger.debug(
-        `Learning system: recorded ${success ? 'successful' : 'failed'} search for "${query}"`
+        `Learning system: recorded ${success ? 'successful' : 'failed'} search for "${query}"${userFeedback ? ` (user feedback: ${userFeedback})` : ''}`
       );
     } catch (error) {
       logger.warn(`Learning system error: ${error}`);
+    }
+  }
+
+  /**
+   * Record explicit user feedback
+   * This is weighted higher than implicit learning from search results
+   */
+  async recordUserFeedback(
+    query: string,
+    feedbackType: 'helpful' | 'not_helpful' | 'incorrect' | 'correct',
+    resultId?: string,
+    comment?: string,
+    context?: string
+  ): Promise<void> {
+    if (!this.learningEnabled) {
+      return;
+    }
+
+    try {
+      // Record feedback in knowledge base
+      this.knowledgeBase.recordUserFeedback(query, feedbackType, resultId, comment, context);
+
+      // If feedback is positive, strengthen the pattern
+      if (feedbackType === 'helpful' || feedbackType === 'correct') {
+        // Get existing patterns for this query
+        const pattern = this.knowledgeBase.getQueryPattern(query);
+        if (pattern) {
+          // Boost confidence and success count
+          for (let i = 0; i < 3; i++) {
+            // Record multiple times to boost weight
+            this.knowledgeBase.recordQueryPattern(
+              query,
+              pattern.entityTypes,
+              true,
+              context || pattern.context
+            );
+          }
+
+          // Increase confidence score
+          const currentConfidence = this.knowledgeBase.getConfidenceScore(query);
+          const newConfidence = Math.min(1.0, currentConfidence + 0.1);
+          this.knowledgeBase.calculateConfidence(query, newConfidence);
+        }
+      } else if (feedbackType === 'not_helpful' || feedbackType === 'incorrect') {
+        // Negative feedback - decrease confidence
+        const currentConfidence = this.knowledgeBase.getConfidenceScore(query);
+        const newConfidence = Math.max(0.0, currentConfidence - 0.1);
+        this.knowledgeBase.calculateConfidence(query, newConfidence);
+      }
+
+      // Persist knowledge (async, don't wait)
+      this.knowledgeBase.save().catch((error) => {
+        logger.warn(`Failed to persist user feedback: ${error}`);
+      });
+
+      logger.info(`User feedback recorded: ${feedbackType} for query "${query}"`);
+    } catch (error) {
+      logger.warn(`Failed to record user feedback: ${error}`);
     }
   }
 
@@ -368,6 +440,75 @@ export class LearningSystem {
     }
 
     return null;
+  }
+
+  /**
+   * Get confidence score for a pattern
+   */
+  getConfidenceScore(patternKey: string): number {
+    return this.knowledgeBase.getConfidenceScore(patternKey);
+  }
+
+  /**
+   * Get performance metrics
+   */
+  getPerformanceMetrics(): PerformanceMetrics {
+    // Update confidence scores before calculating metrics
+    this.analytics.updateAllConfidenceScores();
+    return this.analytics.calculatePerformanceMetrics();
+  }
+
+  /**
+   * Update confidence scores for all patterns
+   */
+  updateConfidenceScores(): void {
+    this.analytics.updateAllConfidenceScores();
+  }
+
+  /**
+   * Apply time decay to patterns if enabled
+   */
+  private applyTimeDecayIfEnabled(): void {
+    const decayDays = parseInt(process.env.MS365_MCP_LEARNING_DECAY_DAYS || '90', 10);
+    const decayFactor = parseFloat(process.env.MS365_MCP_LEARNING_DECAY_FACTOR || '0.1');
+
+    if (decayDays > 0 && decayFactor > 0) {
+      this.knowledgeBase.applyTimeDecay(decayDays, decayFactor);
+    }
+  }
+
+  /**
+   * Learn from tool usage patterns
+   */
+  learnFromToolUsage(
+    toolName: string,
+    usedWith: string[],
+    success: boolean,
+    resultsCount?: number
+  ): void {
+    if (!this.learningEnabled) {
+      return;
+    }
+
+    try {
+      this.knowledgeBase.recordToolUsage(toolName, usedWith, success, resultsCount);
+
+      // Persist knowledge (async, don't wait)
+      this.knowledgeBase.save().catch((error) => {
+        logger.warn(`Failed to persist tool usage: ${error}`);
+      });
+
+      logger.debug(`Learned from tool usage: ${toolName} with ${usedWith.length} other tools`);
+    } catch (error) {
+      logger.warn(`Failed to learn from tool usage: ${error}`);
+    }
+  }
+
+  /**
+   * Get recommended tool combinations
+   */
+  getRecommendedToolCombinations(toolName: string, limit: number = 5): string[] {
+    return this.knowledgeBase.getRecommendedToolCombinations(toolName, limit);
   }
 }
 

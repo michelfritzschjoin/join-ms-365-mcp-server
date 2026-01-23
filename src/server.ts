@@ -10,6 +10,7 @@ import { registerDiscoveryTools as registerIntelligentDiscoveryTools } from './d
 import { registerCompoundTools } from './compound-tools.js';
 import GraphClient from './graph-client.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
+import KnowledgeBase from './knowledge-base.js';
 import { MicrosoftOAuthProvider } from './oauth-provider.js';
 import {
   exchangeCodeForToken,
@@ -92,12 +93,15 @@ class MicrosoftGraphServer {
         this.options.orgMode
       );
     } else {
+      // Initialize knowledge base for tool usage learning
+      const knowledgeBase = new KnowledgeBase();
       registerGraphTools(
         this.server,
         this.graphClient,
         this.options.readOnly,
         this.options.enabledTools,
-        this.options.orgMode
+        this.options.orgMode,
+        knowledgeBase
       );
     }
 

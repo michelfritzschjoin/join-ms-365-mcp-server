@@ -12,6 +12,8 @@ import SynonymExpander from './synonym-expander.js';
 import QueryRefiner from './query-refiner.js';
 import LearningSystem from './learning-system.js';
 import KnowledgeBase from './knowledge-base.js';
+import LearningDashboard from './learning-dashboard.js';
+import NLPEnhancer from './nlp-enhancer.js';
 import ToolCombiner from './tool-combiner.js';
 import DataAggregator from './data-aggregator.js';
 import DownloadLinkGenerator from './download-link-generator.js';
@@ -22,6 +24,7 @@ let searchStrategy: SearchFirstStrategy | null = null;
 let deepResearchEngine: DeepResearchEngine | null = null;
 let dataAggregator: DataAggregator | null = null;
 let downloadLinkGenerator: DownloadLinkGenerator | null = null;
+let learningDashboard: LearningDashboard | null = null;
 
 /**
  * Initialize discovery components
@@ -54,6 +57,10 @@ function initializeDiscoveryComponents(graphClient: GraphClient, secrets: AppSec
     downloadLinkGenerator,
     secrets
   );
+
+  // Initialize learning dashboard
+  const nlpEnhancer = new NLPEnhancer();
+  learningDashboard = new LearningDashboard(learningSystem, knowledgeBase, nlpEnhancer);
 }
 
 /**
@@ -842,6 +849,350 @@ Even if no results are found, this confirms the information is not in the user's
           },
         ],
       };
+    }
+  );
+
+  // ============================================================================
+  // USER FEEDBACK TOOL - For explicit user feedback on search results
+  // ============================================================================
+
+  server.tool(
+    'provide-feedback',
+    `Provide explicit feedback on search results to help the learning system improve.
+
+This tool allows users to give feedback on search results, which helps the system learn
+which queries and patterns work well. User feedback is weighted higher than implicit
+learning from search results.
+
+Feedback types:
+- helpful: The search results were helpful and relevant
+- not_helpful: The search results were not helpful or relevant
+- correct: The search results were correct and accurate
+- incorrect: The search results were incorrect or inaccurate
+
+The learning system will use this feedback to:
+- Improve query pattern confidence scores
+- Adjust entity type recommendations
+- Enhance synonym learning
+- Refine data location mappings`,
+    {
+      query: z.string().describe('The original search query that was used').optional(),
+      resultId: z
+        .string()
+        .describe('Optional identifier for the specific result being feedback on')
+        .optional(),
+      feedbackType: z
+        .enum(['helpful', 'not_helpful', 'correct', 'incorrect'])
+        .describe('Type of feedback: helpful, not_helpful, correct, or incorrect'),
+      comment: z.string().describe('Optional comment explaining the feedback').optional(),
+      context: z
+        .string()
+        .describe('Optional context about the search (e.g., entity types, sources)')
+        .optional(),
+    },
+    {
+      title: 'provide-feedback',
+      readOnlyHint: false,
+      openWorldHint: false,
+    },
+    async ({ query, resultId, feedbackType, comment, context }) => {
+      if (!searchStrategy) {
+        throw new Error('Discovery components not initialized');
+      }
+
+      // Get learning system from search strategy
+      const learningSystem = (searchStrategy as any).learningSystem as LearningSystem;
+      if (!learningSystem) {
+        throw new Error('Learning system not available');
+      }
+
+      if (!query) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: 'Query is required for feedback',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      try {
+        await learningSystem.recordUserFeedback(query, feedbackType, resultId, comment, context);
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  message: `Feedback recorded: ${feedbackType} for query "${query}"`,
+                  feedbackType,
+                  query,
+                  resultId,
+                  comment,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Failed to record user feedback: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: `Failed to record feedback: ${error}`,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ============================================================================
+  // EXPORT/IMPORT TOOLS - For knowledge base management
+  // ============================================================================
+
+  server.tool(
+    'export-knowledge-base',
+    `Export the knowledge base as JSON for backup or sharing.
+
+The knowledge base contains all learned patterns, synonyms, entity mappings, and
+user feedback. This tool allows you to export it for backup purposes or to share
+learned patterns with other instances.`,
+    {},
+    {
+      title: 'export-knowledge-base',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async () => {
+      if (!searchStrategy) {
+        throw new Error('Discovery components not initialized');
+      }
+
+      const knowledgeBase = (searchStrategy as any).knowledgeBase as KnowledgeBase;
+      if (!knowledgeBase) {
+        throw new Error('Knowledge base not available');
+      }
+
+      try {
+        const exported = knowledgeBase.exportKnowledgeBase();
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  message: 'Knowledge base exported successfully',
+                  data: JSON.parse(exported),
+                  size: exported.length,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Failed to export knowledge base: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: `Failed to export knowledge base: ${error}`,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  server.tool(
+    'import-knowledge-base',
+    `Import a knowledge base from JSON.
+
+This tool allows you to import a previously exported knowledge base. The imported
+data will be merged with the existing knowledge base, preserving existing patterns
+while adding new ones.`,
+    {
+      data: z.string().describe('JSON string of the knowledge base to import'),
+      merge: z
+        .boolean()
+        .describe('If true, merge with existing knowledge base. If false, replace it.')
+        .optional()
+        .default(true),
+    },
+    {
+      title: 'import-knowledge-base',
+      readOnlyHint: false,
+      openWorldHint: false,
+    },
+    async ({ data, merge = true }) => {
+      if (!searchStrategy) {
+        throw new Error('Discovery components not initialized');
+      }
+
+      const knowledgeBase = (searchStrategy as any).knowledgeBase as KnowledgeBase;
+      if (!knowledgeBase) {
+        throw new Error('Knowledge base not available');
+      }
+
+      try {
+        if (merge) {
+          // Parse and merge
+          const imported = JSON.parse(data);
+          knowledgeBase.mergeKnowledgeBase(imported);
+        } else {
+          // Replace
+          knowledgeBase.importKnowledgeBase(data);
+        }
+
+        // Save after import
+        await knowledgeBase.save();
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: true,
+                  message: `Knowledge base ${merge ? 'merged' : 'imported'} successfully`,
+                  merged: merge,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Failed to import knowledge base: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: `Failed to import knowledge base: ${error}`,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  // ============================================================================
+  // LEARNING DASHBOARD TOOL - For learning insights and statistics
+  // ============================================================================
+
+  server.tool(
+    'get-learning-insights',
+    `Get insights and statistics about the learning system.
+
+This tool provides comprehensive analytics about the learning system including:
+- Overall performance metrics (success rate, average results, confidence scores)
+- Top performing query patterns
+- Confidence score distribution
+- Tool usage statistics
+- Performance trends over time
+- Pattern clusters
+
+Use this to understand how well the learning system is performing and which
+patterns are most effective.`,
+    {
+      days: z
+        .number()
+        .describe('Number of days for performance trends (default: 30)')
+        .optional()
+        .default(30),
+      includeClusters: z
+        .boolean()
+        .describe('Include pattern cluster information (default: true)')
+        .optional()
+        .default(true),
+    },
+    {
+      title: 'get-learning-insights',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async ({ days = 30, includeClusters = true }) => {
+      if (!learningDashboard) {
+        throw new Error('Learning dashboard not initialized');
+      }
+
+      try {
+        const insights = learningDashboard.getLearningInsights();
+
+        // Optionally exclude clusters
+        if (!includeClusters) {
+          delete insights.clusters;
+        }
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(insights, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Failed to get learning insights: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: `Failed to get learning insights: ${error}`,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
     }
   );
 

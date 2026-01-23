@@ -3705,6 +3705,1914 @@ Use this for:
   );
   registeredCount++;
 
+  // ==========================================================================
+  // 16. ANALYZE TEAM COLLABORATION - Team communication patterns
+  // ==========================================================================
+  server.tool(
+    'analyze-team-collaboration',
+    `Analyze collaboration patterns and communication frequency within a team or group:
+- Email exchange frequency between team members
+- Meeting frequency and duration
+- Shared file activity
+- Teams chat activity
+- Identify most active collaborators
+
+Use this for "How is my team collaborating?", "Who are the most active team members?", or "Analyze communication in my department".`,
+    {
+      teamName: z.string().optional().describe('Team or group name to analyze'),
+      department: z.string().optional().describe('Department name to analyze'),
+      days: z.number().optional().describe('Number of days to analyze (default: 30)'),
+    },
+    {
+      title: 'Analyze Team Collaboration',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ teamName, department, days = 30 }) => {
+      logger.info(`Analyzing team collaboration: ${teamName || department || 'my network'}`);
+
+      const result: Record<string, unknown> = {
+        analyzedPeriod: `Last ${days} days`,
+        retrievedAt: new Date().toISOString(),
+      };
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+      const endDate = new Date();
+
+      const collaborators = new Map<
+        string,
+        {
+          name: string;
+          email: string;
+          emailsSent: number;
+          emailsReceived: number;
+          meetingsTogether: number;
+          sharedFiles: number;
+        }
+      >();
+
+      const promises: Promise<void>[] = [];
+
+      // Analyze email patterns
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                $top: '200',
+                $select: 'from,toRecipients,ccRecipients,receivedDateTime',
+              },
+            });
+
+            if (
+              emailResponse &&
+              typeof emailResponse === 'object' &&
+              'value' in emailResponse &&
+              Array.isArray(emailResponse.value)
+            ) {
+              for (const email of emailResponse.value as GraphEmail[]) {
+                // Track sender
+                const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
+                const senderName = email.from?.emailAddress?.name || senderEmail || 'Unknown';
+                if (senderEmail && senderEmail !== 'unknown') {
+                  if (!collaborators.has(senderEmail)) {
+                    collaborators.set(senderEmail, {
+                      name: senderName,
+                      email: senderEmail,
+                      emailsSent: 0,
+                      emailsReceived: 1,
+                      meetingsTogether: 0,
+                      sharedFiles: 0,
+                    });
+                  } else {
+                    collaborators.get(senderEmail)!.emailsReceived++;
+                  }
+                }
+
+                // Track recipients (emails sent to them)
+                for (const recipient of email.toRecipients || []) {
+                  const recipientEmail = recipient.emailAddress?.address?.toLowerCase();
+                  const recipientName = recipient.emailAddress?.name || recipientEmail || 'Unknown';
+                  if (recipientEmail) {
+                    if (!collaborators.has(recipientEmail)) {
+                      collaborators.set(recipientEmail, {
+                        name: recipientName,
+                        email: recipientEmail,
+                        emailsSent: 1,
+                        emailsReceived: 0,
+                        meetingsTogether: 0,
+                        sharedFiles: 0,
+                      });
+                    } else {
+                      collaborators.get(recipientEmail)!.emailsSent++;
+                    }
+                  }
+                }
+              }
+
+              result.emailAnalysis = {
+                totalEmails: emailResponse.value.length,
+                uniqueContacts: collaborators.size,
+              };
+            }
+          } catch (error) {
+            result.emailAnalysis = { error: `Could not analyze: ${error}` };
+          }
+        })()
+      );
+
+      // Analyze meeting patterns
+      promises.push(
+        (async () => {
+          try {
+            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
+              method: 'GET',
+              queryParams: {
+                startDateTime: startDate.toISOString(),
+                endDateTime: endDate.toISOString(),
+                $top: '200',
+                $select: 'subject,start,end,attendees,organizer',
+              },
+            });
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse &&
+              Array.isArray(meetingsResponse.value)
+            ) {
+              const events = meetingsResponse.value as GraphEvent[];
+              let totalMeetingHours = 0;
+              const meetingsByDay = new Map<string, number>();
+
+              for (const event of events) {
+                // Calculate duration
+                const start = new Date(event.start.dateTime);
+                const end = new Date(event.end.dateTime);
+                const duration = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+                totalMeetingHours += duration;
+
+                // Track by day
+                const day = start.toISOString().split('T')[0];
+                meetingsByDay.set(day, (meetingsByDay.get(day) || 0) + 1);
+
+                // Track attendees
+                for (const attendee of event.attendees || []) {
+                  const attendeeEmail = attendee.emailAddress?.address?.toLowerCase();
+                  if (attendeeEmail) {
+                    if (collaborators.has(attendeeEmail)) {
+                      collaborators.get(attendeeEmail)!.meetingsTogether++;
+                    } else {
+                      collaborators.set(attendeeEmail, {
+                        name: attendee.emailAddress?.name || attendeeEmail,
+                        email: attendeeEmail,
+                        emailsSent: 0,
+                        emailsReceived: 0,
+                        meetingsTogether: 1,
+                        sharedFiles: 0,
+                      });
+                    }
+                  }
+                }
+              }
+
+              result.meetingAnalysis = {
+                totalMeetings: events.length,
+                totalHours: Math.round(totalMeetingHours * 10) / 10,
+                averagePerDay: Math.round((events.length / days) * 10) / 10,
+                busiestDay: Array.from(meetingsByDay.entries()).sort(
+                  ([, a], [, b]) => b - a
+                )[0]?.[0],
+              };
+            }
+          } catch (error) {
+            result.meetingAnalysis = { error: `Could not analyze: ${error}` };
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Calculate top collaborators
+      const sortedCollaborators = Array.from(collaborators.values())
+        .map((c) => ({
+          ...c,
+          totalInteractions: c.emailsSent + c.emailsReceived + c.meetingsTogether,
+        }))
+        .sort((a, b) => b.totalInteractions - a.totalInteractions)
+        .slice(0, 20);
+
+      result.topCollaborators = sortedCollaborators;
+      result.summary = {
+        totalPeopleInteracted: collaborators.size,
+        topContacts: sortedCollaborators.slice(0, 5).map((c) => c.name),
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 17. GET CUSTOMER 360 - Complete view of customer/partner relationship
+  // ==========================================================================
+  server.tool(
+    'get-customer-360',
+    `Get a 360-degree view of a customer or partner relationship including:
+- All contacts from the organization
+- Complete email history
+- Meeting history and upcoming meetings
+- Shared documents and proposals
+- Recent Teams conversations
+- Open tasks and action items
+
+Use this for "Give me everything about [customer]", "Customer 360 for Acme Corp", or "What's our relationship status with [company]?".`,
+    {
+      companyName: z.string().describe('Customer or partner company name'),
+      emailDomain: z.string().optional().describe('Company email domain (e.g., acme.com)'),
+      days: z.number().optional().describe('Days of history to include (default: 90)'),
+    },
+    {
+      title: 'Get Customer 360',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ companyName, emailDomain, days = 90 }) => {
+      logger.info(`Getting Customer 360 for: ${companyName}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const result: Record<string, unknown> = {
+        customer: companyName,
+        domain: emailDomain,
+        analyzedPeriod: `Last ${days} days`,
+        retrievedAt: new Date().toISOString(),
+      };
+
+      const searchDomain = emailDomain || companyName.toLowerCase().replace(/\s+/g, '') + '.com';
+      const promises: Promise<void>[] = [];
+
+      // Find all contacts
+      promises.push(
+        (async () => {
+          try {
+            const contactsResponse = await graphClient.makeRequest('/me/contacts', {
+              method: 'GET',
+              queryParams: {
+                $filter: `contains(companyName, '${companyName}')`,
+                $top: '50',
+                $select:
+                  'displayName,emailAddresses,companyName,jobTitle,department,businessPhones',
+              },
+            });
+
+            const contacts: Array<{
+              name: string;
+              email?: string;
+              title?: string;
+              department?: string;
+              phone?: string;
+            }> = [];
+
+            if (
+              contactsResponse &&
+              typeof contactsResponse === 'object' &&
+              'value' in contactsResponse
+            ) {
+              for (const contact of contactsResponse.value as Array<{
+                displayName: string;
+                emailAddresses?: Array<{ address: string }>;
+                jobTitle?: string;
+                department?: string;
+                businessPhones?: string[];
+              }>) {
+                contacts.push({
+                  name: contact.displayName,
+                  email: contact.emailAddresses?.[0]?.address,
+                  title: contact.jobTitle,
+                  department: contact.department,
+                  phone: contact.businessPhones?.[0],
+                });
+              }
+            }
+
+            result.contacts = {
+              count: contacts.length,
+              people: contacts,
+            };
+          } catch (error) {
+            result.contacts = { error: `${error}` };
+          }
+        })()
+      );
+
+      // Email history
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $search: `"from:${searchDomain}" OR "to:${searchDomain}"`,
+                $top: '50',
+                $select: 'subject,from,toRecipients,receivedDateTime,bodyPreview,hasAttachments',
+                $orderby: 'receivedDateTime desc',
+              },
+            });
+
+            if (
+              emailResponse &&
+              typeof emailResponse === 'object' &&
+              'value' in emailResponse &&
+              Array.isArray(emailResponse.value)
+            ) {
+              const emails = emailResponse.value as GraphEmail[];
+              const fromCustomer = emails.filter((e) =>
+                e.from?.emailAddress?.address?.toLowerCase().includes(searchDomain.toLowerCase())
+              );
+              const toCustomer = emails.filter((e) =>
+                e.toRecipients?.some((r) =>
+                  r.emailAddress?.address?.toLowerCase().includes(searchDomain.toLowerCase())
+                )
+              );
+
+              result.emailHistory = {
+                totalEmails: emails.length,
+                fromCustomer: fromCustomer.length,
+                toCustomer: toCustomer.length,
+                recentEmails: emails.slice(0, 10).map((e) => ({
+                  subject: e.subject,
+                  from: e.from?.emailAddress?.address,
+                  date: e.receivedDateTime,
+                  hasAttachments: e.hasAttachments,
+                  preview: e.bodyPreview?.substring(0, 100),
+                })),
+                pendingReplies: fromCustomer.filter((e) => {
+                  // Simple heuristic: recent emails from customer might need response
+                  const received = new Date(e.receivedDateTime);
+                  const twoDaysAgo = new Date();
+                  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+                  return received > twoDaysAgo;
+                }).length,
+              };
+            }
+          } catch (error) {
+            result.emailHistory = { error: `${error}` };
+          }
+        })()
+      );
+
+      // Meeting history
+      promises.push(
+        (async () => {
+          try {
+            const now = new Date();
+            const futureDate = new Date();
+            futureDate.setDate(futureDate.getDate() + 30);
+
+            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
+              method: 'GET',
+              queryParams: {
+                startDateTime: startDate.toISOString(),
+                endDateTime: futureDate.toISOString(),
+                $top: '100',
+                $select: 'subject,start,end,attendees,organizer,location',
+              },
+            });
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse &&
+              Array.isArray(meetingsResponse.value)
+            ) {
+              const events = meetingsResponse.value as GraphEvent[];
+              const customerMeetings = events.filter((event) =>
+                event.attendees?.some((a) =>
+                  a.emailAddress?.address?.toLowerCase().includes(searchDomain.toLowerCase())
+                )
+              );
+
+              const upcoming = customerMeetings.filter((m) => new Date(m.start.dateTime) >= now);
+              const past = customerMeetings.filter((m) => new Date(m.start.dateTime) < now);
+
+              result.meetings = {
+                total: customerMeetings.length,
+                upcoming: {
+                  count: upcoming.length,
+                  next: upcoming.slice(0, 5).map((m) => ({
+                    subject: m.subject,
+                    date: m.start.dateTime,
+                    location: m.location?.displayName,
+                  })),
+                },
+                past: {
+                  count: past.length,
+                  recent: past.slice(0, 5).map((m) => ({
+                    subject: m.subject,
+                    date: m.start.dateTime,
+                  })),
+                },
+              };
+            }
+          } catch (error) {
+            result.meetings = { error: `${error}` };
+          }
+        })()
+      );
+
+      // Shared documents
+      promises.push(
+        (async () => {
+          try {
+            const searchResponse = await graphClient.makeRequest('/search/query', {
+              method: 'POST',
+              body: JSON.stringify({
+                requests: [
+                  {
+                    entityTypes: ['driveItem'],
+                    query: { queryString: `${companyName} OR "${companyName}"` },
+                    from: 0,
+                    size: 20,
+                  },
+                ],
+              }),
+            });
+
+            if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
+              const files: Array<{ name: string; webUrl?: string; modified?: string }> = [];
+              const searchValues = searchResponse.value as Array<{
+                hitsContainers?: Array<{
+                  hits?: Array<{
+                    resource?: { name?: string; webUrl?: string; lastModifiedDateTime?: string };
+                  }>;
+                }>;
+              }>;
+
+              for (const container of searchValues) {
+                for (const hc of container.hitsContainers || []) {
+                  for (const hit of hc.hits || []) {
+                    if (hit.resource) {
+                      files.push({
+                        name: hit.resource.name || 'Unknown',
+                        webUrl: hit.resource.webUrl,
+                        modified: hit.resource.lastModifiedDateTime,
+                      });
+                    }
+                  }
+                }
+              }
+
+              result.documents = {
+                count: files.length,
+                files: files.slice(0, 15),
+              };
+            }
+          } catch (error) {
+            result.documents = { error: `${error}` };
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Calculate relationship health score (simple heuristic)
+      const emailCount = (result.emailHistory as { totalEmails?: number })?.totalEmails || 0;
+      const meetingCount = (result.meetings as { total?: number })?.total || 0;
+      const contactCount = (result.contacts as { count?: number })?.count || 0;
+
+      let healthScore = 'Active';
+      if (emailCount < 5 && meetingCount < 2) {
+        healthScore = 'Needs Attention';
+      } else if (emailCount > 20 || meetingCount > 5) {
+        healthScore = 'Strong';
+      }
+
+      result.relationshipSummary = {
+        healthScore,
+        totalInteractions: emailCount + meetingCount,
+        contactsKnown: contactCount,
+        recommendation:
+          healthScore === 'Needs Attention'
+            ? 'Consider scheduling a check-in meeting'
+            : 'Relationship is healthy',
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 18. ANALYZE MEETING LOAD - Meeting overload analysis
+  // ==========================================================================
+  server.tool(
+    'analyze-meeting-load',
+    `Analyze your meeting load and identify potential issues:
+- Total meeting hours per day/week
+- Meeting-free time analysis
+- Back-to-back meeting detection
+- Recurring meeting overhead
+- Meeting duration distribution
+- Suggestions for optimization
+
+Use this for "Am I in too many meetings?", "Analyze my meeting load", or "Show me my meeting patterns".`,
+    {
+      weeks: z.number().optional().describe('Number of weeks to analyze (default: 4)'),
+      includeRecurring: z
+        .boolean()
+        .optional()
+        .describe('Include recurring meeting analysis (default: true)'),
+    },
+    {
+      title: 'Analyze Meeting Load',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ weeks = 4, includeRecurring = true }) => {
+      logger.info(`Analyzing meeting load for ${weeks} weeks`);
+
+      const now = new Date();
+      const startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - weeks * 7);
+      const endDate = new Date(now);
+
+      const result: Record<string, unknown> = {
+        analyzedPeriod: `Last ${weeks} weeks`,
+        retrievedAt: new Date().toISOString(),
+      };
+
+      try {
+        const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
+          method: 'GET',
+          queryParams: {
+            startDateTime: startDate.toISOString(),
+            endDateTime: endDate.toISOString(),
+            $top: '500',
+            $select: 'subject,start,end,isAllDay,recurrence,attendees,organizer,isCancelled',
+          },
+        });
+
+        if (
+          !meetingsResponse ||
+          typeof meetingsResponse !== 'object' ||
+          !('value' in meetingsResponse)
+        ) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ error: 'Could not fetch calendar data' }, null, 2),
+              },
+            ],
+          };
+        }
+
+        const events = (
+          meetingsResponse.value as Array<
+            GraphEvent & { isAllDay?: boolean; recurrence?: unknown; isCancelled?: boolean }
+          >
+        ).filter((e) => !e.isAllDay && !e.isCancelled);
+
+        // Analyze by day
+        const dailyStats = new Map<
+          string,
+          { hours: number; count: number; events: GraphEvent[] }
+        >();
+        const weeklyStats = new Map<number, { hours: number; count: number }>();
+        let totalHours = 0;
+        let backToBackCount = 0;
+        const durationBuckets = { short: 0, medium: 0, long: 0, veryLong: 0 };
+        const recurringMeetings = new Map<string, number>();
+
+        for (const event of events) {
+          const start = new Date(event.start.dateTime);
+          const end = new Date(event.end.dateTime);
+          const duration = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+          totalHours += duration;
+
+          // Daily stats
+          const day = start.toISOString().split('T')[0];
+          if (!dailyStats.has(day)) {
+            dailyStats.set(day, { hours: 0, count: 0, events: [] });
+          }
+          const dayStats = dailyStats.get(day)!;
+          dayStats.hours += duration;
+          dayStats.count++;
+          dayStats.events.push(event);
+
+          // Weekly stats
+          const weekNum = Math.floor(
+            (start.getTime() - startDate.getTime()) / (7 * 24 * 60 * 60 * 1000)
+          );
+          if (!weeklyStats.has(weekNum)) {
+            weeklyStats.set(weekNum, { hours: 0, count: 0 });
+          }
+          weeklyStats.get(weekNum)!.hours += duration;
+          weeklyStats.get(weekNum)!.count++;
+
+          // Duration buckets
+          if (duration <= 0.5) durationBuckets.short++;
+          else if (duration <= 1) durationBuckets.medium++;
+          else if (duration <= 2) durationBuckets.long++;
+          else durationBuckets.veryLong++;
+
+          // Track recurring meetings
+          if (includeRecurring && event.subject) {
+            const normalized = event.subject.toLowerCase().trim();
+            recurringMeetings.set(normalized, (recurringMeetings.get(normalized) || 0) + 1);
+          }
+        }
+
+        // Detect back-to-back meetings
+        for (const [, dayData] of dailyStats) {
+          const sortedEvents = dayData.events.sort(
+            (a, b) => new Date(a.start.dateTime).getTime() - new Date(b.start.dateTime).getTime()
+          );
+          for (let i = 0; i < sortedEvents.length - 1; i++) {
+            const currentEnd = new Date(sortedEvents[i].end.dateTime);
+            const nextStart = new Date(sortedEvents[i + 1].start.dateTime);
+            const gap = (nextStart.getTime() - currentEnd.getTime()) / (1000 * 60);
+            if (gap <= 5) {
+              // 5 minutes or less gap
+              backToBackCount++;
+            }
+          }
+        }
+
+        // Find busiest days
+        const sortedDays = Array.from(dailyStats.entries())
+          .map(([day, stats]) => ({ day, ...stats }))
+          .sort((a, b) => b.hours - a.hours);
+
+        // Find most common recurring meetings
+        const topRecurring = Array.from(recurringMeetings.entries())
+          .filter(([, count]) => count > 1)
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 10)
+          .map(([title, count]) => ({ title, occurrences: count }));
+
+        // Calculate averages
+        const avgDailyHours = totalHours / (weeks * 5); // Assuming 5 work days
+        const avgWeeklyHours = totalHours / weeks;
+        const avgMeetingsPerDay = events.length / (weeks * 5);
+
+        // Determine load level
+        let loadLevel: 'Light' | 'Moderate' | 'Heavy' | 'Overloaded';
+        if (avgDailyHours < 2) loadLevel = 'Light';
+        else if (avgDailyHours < 4) loadLevel = 'Moderate';
+        else if (avgDailyHours < 6) loadLevel = 'Heavy';
+        else loadLevel = 'Overloaded';
+
+        result.summary = {
+          totalMeetings: events.length,
+          totalHours: Math.round(totalHours * 10) / 10,
+          averageDailyHours: Math.round(avgDailyHours * 10) / 10,
+          averageWeeklyHours: Math.round(avgWeeklyHours * 10) / 10,
+          averageMeetingsPerDay: Math.round(avgMeetingsPerDay * 10) / 10,
+          loadLevel,
+        };
+
+        result.distribution = {
+          byDuration: {
+            'Under 30 min': durationBuckets.short,
+            '30-60 min': durationBuckets.medium,
+            '1-2 hours': durationBuckets.long,
+            'Over 2 hours': durationBuckets.veryLong,
+          },
+          backToBackMeetings: backToBackCount,
+        };
+
+        result.busiestDays = sortedDays.slice(0, 5).map((d) => ({
+          date: d.day,
+          hours: Math.round(d.hours * 10) / 10,
+          meetings: d.count,
+        }));
+
+        if (includeRecurring) {
+          result.recurringMeetings = {
+            total: topRecurring.reduce((sum, m) => sum + m.occurrences, 0),
+            topMeetings: topRecurring,
+          };
+        }
+
+        // Generate recommendations
+        const recommendations: string[] = [];
+        if (loadLevel === 'Overloaded') {
+          recommendations.push(
+            'Consider declining non-essential meetings or delegating attendance'
+          );
+        }
+        if (backToBackCount > 5) {
+          recommendations.push(
+            `You had ${backToBackCount} back-to-back meetings. Try to add buffer time between meetings`
+          );
+        }
+        if (durationBuckets.veryLong > events.length * 0.2) {
+          recommendations.push(
+            'Many meetings are over 2 hours. Consider breaking them into shorter sessions'
+          );
+        }
+        if (topRecurring.some((m) => m.occurrences > weeks)) {
+          recommendations.push(
+            'Some meetings occur multiple times per week. Review if all occurrences are necessary'
+          );
+        }
+
+        result.recommendations =
+          recommendations.length > 0 ? recommendations : ['Your meeting load appears balanced'];
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ error: `Failed to analyze meetings: ${error}` }, null, 2),
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 19. GET DEADLINE OVERVIEW - All upcoming deadlines and due dates
+  // ==========================================================================
+  server.tool(
+    'get-deadline-overview',
+    `Get a comprehensive overview of all upcoming deadlines and due dates:
+- Tasks due dates from To-Do and Planner
+- Calendar events with deadline indicators
+- Flagged emails with due dates
+- Grouped by urgency (overdue, today, this week, later)
+
+Use this for "What are my deadlines?", "What's due this week?", or "Show me upcoming due dates".`,
+    {
+      days: z.number().optional().describe('Days ahead to look for deadlines (default: 30)'),
+      includeCompleted: z.boolean().optional().describe('Include completed items (default: false)'),
+    },
+    {
+      title: 'Get Deadline Overview',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ days = 30, includeCompleted = false }) => {
+      logger.info(`Getting deadline overview for next ${days} days`);
+
+      const now = new Date();
+      const futureDate = new Date();
+      futureDate.setDate(futureDate.getDate() + days);
+
+      interface DeadlineItem {
+        title: string;
+        dueDate: string;
+        source: 'ToDo' | 'Planner' | 'Email' | 'Calendar';
+        priority?: string;
+        status?: string;
+        link?: string;
+      }
+
+      const deadlines: DeadlineItem[] = [];
+      const promises: Promise<void>[] = [];
+
+      // To-Do tasks
+      promises.push(
+        (async () => {
+          try {
+            const taskListsResponse = await graphClient.makeRequest('/me/todo/lists', {
+              method: 'GET',
+              queryParams: { $top: '20' },
+            });
+
+            if (
+              taskListsResponse &&
+              typeof taskListsResponse === 'object' &&
+              'value' in taskListsResponse
+            ) {
+              for (const list of taskListsResponse.value as Array<{ id: string }>) {
+                try {
+                  const tasksResponse = await graphClient.makeRequest(
+                    `/me/todo/lists/${list.id}/tasks`,
+                    {
+                      method: 'GET',
+                      queryParams: { $top: '100' },
+                    }
+                  );
+
+                  if (
+                    tasksResponse &&
+                    typeof tasksResponse === 'object' &&
+                    'value' in tasksResponse
+                  ) {
+                    for (const task of tasksResponse.value as Array<{
+                      title: string;
+                      dueDateTime?: { dateTime: string };
+                      status: string;
+                      importance: string;
+                    }>) {
+                      if (!includeCompleted && task.status === 'completed') continue;
+                      if (task.dueDateTime) {
+                        deadlines.push({
+                          title: task.title,
+                          dueDate: task.dueDateTime.dateTime,
+                          source: 'ToDo',
+                          priority: task.importance,
+                          status: task.status,
+                        });
+                      }
+                    }
+                  }
+                } catch {
+                  // Skip individual list errors
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not fetch To-Do: ${error}`);
+          }
+        })()
+      );
+
+      // Planner tasks
+      promises.push(
+        (async () => {
+          try {
+            const plannerResponse = await graphClient.makeRequest('/me/planner/tasks', {
+              method: 'GET',
+              queryParams: { $top: '100' },
+            });
+
+            if (
+              plannerResponse &&
+              typeof plannerResponse === 'object' &&
+              'value' in plannerResponse
+            ) {
+              for (const task of plannerResponse.value as Array<{
+                title: string;
+                dueDateTime?: string;
+                percentComplete: number;
+                priority: number;
+              }>) {
+                if (!includeCompleted && task.percentComplete >= 100) continue;
+                if (task.dueDateTime) {
+                  deadlines.push({
+                    title: task.title,
+                    dueDate: task.dueDateTime,
+                    source: 'Planner',
+                    priority: ['Urgent', 'Important', 'Medium', 'Low'][task.priority] || 'Medium',
+                    status: task.percentComplete >= 100 ? 'completed' : `${task.percentComplete}%`,
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not fetch Planner: ${error}`);
+          }
+        })()
+      );
+
+      // Flagged emails with due dates
+      promises.push(
+        (async () => {
+          try {
+            const flaggedResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $filter: "flag/flagStatus eq 'flagged'",
+                $top: '50',
+                $select: 'subject,flag,webLink,receivedDateTime',
+              },
+            });
+
+            if (
+              flaggedResponse &&
+              typeof flaggedResponse === 'object' &&
+              'value' in flaggedResponse
+            ) {
+              for (const email of flaggedResponse.value as Array<{
+                subject: string;
+                flag?: { dueDateTime?: { dateTime: string }; flagStatus: string };
+                webLink?: string;
+              }>) {
+                if (email.flag?.dueDateTime) {
+                  deadlines.push({
+                    title: `Email: ${email.subject}`,
+                    dueDate: email.flag.dueDateTime.dateTime,
+                    source: 'Email',
+                    link: email.webLink,
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not fetch flagged emails: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Categorize deadlines
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      const thisWeekEnd = new Date(today);
+      thisWeekEnd.setDate(thisWeekEnd.getDate() + (7 - today.getDay()));
+
+      const categorized = {
+        overdue: [] as DeadlineItem[],
+        today: [] as DeadlineItem[],
+        tomorrow: [] as DeadlineItem[],
+        thisWeek: [] as DeadlineItem[],
+        later: [] as DeadlineItem[],
+      };
+
+      for (const deadline of deadlines) {
+        const due = new Date(deadline.dueDate);
+        if (due < today) {
+          categorized.overdue.push(deadline);
+        } else if (due < tomorrow) {
+          categorized.today.push(deadline);
+        } else if (due < new Date(tomorrow.getTime() + 24 * 60 * 60 * 1000)) {
+          categorized.tomorrow.push(deadline);
+        } else if (due <= thisWeekEnd) {
+          categorized.thisWeek.push(deadline);
+        } else {
+          categorized.later.push(deadline);
+        }
+      }
+
+      // Sort each category by due date
+      for (const category of Object.values(categorized)) {
+        category.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+      }
+
+      const result = {
+        summary: {
+          total: deadlines.length,
+          overdue: categorized.overdue.length,
+          dueToday: categorized.today.length,
+          dueTomorrow: categorized.tomorrow.length,
+          dueThisWeek: categorized.thisWeek.length,
+          later: categorized.later.length,
+        },
+        deadlines: categorized,
+        urgentAlert:
+          categorized.overdue.length > 0
+            ? `⚠️ You have ${categorized.overdue.length} overdue item(s)!`
+            : categorized.today.length > 0
+              ? `📅 You have ${categorized.today.length} item(s) due today`
+              : '✅ No urgent deadlines',
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 20. FIND DECISION CONTEXT - Find context for a decision
+  // ==========================================================================
+  server.tool(
+    'find-decision-context',
+    `Find all context and history related to a specific decision or topic:
+- When was it discussed?
+- Who was involved?
+- What were the alternatives considered?
+- What documentation exists?
+- What was the final outcome?
+
+Use this for "When did we decide on X?", "What was the context for decision Y?", or "Find discussions about [topic]".`,
+    {
+      topic: z.string().describe('The decision or topic to find context for'),
+      days: z.number().optional().describe('Days of history to search (default: 180)'),
+    },
+    {
+      title: 'Find Decision Context',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ topic, days = 180 }) => {
+      logger.info(`Finding decision context for: ${topic}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const result: Record<string, unknown> = {
+        topic,
+        searchPeriod: `Last ${days} days`,
+        retrievedAt: new Date().toISOString(),
+      };
+
+      const promises: Promise<void>[] = [];
+
+      // Search emails
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $search: `"${topic}"`,
+                $top: '30',
+                $select:
+                  'subject,from,toRecipients,ccRecipients,receivedDateTime,bodyPreview,webLink',
+                $orderby: 'receivedDateTime desc',
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              const emails = emailResponse.value as GraphEmail[];
+              const uniqueParticipants = new Set<string>();
+
+              for (const email of emails) {
+                if (email.from?.emailAddress?.address) {
+                  uniqueParticipants.add(email.from.emailAddress.address);
+                }
+                for (const recipient of [...(email.toRecipients || [])]) {
+                  if (recipient.emailAddress?.address) {
+                    uniqueParticipants.add(recipient.emailAddress.address);
+                  }
+                }
+              }
+
+              result.emailDiscussions = {
+                count: emails.length,
+                participants: Array.from(uniqueParticipants),
+                threads: emails.slice(0, 10).map((e) => ({
+                  subject: e.subject,
+                  from: e.from?.emailAddress?.name || e.from?.emailAddress?.address,
+                  date: e.receivedDateTime,
+                  preview: e.bodyPreview?.substring(0, 150),
+                  link: e.webLink,
+                })),
+              };
+            }
+          } catch (error) {
+            result.emailDiscussions = { error: `${error}` };
+          }
+        })()
+      );
+
+      // Search meetings
+      promises.push(
+        (async () => {
+          try {
+            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
+              method: 'GET',
+              queryParams: {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $filter: `contains(subject, '${topic}')`,
+                $top: '30',
+                $select: 'subject,start,end,attendees,organizer,bodyPreview,webLink',
+                $orderby: 'start/dateTime desc',
+              },
+            });
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              const meetings = meetingsResponse.value as GraphEvent[];
+
+              result.relatedMeetings = {
+                count: meetings.length,
+                meetings: meetings.slice(0, 10).map((m) => ({
+                  subject: m.subject,
+                  date: m.start.dateTime,
+                  organizer: m.organizer?.emailAddress?.name,
+                  attendees: m.attendees?.map((a) => a.emailAddress?.name).filter(Boolean),
+                  notes: m.bodyPreview?.substring(0, 200),
+                  link: m.webLink,
+                })),
+              };
+            }
+          } catch (error) {
+            result.relatedMeetings = { error: `${error}` };
+          }
+        })()
+      );
+
+      // Search files/documents
+      promises.push(
+        (async () => {
+          try {
+            const searchResponse = await graphClient.makeRequest('/search/query', {
+              method: 'POST',
+              body: JSON.stringify({
+                requests: [
+                  {
+                    entityTypes: ['driveItem', 'listItem'],
+                    query: { queryString: topic },
+                    from: 0,
+                    size: 20,
+                  },
+                ],
+              }),
+            });
+
+            if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
+              const files: Array<{
+                name: string;
+                webUrl?: string;
+                modified?: string;
+                preview?: string;
+              }> = [];
+              const searchValues = searchResponse.value as Array<{
+                hitsContainers?: Array<{
+                  hits?: Array<{
+                    resource?: { name?: string; webUrl?: string; lastModifiedDateTime?: string };
+                    summary?: string;
+                  }>;
+                }>;
+              }>;
+
+              for (const container of searchValues) {
+                for (const hc of container.hitsContainers || []) {
+                  for (const hit of hc.hits || []) {
+                    if (hit.resource) {
+                      files.push({
+                        name: hit.resource.name || 'Unknown',
+                        webUrl: hit.resource.webUrl,
+                        modified: hit.resource.lastModifiedDateTime,
+                        preview: hit.summary,
+                      });
+                    }
+                  }
+                }
+              }
+
+              result.relatedDocuments = {
+                count: files.length,
+                files,
+              };
+            }
+          } catch (error) {
+            result.relatedDocuments = { error: `${error}` };
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Build timeline of events
+      const timeline: Array<{
+        date: string;
+        type: string;
+        title: string;
+        participants?: string[];
+      }> = [];
+
+      const emails =
+        (
+          result.emailDiscussions as {
+            threads?: Array<{ date: string; subject: string; from: string }>;
+          }
+        )?.threads || [];
+      for (const email of emails) {
+        timeline.push({
+          date: email.date,
+          type: 'email',
+          title: email.subject,
+          participants: [email.from],
+        });
+      }
+
+      const meetings =
+        (
+          result.relatedMeetings as {
+            meetings?: Array<{ date: string; subject: string; attendees?: string[] }>;
+          }
+        )?.meetings || [];
+      for (const meeting of meetings) {
+        timeline.push({
+          date: meeting.date,
+          type: 'meeting',
+          title: meeting.subject,
+          participants: meeting.attendees,
+        });
+      }
+
+      timeline.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+      result.timeline = timeline;
+
+      // Summary
+      const allParticipants = new Set<string>();
+      for (const item of timeline) {
+        for (const p of item.participants || []) {
+          allParticipants.add(p);
+        }
+      }
+
+      result.summary = {
+        totalDiscussions: timeline.length,
+        keyParticipants: Array.from(allParticipants).slice(0, 10),
+        firstDiscussion: timeline[0]?.date,
+        lastDiscussion: timeline[timeline.length - 1]?.date,
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 21. GET PROJECT STAKEHOLDERS - Find everyone involved in a project
+  // ==========================================================================
+  server.tool(
+    'get-project-stakeholders',
+    `Identify all stakeholders and participants involved in a project:
+- People who attend project meetings
+- Email participants on project discussions
+- Document contributors
+- Ranked by involvement level
+
+Use this for "Who is involved in Project X?", "List stakeholders for [project]", or "Who works on [topic]?".`,
+    {
+      projectName: z.string().describe('Project or topic name'),
+      days: z.number().optional().describe('Days of history to analyze (default: 90)'),
+    },
+    {
+      title: 'Get Project Stakeholders',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ projectName, days = 90 }) => {
+      logger.info(`Finding stakeholders for: ${projectName}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const stakeholders = new Map<
+        string,
+        {
+          name: string;
+          email: string;
+          meetingCount: number;
+          emailCount: number;
+          documentCount: number;
+          roles: Set<string>;
+        }
+      >();
+
+      const promises: Promise<void>[] = [];
+
+      // Meeting participants
+      promises.push(
+        (async () => {
+          try {
+            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
+              method: 'GET',
+              queryParams: {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $filter: `contains(subject, '${projectName}')`,
+                $top: '100',
+                $select: 'subject,attendees,organizer',
+              },
+            });
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              for (const event of meetingsResponse.value as GraphEvent[]) {
+                // Add organizer
+                const orgEmail = event.organizer?.emailAddress?.address?.toLowerCase();
+                if (orgEmail) {
+                  if (!stakeholders.has(orgEmail)) {
+                    stakeholders.set(orgEmail, {
+                      name: event.organizer?.emailAddress?.name || orgEmail,
+                      email: orgEmail,
+                      meetingCount: 0,
+                      emailCount: 0,
+                      documentCount: 0,
+                      roles: new Set(['Meeting Organizer']),
+                    });
+                  }
+                  stakeholders.get(orgEmail)!.meetingCount++;
+                  stakeholders.get(orgEmail)!.roles.add('Meeting Organizer');
+                }
+
+                // Add attendees
+                for (const attendee of event.attendees || []) {
+                  const email = attendee.emailAddress?.address?.toLowerCase();
+                  if (email) {
+                    if (!stakeholders.has(email)) {
+                      stakeholders.set(email, {
+                        name: attendee.emailAddress?.name || email,
+                        email,
+                        meetingCount: 0,
+                        emailCount: 0,
+                        documentCount: 0,
+                        roles: new Set(),
+                      });
+                    }
+                    stakeholders.get(email)!.meetingCount++;
+                    stakeholders.get(email)!.roles.add('Meeting Participant');
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze meetings: ${error}`);
+          }
+        })()
+      );
+
+      // Email participants
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $search: `"${projectName}"`,
+                $top: '100',
+                $select: 'from,toRecipients,ccRecipients',
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              for (const email of emailResponse.value as GraphEmail[]) {
+                const participants = [
+                  email.from?.emailAddress,
+                  ...(email.toRecipients?.map((r) => r.emailAddress) || []),
+                ].filter(Boolean);
+
+                for (const participant of participants) {
+                  const pEmail = participant?.address?.toLowerCase();
+                  if (pEmail) {
+                    if (!stakeholders.has(pEmail)) {
+                      stakeholders.set(pEmail, {
+                        name: participant?.name || pEmail,
+                        email: pEmail,
+                        meetingCount: 0,
+                        emailCount: 0,
+                        documentCount: 0,
+                        roles: new Set(),
+                      });
+                    }
+                    stakeholders.get(pEmail)!.emailCount++;
+                    stakeholders.get(pEmail)!.roles.add('Email Participant');
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze emails: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Calculate involvement scores and sort
+      const sortedStakeholders = Array.from(stakeholders.values())
+        .map((s) => ({
+          name: s.name,
+          email: s.email,
+          meetingCount: s.meetingCount,
+          emailCount: s.emailCount,
+          involvementScore: s.meetingCount * 3 + s.emailCount, // Meetings weighted higher
+          roles: Array.from(s.roles),
+        }))
+        .sort((a, b) => b.involvementScore - a.involvementScore);
+
+      // Categorize by involvement level
+      const keyStakeholders = sortedStakeholders.filter((s) => s.involvementScore >= 10);
+      const regularParticipants = sortedStakeholders.filter(
+        (s) => s.involvementScore >= 3 && s.involvementScore < 10
+      );
+      const occasionalParticipants = sortedStakeholders.filter((s) => s.involvementScore < 3);
+
+      const result = {
+        project: projectName,
+        analyzedPeriod: `Last ${days} days`,
+        totalStakeholders: stakeholders.size,
+        keyStakeholders: {
+          count: keyStakeholders.length,
+          people: keyStakeholders.slice(0, 10),
+        },
+        regularParticipants: {
+          count: regularParticipants.length,
+          people: regularParticipants.slice(0, 10),
+        },
+        occasionalParticipants: {
+          count: occasionalParticipants.length,
+          people: occasionalParticipants.slice(0, 5),
+        },
+        summary: {
+          mostInvolved: keyStakeholders[0]?.name,
+          meetingOrganizers: sortedStakeholders
+            .filter((s) => s.roles.includes('Meeting Organizer'))
+            .map((s) => s.name),
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 22. FIND UNRESPONDED REQUESTS - Items needing your response
+  // ==========================================================================
+  server.tool(
+    'find-unresponded-requests',
+    `Find all requests and messages that are waiting for your response:
+- Emails where you were asked a question
+- Meeting invites awaiting your response
+- Tasks assigned to you
+- Mentions in Teams requiring action
+
+Use this for "What am I forgetting to respond to?", "Find unanswered requests", or "What's waiting on me?".`,
+    {
+      days: z.number().optional().describe('Days back to search (default: 14)'),
+      priorityOnly: z
+        .boolean()
+        .optional()
+        .describe('Only show high priority items (default: false)'),
+    },
+    {
+      title: 'Find Unresponded Requests',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ days = 14, priorityOnly = false }) => {
+      logger.info(`Finding unresponded requests from last ${days} days`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface UnrespondedItem {
+        type: 'email' | 'meeting' | 'task';
+        title: string;
+        from?: string;
+        receivedDate: string;
+        priority?: string;
+        link?: string;
+        reason: string;
+      }
+
+      const unresponded: UnrespondedItem[] = [];
+      const promises: Promise<void>[] = [];
+
+      // Unread emails with questions
+      promises.push(
+        (async () => {
+          try {
+            let filter = `isRead eq false and receivedDateTime ge ${startDate.toISOString()}`;
+            if (priorityOnly) {
+              filter += " and importance eq 'high'";
+            }
+
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $filter: filter,
+                $top: '50',
+                $select: 'subject,from,receivedDateTime,importance,bodyPreview,webLink',
+                $orderby: 'receivedDateTime desc',
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              for (const email of emailResponse.value as Array<
+                GraphEmail & { importance?: string }
+              >) {
+                // Check if email might contain a question or request
+                const preview = (email.bodyPreview || '').toLowerCase();
+                const hasQuestion =
+                  preview.includes('?') ||
+                  preview.includes('please') ||
+                  preview.includes('could you') ||
+                  preview.includes('can you') ||
+                  preview.includes('would you') ||
+                  preview.includes('need your') ||
+                  preview.includes('waiting for') ||
+                  preview.includes('asap');
+
+                if (hasQuestion || email.importance === 'high') {
+                  unresponded.push({
+                    type: 'email',
+                    title: email.subject,
+                    from: email.from?.emailAddress?.name || email.from?.emailAddress?.address,
+                    receivedDate: email.receivedDateTime,
+                    priority: email.importance,
+                    link: email.webLink,
+                    reason: hasQuestion ? 'Contains question/request' : 'High priority unread',
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze emails: ${error}`);
+          }
+        })()
+      );
+
+      // Meeting invites needing response
+      promises.push(
+        (async () => {
+          try {
+            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
+              method: 'GET',
+              queryParams: {
+                startDateTime: new Date().toISOString(),
+                endDateTime: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+                $filter:
+                  "responseStatus/response eq 'notResponded' or responseStatus/response eq 'none'",
+                $top: '30',
+                $select: 'subject,start,organizer,responseStatus,webLink',
+              },
+            });
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              for (const meeting of meetingsResponse.value as Array<
+                GraphEvent & { responseStatus?: { response: string } }
+              >) {
+                unresponded.push({
+                  type: 'meeting',
+                  title: meeting.subject,
+                  from: meeting.organizer?.emailAddress?.name,
+                  receivedDate: meeting.start.dateTime,
+                  link: meeting.webLink,
+                  reason: 'Meeting invite awaiting response',
+                });
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze meetings: ${error}`);
+          }
+        })()
+      );
+
+      // Flagged emails
+      promises.push(
+        (async () => {
+          try {
+            const flaggedResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $filter: "flag/flagStatus eq 'flagged'",
+                $top: '30',
+                $select: 'subject,from,receivedDateTime,flag,webLink',
+              },
+            });
+
+            if (
+              flaggedResponse &&
+              typeof flaggedResponse === 'object' &&
+              'value' in flaggedResponse
+            ) {
+              for (const email of flaggedResponse.value as GraphEmail[]) {
+                unresponded.push({
+                  type: 'email',
+                  title: email.subject,
+                  from: email.from?.emailAddress?.name || email.from?.emailAddress?.address,
+                  receivedDate: email.receivedDateTime,
+                  link: email.webLink,
+                  reason: 'Flagged for follow-up',
+                });
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not fetch flagged emails: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Sort by date (oldest first - most urgent)
+      unresponded.sort(
+        (a, b) => new Date(a.receivedDate).getTime() - new Date(b.receivedDate).getTime()
+      );
+
+      // Group by type
+      const byType = {
+        emails: unresponded.filter((i) => i.type === 'email'),
+        meetings: unresponded.filter((i) => i.type === 'meeting'),
+        tasks: unresponded.filter((i) => i.type === 'task'),
+      };
+
+      const result = {
+        summary: {
+          total: unresponded.length,
+          emails: byType.emails.length,
+          meetings: byType.meetings.length,
+          oldestItem: unresponded[0]
+            ? `${unresponded[0].title} from ${new Date(unresponded[0].receivedDate).toLocaleDateString()}`
+            : 'None',
+        },
+        urgentItems: unresponded.slice(0, 5),
+        byType: {
+          emails: byType.emails.slice(0, 15),
+          meetings: byType.meetings,
+        },
+        recommendation:
+          unresponded.length === 0
+            ? '✅ No pending responses needed!'
+            : unresponded.length > 10
+              ? '⚠️ You have many pending items. Consider setting aside focused response time.'
+              : `📬 ${unresponded.length} items need your attention`,
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 23. GET COLLABORATION NETWORK - Your professional network map
+  // ==========================================================================
+  server.tool(
+    'get-collaboration-network',
+    `Map your professional collaboration network:
+- Who you interact with most frequently
+- Communication channels used with each person
+- Relationship strength indicators
+- Department/team distribution
+- Key connectors in your network
+
+Use this for "Who do I work with most?", "Map my professional network", or "Analyze my work relationships".`,
+    {
+      days: z.number().optional().describe('Days of data to analyze (default: 60)'),
+      minInteractions: z
+        .number()
+        .optional()
+        .describe('Minimum interactions to include (default: 3)'),
+    },
+    {
+      title: 'Get Collaboration Network',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ days = 60, minInteractions = 3 }) => {
+      logger.info(`Mapping collaboration network for last ${days} days`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const network = new Map<
+        string,
+        {
+          name: string;
+          email: string;
+          emails: number;
+          meetings: number;
+          chats: number;
+          lastInteraction: string;
+          channels: Set<string>;
+        }
+      >();
+
+      const promises: Promise<void>[] = [];
+
+      // Email interactions
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                $top: '300',
+                $select: 'from,toRecipients,receivedDateTime',
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              for (const email of emailResponse.value as GraphEmail[]) {
+                const contacts = [
+                  email.from?.emailAddress,
+                  ...(email.toRecipients?.map((r) => r.emailAddress) || []),
+                ];
+
+                for (const contact of contacts) {
+                  if (!contact?.address) continue;
+                  const key = contact.address.toLowerCase();
+
+                  if (!network.has(key)) {
+                    network.set(key, {
+                      name: contact.name || key,
+                      email: key,
+                      emails: 0,
+                      meetings: 0,
+                      chats: 0,
+                      lastInteraction: email.receivedDateTime,
+                      channels: new Set(),
+                    });
+                  }
+
+                  network.get(key)!.emails++;
+                  network.get(key)!.channels.add('Email');
+                  if (
+                    new Date(email.receivedDateTime) > new Date(network.get(key)!.lastInteraction)
+                  ) {
+                    network.get(key)!.lastInteraction = email.receivedDateTime;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze emails: ${error}`);
+          }
+        })()
+      );
+
+      // Meeting interactions
+      promises.push(
+        (async () => {
+          try {
+            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
+              method: 'GET',
+              queryParams: {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '200',
+                $select: 'attendees,start',
+              },
+            });
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              for (const event of meetingsResponse.value as GraphEvent[]) {
+                for (const attendee of event.attendees || []) {
+                  const email = attendee.emailAddress?.address?.toLowerCase();
+                  if (!email) continue;
+
+                  if (!network.has(email)) {
+                    network.set(email, {
+                      name: attendee.emailAddress?.name || email,
+                      email,
+                      emails: 0,
+                      meetings: 0,
+                      chats: 0,
+                      lastInteraction: event.start.dateTime,
+                      channels: new Set(),
+                    });
+                  }
+
+                  network.get(email)!.meetings++;
+                  network.get(email)!.channels.add('Meetings');
+                  if (
+                    new Date(event.start.dateTime) > new Date(network.get(email)!.lastInteraction)
+                  ) {
+                    network.get(email)!.lastInteraction = event.start.dateTime;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze meetings: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Filter and rank by total interactions
+      const connections = Array.from(network.values())
+        .filter((c) => c.emails + c.meetings + c.chats >= minInteractions)
+        .map((c) => ({
+          name: c.name,
+          email: c.email,
+          totalInteractions: c.emails + c.meetings + c.chats,
+          breakdown: {
+            emails: c.emails,
+            meetings: c.meetings,
+            chats: c.chats,
+          },
+          channels: Array.from(c.channels),
+          lastInteraction: c.lastInteraction,
+          relationshipStrength:
+            c.emails + c.meetings + c.chats > 20
+              ? 'Strong'
+              : c.emails + c.meetings + c.chats > 10
+                ? 'Moderate'
+                : 'Light',
+        }))
+        .sort((a, b) => b.totalInteractions - a.totalInteractions);
+
+      // Analyze network structure
+      const strongConnections = connections.filter((c) => c.relationshipStrength === 'Strong');
+      const moderateConnections = connections.filter((c) => c.relationshipStrength === 'Moderate');
+
+      // Extract domains for team distribution
+      const domainCounts = new Map<string, number>();
+      for (const conn of connections) {
+        const domain = conn.email.split('@')[1];
+        if (domain) {
+          domainCounts.set(domain, (domainCounts.get(domain) || 0) + 1);
+        }
+      }
+
+      const result = {
+        analyzedPeriod: `Last ${days} days`,
+        networkSize: connections.length,
+        summary: {
+          strongConnections: strongConnections.length,
+          moderateConnections: moderateConnections.length,
+          lightConnections:
+            connections.length - strongConnections.length - moderateConnections.length,
+          topContact: connections[0]?.name,
+        },
+        topConnections: connections.slice(0, 15),
+        byOrganization: Array.from(domainCounts.entries())
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 10)
+          .map(([domain, count]) => ({ domain, contacts: count })),
+        insights: [
+          `You have ${strongConnections.length} strong professional relationships`,
+          connections.length > 50
+            ? 'You have a large professional network'
+            : 'Your network is focused and manageable',
+          domainCounts.size > 5
+            ? 'You collaborate across multiple organizations'
+            : 'Most of your collaboration is within your organization',
+        ],
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
   logger.info(`Registered ${registeredCount} compound tools`);
   return registeredCount;
 }

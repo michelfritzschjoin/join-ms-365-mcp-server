@@ -7,6 +7,7 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
+import type KnowledgeBase from './knowledge-base.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -80,6 +81,28 @@ interface CallToolResult {
   [key: string]: unknown;
 }
 
+// Global tool usage tracker (session-based)
+let toolUsageTracker: {
+  knowledgeBase: KnowledgeBase | null;
+  currentSession: string[];
+  sessionStartTime: number;
+} = {
+  knowledgeBase: null,
+  currentSession: [],
+  sessionStartTime: Date.now(),
+};
+
+// Reset session after 5 minutes of inactivity
+const SESSION_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+
+function resetSessionIfNeeded(): void {
+  const now = Date.now();
+  if (now - toolUsageTracker.sessionStartTime > SESSION_TIMEOUT) {
+    toolUsageTracker.currentSession = [];
+    toolUsageTracker.sessionStartTime = now;
+  }
+}
+
 async function executeGraphTool(
   tool: (typeof api.endpoints)[0],
   config: EndpointConfig | undefined,
@@ -87,6 +110,10 @@ async function executeGraphTool(
   params: Record<string, unknown>
 ): Promise<CallToolResult> {
   logger.info(`Tool ${tool.alias} called with params: ${JSON.stringify(params)}`);
+
+  resetSessionIfNeeded();
+  const startTime = Date.now();
+
   try {
     const parameterDefinitions = tool.parameters || [];
 
@@ -368,6 +395,38 @@ async function executeGraphTool(
       text: item.text,
     }));
 
+    // Track tool usage for learning
+    if (toolUsageTracker.knowledgeBase) {
+      const executionTime = Date.now() - startTime;
+      const success = !response.isError;
+
+      // Count results if available
+      let resultsCount = 0;
+      try {
+        const responseText = response.content[0]?.text;
+        if (responseText) {
+          const jsonResponse = JSON.parse(responseText);
+          if (Array.isArray(jsonResponse.value)) {
+            resultsCount = jsonResponse.value.length;
+          } else if (jsonResponse.value && typeof jsonResponse.value === 'object') {
+            resultsCount = 1;
+          }
+        }
+      } catch {
+        // Non-JSON or parse error - ignore
+      }
+
+      // Record tool usage with other tools in current session
+      const usedWith = toolUsageTracker.currentSession.filter((t) => t !== tool.alias);
+      toolUsageTracker.knowledgeBase.recordToolUsage(tool.alias, usedWith, success, resultsCount);
+
+      // Add to current session
+      if (!toolUsageTracker.currentSession.includes(tool.alias)) {
+        toolUsageTracker.currentSession.push(tool.alias);
+      }
+      toolUsageTracker.sessionStartTime = Date.now();
+    }
+
     return {
       content,
       _meta: response._meta,
@@ -422,8 +481,13 @@ export function registerGraphTools(
   graphClient: GraphClient,
   readOnly: boolean = false,
   enabledToolsPattern?: string,
-  orgMode: boolean = false
+  orgMode: boolean = false,
+  knowledgeBase?: KnowledgeBase
 ): number {
+  // Set knowledge base for tool usage tracking
+  if (knowledgeBase) {
+    toolUsageTracker.knowledgeBase = knowledgeBase;
+  }
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {

@@ -3,6 +3,7 @@
  */
 
 import logger from './logger.js';
+import NLPEnhancer from './nlp-enhancer.js';
 
 interface LearnedSynonym {
   original: string;
@@ -55,9 +56,16 @@ const ABBREVIATIONS: Record<string, string[]> = {
 export class SynonymExpander {
   private learnedSynonyms: Map<string, LearnedSynonym[]>;
   private readonly minSuccessRatio = 0.6; // Synonym must be successful 60% of the time
+  private nlpEnhancer: NLPEnhancer | null = null;
 
   constructor() {
     this.learnedSynonyms = new Map();
+    // Initialize NLP enhancer if enabled
+    try {
+      this.nlpEnhancer = new NLPEnhancer();
+    } catch (error) {
+      logger.warn(`Failed to initialize NLP enhancer: ${error}`);
+    }
   }
 
   /**
@@ -67,6 +75,15 @@ export class SynonymExpander {
     const variants = new Set<string>([query.toLowerCase()]);
     const queryLower = query.toLowerCase();
     const words = queryLower.split(/\s+/);
+
+    // Use NLP enhancer for better normalization if available
+    if (this.nlpEnhancer) {
+      const normalized = this.nlpEnhancer.normalizeQuery(query);
+      // Add stemmed variants
+      if (normalized.stemmed.length > 0) {
+        variants.add(normalized.stemmed.join(' '));
+      }
+    }
 
     // 1. Check learned synonyms
     for (const word of words) {
