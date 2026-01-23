@@ -413,7 +413,7 @@ class MicrosoftGraphServer {
         res.redirect(microsoftAuthUrl.toString());
       });
 
-      // Mount MCP Auth Router FIRST - it may handle OAuth callbacks
+      // Mount MCP Auth Router under /auth to avoid conflicting with our explicit OAuth endpoints
       const authRouter = mcpAuthRouter({
         provider: oauthProvider,
         issuerUrl: new URL(`http://localhost:${port}`),
@@ -446,8 +446,8 @@ class MicrosoftGraphServer {
       });
       // #endregion
 
-      // Mount the auth router BEFORE custom handlers so it can handle callbacks first
-      app.use(authRouter);
+      // Mount under /auth so it doesn't intercept /authorize, /token, /callback, /register
+      app.use('/auth', authRouter);
 
       // #region agent log
       // Instrumentation: Track requests after router
@@ -1243,50 +1243,28 @@ class MicrosoftGraphServer {
             });
           }
         } catch (error) {
-          // Extract Microsoft error details if available
-          const microsoftError = (error as Error & { microsoftError?: { error?: string; error_description?: string } })?.microsoftError;
-          const statusCode = (error as Error & { statusCode?: number })?.statusCode || 500;
+          logger.error('Token endpoint error:', error);
           
-          // Determine OAuth error code and description
-          let oauthError = 'server_error';
+          // Extract more details from the error
           let errorDescription = 'Internal server error during token exchange';
+          let statusCode = 500;
           
-          if (microsoftError) {
-            // Use Microsoft's error code (e.g., invalid_grant, invalid_client, etc.)
-            oauthError = microsoftError.error || 'server_error';
-            errorDescription = microsoftError.error_description || errorDescription;
-          } else if (error instanceof Error) {
+          if (error instanceof Error) {
             errorDescription = error.message;
             // Check if it's a Microsoft API error (400/401/403)
-            if (statusCode >= 400 && statusCode < 500) {
-              oauthError = 'invalid_request';
+            if (error.message.includes('400') || error.message.includes('401') || error.message.includes('403')) {
+              statusCode = 400; // Return 400 for client errors from Microsoft
             }
+            // Log the full error for debugging
+            logger.error('Token exchange error details:', {
+              message: error.message,
+              stack: error.stack,
+              body: req.body ? { ...req.body, code: req.body.code ? '[REDACTED]' : undefined } : undefined,
+            });
           }
           
-          // Log detailed error information
-          logger.error('Token endpoint error:', {
-            statusCode,
-            oauthError,
-            errorDescription,
-            microsoftError,
-            requestBody: req.body ? {
-              grant_type: req.body.grant_type,
-              hasCode: !!req.body.code,
-              codeLength: req.body.code?.length,
-              hasRedirectUri: !!req.body.redirect_uri,
-              redirectUri: req.body.redirect_uri,
-              hasCodeVerifier: !!req.body.code_verifier,
-              codeVerifierLength: req.body.code_verifier?.length,
-            } : undefined,
-            errorStack: error instanceof Error ? error.stack : undefined,
-          });
-          
-          // Return appropriate HTTP status code
-          // Use 400 for client errors (4xx), 500 for server errors
-          const httpStatus = statusCode >= 400 && statusCode < 500 ? 400 : 500;
-          
-          res.status(httpStatus).json({
-            error: oauthError,
+          res.status(statusCode).json({
+            error: 'server_error',
             error_description: errorDescription,
           });
         }
