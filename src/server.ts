@@ -159,41 +159,37 @@ class MicrosoftGraphServer {
       app.use(rateLimitMiddleware);
       app.use(corsMiddleware);
 
-      const oauthProvider = new MicrosoftOAuthProvider(this.authManager, this.secrets!);
+      // Build available scopes from endpoints
+      const availableScopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
 
-      // OAuth Authorization Server Discovery
+      // Initialize OAuth provider with configuration
+      const oauthProvider = new MicrosoftOAuthProvider(this.authManager, this.secrets!, {
+        port,
+        scopes: availableScopes,
+      });
+
+      // OAuth Authorization Server Discovery (RFC 8414)
       app.get('/.well-known/oauth-authorization-server', async (req, res) => {
         const protocol = req.secure ? 'https' : 'http';
-        const url = new URL(`${protocol}://${req.get('host')}`);
+        const baseUrl = `${protocol}://${req.get('host')}`;
 
-        const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+        // Update provider base URL dynamically
+        oauthProvider.setBaseUrl(baseUrl);
 
         res.json({
-          issuer: url.origin,
-          authorization_endpoint: `${url.origin}/authorize`,
-          token_endpoint: `${url.origin}/token`,
-          response_types_supported: ['code'],
-          response_modes_supported: ['query'],
-          grant_types_supported: ['authorization_code', 'refresh_token'],
-          token_endpoint_auth_methods_supported: ['none'],
-          code_challenge_methods_supported: ['S256'],
-          scopes_supported: scopes,
+          ...oauthProvider.getAuthorizationServerMetadata(baseUrl),
+          scopes_supported: availableScopes,
         });
       });
 
-      // OAuth Protected Resource Discovery
+      // OAuth Protected Resource Discovery (RFC 9728)
       app.get('/.well-known/oauth-protected-resource', async (req, res) => {
         const protocol = req.secure ? 'https' : 'http';
-        const url = new URL(`${protocol}://${req.get('host')}`);
-
-        const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+        const baseUrl = `${protocol}://${req.get('host')}`;
 
         res.json({
-          resource: `${url.origin}/mcp`,
-          authorization_servers: [url.origin],
-          scopes_supported: scopes,
-          bearer_methods_supported: ['header'],
-          resource_documentation: `${url.origin}`,
+          ...oauthProvider.getProtectedResourceMetadata(baseUrl),
+          scopes_supported: availableScopes,
         });
       });
 
@@ -1205,64 +1201,72 @@ class MicrosoftGraphServer {
         }
       });
 
-      // OAuth client registration endpoint (MCP OAuth specification)
-      // This endpoint allows MCP clients to register themselves for OAuth flows
+      // OAuth Dynamic Client Registration endpoint (RFC 7591)
+      // This endpoint allows MCP clients to dynamically register for OAuth flows
+      // @see https://tools.ietf.org/html/rfc7591
+      // @see https://modelcontextprotocol.io
       app.post('/register', async (req, res) => {
         try {
-          logger.info('OAuth client registration request received', {
-            method: req.method,
-            contentType: req.get('Content-Type'),
-          });
-
-          const body = req.body;
           const protocol = req.secure ? 'https' : 'http';
           const baseUrl = `${protocol}://${req.get('host')}`;
 
-          // #region agent log
-          const requestHost = req.get('host');
-          const isNgrok = requestHost?.includes('ngrok') || false;
-          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              location: 'server.ts:978',
-              message: 'OAuth client registration',
-              data: { baseUrl, requestHost, isNgrok, port },
-              timestamp: Date.now(),
-              sessionId: 'debug-session',
-              runId: 'run1',
-              hypothesisId: 'D',
-            }),
-          }).catch(() => {});
-          // #endregion
+          logger.info('OAuth Dynamic Client Registration request (RFC 7591)', {
+            method: req.method,
+            contentType: req.get('Content-Type'),
+            baseUrl,
+          });
 
-          // MCP OAuth client registration response
-          // Returns the client configuration including redirect URIs
-          const clientId = this.secrets!.clientId;
-          const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+          // Update provider base URL
+          oauthProvider.setBaseUrl(baseUrl);
 
-          const registrationResponse = {
-            client_id: clientId,
-            client_secret: this.secrets?.clientSecret || undefined,
-            redirect_uris: [
+          const body = req.body || {};
+
+          // RFC 7591 Section 2: Client Registration Request
+          // redirect_uris is REQUIRED per RFC 7591
+          // However, for MCP compatibility, we provide defaults if not specified
+          const registrationRequest = {
+            redirect_uris: body.redirect_uris || [
               `${baseUrl}/callback`,
               `http://localhost:${port}/callback`,
               `http://127.0.0.1:${port}/callback`,
             ],
-            token_endpoint_auth_method: this.secrets?.clientSecret ? 'client_secret_post' : 'none',
-            grant_types: ['authorization_code', 'refresh_token'],
-            response_types: ['code'],
-            scopes: scopes,
-            issuer: baseUrl,
-            authorization_endpoint: `${baseUrl}/authorize`,
-            token_endpoint: `${baseUrl}/token`,
+            client_name: body.client_name,
+            client_uri: body.client_uri,
+            logo_uri: body.logo_uri,
+            scope: body.scope,
+            contacts: body.contacts,
+            tos_uri: body.tos_uri,
+            policy_uri: body.policy_uri,
+            jwks_uri: body.jwks_uri,
+            jwks: body.jwks,
+            software_id: body.software_id,
+            software_version: body.software_version,
+            grant_types: body.grant_types || ['authorization_code', 'refresh_token'],
+            response_types: body.response_types || ['code'],
+            token_endpoint_auth_method: body.token_endpoint_auth_method,
           };
 
-          logger.info('OAuth client registration successful', {
-            client_id: clientId.substring(0, 8) + '...',
+          // Register the client using the OAuth provider
+          const result = oauthProvider.registerClient(registrationRequest);
+
+          // Check for registration errors (RFC 7591 Section 3.2.2)
+          if ('error' in result) {
+            logger.warn('OAuth client registration failed', {
+              error: result.error,
+              error_description: result.error_description,
+            });
+
+            return res.status(400).json(result);
+          }
+
+          // RFC 7591 Section 3.2.1: Client Registration Response
+          logger.info('OAuth client registered successfully (RFC 7591)', {
+            client_id: result.client_id.substring(0, 16) + '...',
+            client_name: result.client_name,
+            redirect_uris_count: result.redirect_uris.length,
           });
 
-          res.status(201).json(registrationResponse);
+          res.status(201).json(result);
         } catch (error) {
           logger.error('OAuth client registration error:', error);
           res.status(500).json({

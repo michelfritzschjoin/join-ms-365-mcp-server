@@ -1,0 +1,453 @@
+---
+description: MCP Specification Conformity & OpenWebUI Compatibility Guidelines
+globs:
+  - "src/**/*.ts"
+  - "src/index.ts"
+  - "src/server.ts"
+  - "src/graph-tools.ts"
+  - "src/auth-tools.ts"
+  - "src/discovery-tools.ts"
+alwaysApply: true
+---
+
+# MCP Specification Conformity & OpenWebUI Compatibility
+
+This rule ensures all development strictly adheres to the official Model Context Protocol (MCP) specification from https://modelcontextprotocol.io and maintains full compatibility with OpenWebUI as an MCP client.
+
+## Core Principles
+
+### 1. ALWAYS Follow MCP Specification
+
+All implementations MUST conform to the official MCP specification:
+- **Source of Truth**: https://modelcontextprotocol.io
+- **SDK Reference**: @modelcontextprotocol/sdk (latest stable version)
+- **Protocol Version**: Use the latest stable protocol version
+
+### 2. OpenWebUI Compatibility Requirements
+
+OpenWebUI functions as an MCP client and requires:
+- Standard MCP transport protocols (stdio, HTTP, SSE, Streamable HTTP)
+- JSON-RPC 2.0 message format
+- Proper capability negotiation
+- Standard tool/resource/prompt definitions
+
+## MCP Architecture Overview
+
+```
+┌─────────────────────┐         ┌─────────────────────┐
+│    MCP CLIENT       │         │    MCP SERVER       │
+│  (OpenWebUI,        │◄───────►│  (This Server)      │
+│   Cursor, Claude)   │ JSON-RPC│                     │
+└─────────────────────┘         └─────────────────────┘
+```
+
+## Transport Layer Requirements
+
+### Supported Transports (OpenWebUI Compatible)
+
+| Transport | Use Case | OpenWebUI Support |
+|-----------|----------|-------------------|
+| stdio | Local processes | ✅ Supported |
+| HTTP+SSE | Remote servers (legacy) | ✅ Supported |
+| Streamable HTTP | Remote servers (recommended) | ✅ Supported |
+
+### Transport Configuration
+
+```typescript
+// Streamable HTTP Transport (Recommended for OpenWebUI)
+{
+  "mcpServers": {
+    "ms365": {
+      "url": "https://your-server.com/mcp",
+      "transportType": "streamable-http"
+    }
+  }
+}
+
+// SSE Transport (Legacy, still supported)
+{
+  "mcpServers": {
+    "ms365": {
+      "serverUrl": "https://your-server.com/sse",
+      "transportType": "sse"
+    }
+  }
+}
+```
+
+## Tool Definition Standards
+
+### MUST Follow MCP Tool Schema
+
+Every tool MUST be defined according to the MCP specification:
+
+```typescript
+interface McpToolDefinition {
+  name: string;                    // Unique tool identifier (kebab-case)
+  description: string;             // Clear, concise description
+  inputSchema: {                   // JSON Schema for parameters
+    type: 'object';
+    properties: Record<string, JsonSchemaProperty>;
+    required?: string[];
+  };
+}
+```
+
+### Tool Naming Conventions
+
+```typescript
+// ✅ CORRECT: Use descriptive, action-oriented names
+'list-calendar-events'
+'get-mail-message'
+'send-mail'
+'create-todo-task'
+
+// ❌ WRONG: Avoid vague or non-descriptive names
+'getStuff'
+'doAction'
+'handler1'
+```
+
+### Tool Response Format
+
+Tools MUST return responses in standard MCP format:
+
+```typescript
+interface McpToolResult {
+  content: Array<{
+    type: 'text' | 'image' | 'resource';
+    text?: string;
+    data?: string;      // Base64 for images
+    mimeType?: string;
+    uri?: string;       // For resource references
+  }>;
+  isError?: boolean;
+}
+```
+
+## Resource Definition Standards
+
+### Resource URI Format
+
+```typescript
+// Standard resource URI patterns
+'ms365://users/{userId}'
+'ms365://mail/{messageId}'
+'ms365://calendar/{eventId}'
+'ms365://files/{driveId}/{itemId}'
+```
+
+### Resource Template Definition
+
+```typescript
+interface McpResourceTemplate {
+  uriTemplate: string;           // URI template with placeholders
+  name: string;                  // Human-readable name
+  description?: string;          // Optional description
+  mimeType?: string;             // Content MIME type
+}
+```
+
+## Capability Negotiation
+
+### Server Capabilities (MUST Declare)
+
+```typescript
+const serverCapabilities: ServerCapabilities = {
+  tools: {
+    listChanged: true,           // Tool list can change
+  },
+  resources: {
+    subscribe: false,            // Resource subscriptions
+    listChanged: true,           // Resource list can change
+  },
+  prompts: {
+    listChanged: false,          // Prompts are static
+  },
+  logging: {},                   // Logging support
+};
+```
+
+### Client Compatibility Check
+
+```typescript
+// Always check client capabilities before using features
+if (clientCapabilities?.sampling) {
+  // Client supports sampling
+}
+
+if (clientCapabilities?.roots?.listChanged) {
+  // Client can handle root changes
+}
+```
+
+## JSON-RPC 2.0 Message Format
+
+### Request Format (OpenWebUI Sends)
+
+```typescript
+interface JsonRpcRequest {
+  jsonrpc: '2.0';
+  id: string | number;
+  method: string;
+  params?: object;
+}
+```
+
+### Response Format (Server Returns)
+
+```typescript
+// Success response
+interface JsonRpcSuccessResponse {
+  jsonrpc: '2.0';
+  id: string | number;
+  result: unknown;
+}
+
+// Error response
+interface JsonRpcErrorResponse {
+  jsonrpc: '2.0';
+  id: string | number;
+  error: {
+    code: number;
+    message: string;
+    data?: unknown;
+  };
+}
+```
+
+### Standard Error Codes
+
+```typescript
+const MCP_ERROR_CODES = {
+  PARSE_ERROR: -32700,
+  INVALID_REQUEST: -32600,
+  METHOD_NOT_FOUND: -32601,
+  INVALID_PARAMS: -32602,
+  INTERNAL_ERROR: -32603,
+};
+```
+
+## OpenWebUI-Specific Considerations
+
+### 1. Tool Descriptions for AI
+
+Tool descriptions MUST be clear and actionable for AI models:
+
+```typescript
+// ✅ GOOD: Clear, specific description
+{
+  name: 'list-mail-messages',
+  description: 'List email messages from the user\'s mailbox. ' +
+               'Supports filtering by folder, search query, and pagination. ' +
+               'Returns message previews including subject, sender, and date.',
+}
+
+// ❌ BAD: Vague description
+{
+  name: 'get-emails',
+  description: 'Gets emails',
+}
+```
+
+### 2. Parameter Documentation
+
+Always include detailed parameter descriptions:
+
+```typescript
+inputSchema: {
+  type: 'object',
+  properties: {
+    folderId: {
+      type: 'string',
+      description: 'The mail folder ID. Use "inbox", "drafts", "sentitems", ' +
+                   'or a specific folder ID. Defaults to inbox if not specified.',
+    },
+    top: {
+      type: 'number',
+      description: 'Maximum number of messages to return (1-100). Default: 10.',
+      minimum: 1,
+      maximum: 100,
+    },
+    search: {
+      type: 'string',
+      description: 'Search query using KQL syntax. Example: "from:john@example.com"',
+    },
+  },
+  required: [],
+}
+```
+
+### 3. Response Size Limits
+
+OpenWebUI may have context limits. Implement pagination and truncation:
+
+```typescript
+// Limit response sizes
+const MAX_ITEMS_PER_REQUEST = 50;
+const MAX_CONTENT_LENGTH = 100000; // characters
+
+// Truncate large responses with indicator
+if (content.length > MAX_CONTENT_LENGTH) {
+  content = content.slice(0, MAX_CONTENT_LENGTH) + '\n... [truncated]';
+}
+```
+
+### 4. Error Messages for AI Understanding
+
+Errors should be informative and actionable:
+
+```typescript
+// ✅ GOOD: Actionable error message
+throw new Error(
+  'Authentication required. The user must log in first using the "login" tool ' +
+  'before accessing calendar events.'
+);
+
+// ❌ BAD: Technical error only
+throw new Error('401 Unauthorized');
+```
+
+## Implementation Checklist
+
+### Server Initialization
+
+- [ ] Implement `initialize` handler with proper capability negotiation
+- [ ] Return server info (name, version)
+- [ ] Declare all supported capabilities
+- [ ] Handle `initialized` notification
+
+### Tool Implementation
+
+- [ ] All tools have unique, descriptive names
+- [ ] All tools have complete inputSchema with JSON Schema
+- [ ] All tools return proper MCP content format
+- [ ] Error handling returns isError: true with helpful messages
+
+### Resource Implementation
+
+- [ ] Resources use proper URI templates
+- [ ] Resources declare correct MIME types
+- [ ] Resource content is properly encoded
+
+### Transport Layer
+
+- [ ] Support Streamable HTTP for OpenWebUI
+- [ ] Implement proper SSE for legacy clients
+- [ ] Handle connection lifecycle correctly
+- [ ] Implement proper keep-alive for long connections
+
+## Testing OpenWebUI Compatibility
+
+### Manual Testing Checklist
+
+1. **Connection Test**
+   ```bash
+   # Test server endpoint
+   curl -X POST https://your-server.com/mcp \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{...}}'
+   ```
+
+2. **Tool Discovery**
+   - Verify OpenWebUI can discover all tools
+   - Check tool descriptions display correctly
+   - Validate parameter schemas are parsed
+
+3. **Tool Execution**
+   - Test each tool category
+   - Verify response format is correct
+   - Check error handling works
+
+### Integration Test Example
+
+```typescript
+describe('OpenWebUI Compatibility', () => {
+  it('should respond to initialize request', async () => {
+    const response = await sendJsonRpc({
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        clientInfo: { name: 'OpenWebUI', version: '1.0.0' },
+        capabilities: {},
+      },
+    });
+    
+    expect(response.result.serverInfo).toBeDefined();
+    expect(response.result.capabilities.tools).toBeDefined();
+  });
+
+  it('should list tools with proper schema', async () => {
+    const response = await sendJsonRpc({ method: 'tools/list' });
+    
+    for (const tool of response.result.tools) {
+      expect(tool.name).toMatch(/^[a-z][a-z0-9-]*$/);
+      expect(tool.description).toBeTruthy();
+      expect(tool.inputSchema.type).toBe('object');
+    }
+  });
+});
+```
+
+## Version Compatibility
+
+### Protocol Version Support
+
+```typescript
+const SUPPORTED_PROTOCOL_VERSIONS = [
+  '2024-11-05',  // Current stable
+  '2025-03-26',  // Latest with auth
+];
+
+// Negotiate version during initialize
+function negotiateVersion(clientVersion: string): string {
+  if (SUPPORTED_PROTOCOL_VERSIONS.includes(clientVersion)) {
+    return clientVersion;
+  }
+  return SUPPORTED_PROTOCOL_VERSIONS[0]; // Fallback to stable
+}
+```
+
+## Security Considerations for OpenWebUI
+
+### 1. Input Validation
+
+```typescript
+// ALWAYS validate inputs from OpenWebUI
+import { z } from 'zod';
+
+const listMessagesSchema = z.object({
+  folderId: z.string().optional(),
+  top: z.number().min(1).max(100).optional(),
+  search: z.string().max(1000).optional(),
+});
+
+// Validate before processing
+const validated = listMessagesSchema.parse(params);
+```
+
+### 2. Rate Limiting
+
+```typescript
+// Implement rate limiting for OpenWebUI requests
+const RATE_LIMIT = {
+  maxRequestsPerMinute: 60,
+  maxRequestsPerHour: 1000,
+};
+```
+
+### 3. Token Handling
+
+```typescript
+// NEVER log or expose tokens
+// ALWAYS use secure token storage
+// Validate tokens on every request
+```
+
+## References
+
+- [MCP Specification](https://modelcontextprotocol.io)
+- [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk)
+- [MCP Protocol Schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/schema.json)
+- [OpenWebUI Documentation](https://docs.openwebui.com)
+- [JSON-RPC 2.0 Specification](https://www.jsonrpc.org/specification)

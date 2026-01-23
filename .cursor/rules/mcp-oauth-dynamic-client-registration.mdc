@@ -1,0 +1,327 @@
+---
+description: MCP OAuth 2.1 Dynamic Client Registration Implementation Guidelines
+globs:
+  - "src/**/*.ts"
+  - "src/oauth-provider.ts"
+  - "src/server.ts"
+  - "src/auth.ts"
+  - "src/lib/microsoft-auth.ts"
+alwaysApply: true
+---
+
+# MCP OAuth 2.1 Dynamic Client Registration
+
+This rule defines the implementation guidelines for OAuth 2.1 and Dynamic Client Registration (RFC 7591) in the Microsoft 365 MCP Server, following the official MCP specification from https://modelcontextprotocol.io.
+
+## Core Architecture
+
+### MCP Server as Resource Server (NOT Authorization Server)
+
+Per the MCP specification (2025-06-18), MCP servers function as **Resource Servers**, not Authorization Servers:
+
+```
+┌────────────────────┐       ┌────────────────────┐       ┌────────────────────┐
+│    MCP Client      │◄─────►│    MCP Server      │◄─────►│  Authorization     │
+│   (e.g. Cursor)    │       │  (Resource Server) │       │     Server         │
+│                    │       │                    │       │  (Microsoft Entra) │
+└────────────────────┘       └────────────────────┘       └────────────────────┘
+```
+
+**Key responsibilities:**
+- MCP Server validates incoming access tokens
+- MCP Server provides protected resources (Microsoft Graph API access)
+- Authorization Server (Microsoft Entra ID) issues tokens
+
+## Relevant OAuth Standards
+
+This implementation adheres to:
+
+| Standard | RFC/Draft | Purpose |
+|----------|-----------|---------|
+| OAuth 2.1 | IETF DRAFT draft-ietf-oauth-v2-1-13 | Core OAuth framework |
+| Dynamic Client Registration | RFC 7591 | Client registration protocol |
+| Authorization Server Metadata | RFC 8414 | Discovery endpoints |
+| Protected Resource Metadata | RFC 9728 | Resource server discovery |
+
+## Dynamic Client Registration (RFC 7591)
+
+### Registration Endpoint
+
+The server MUST expose a `/register` endpoint that accepts POST requests with the following structure:
+
+```typescript
+// Request body (RFC 7591 Section 2)
+interface ClientRegistrationRequest {
+  redirect_uris: string[];                    // REQUIRED
+  client_name?: string;                       // OPTIONAL
+  client_uri?: string;                        // OPTIONAL
+  logo_uri?: string;                          // OPTIONAL
+  scope?: string;                             // OPTIONAL
+  contacts?: string[];                        // OPTIONAL
+  tos_uri?: string;                           // OPTIONAL
+  policy_uri?: string;                        // OPTIONAL
+  jwks_uri?: string;                          // OPTIONAL
+  jwks?: object;                              // OPTIONAL
+  software_id?: string;                       // OPTIONAL
+  software_version?: string;                  // OPTIONAL
+  grant_types?: string[];                     // OPTIONAL (default: ["authorization_code"])
+  response_types?: string[];                  // OPTIONAL (default: ["code"])
+  token_endpoint_auth_method?: string;        // OPTIONAL (default: "none" for public clients)
+}
+
+// Response body (RFC 7591 Section 3.2.1)
+interface ClientRegistrationResponse {
+  client_id: string;                          // REQUIRED
+  client_secret?: string;                     // CONDITIONAL (for confidential clients)
+  client_id_issued_at?: number;               // OPTIONAL
+  client_secret_expires_at?: number;          // REQUIRED if client_secret issued
+  redirect_uris: string[];                    // REQUIRED
+  grant_types: string[];                      // REQUIRED
+  response_types: string[];                   // REQUIRED
+  token_endpoint_auth_method: string;         // REQUIRED
+  // ... echo back all registered metadata
+}
+```
+
+### Client Storage
+
+Dynamically registered clients MUST be stored with:
+- Unique client_id (UUID v4 recommended)
+- Timestamp of registration
+- All metadata from registration request
+- Optional expiration time
+
+```typescript
+interface RegisteredClient {
+  client_id: string;
+  client_secret?: string;
+  client_secret_expires_at?: number;
+  client_id_issued_at: number;
+  redirect_uris: string[];
+  grant_types: string[];
+  response_types: string[];
+  token_endpoint_auth_method: string;
+  client_name?: string;
+  scope?: string;
+}
+```
+
+## Discovery Endpoints
+
+### OAuth Authorization Server Metadata (RFC 8414)
+
+Endpoint: `/.well-known/oauth-authorization-server`
+
+```json
+{
+  "issuer": "https://your-server.com",
+  "authorization_endpoint": "https://your-server.com/authorize",
+  "token_endpoint": "https://your-server.com/token",
+  "registration_endpoint": "https://your-server.com/register",
+  "response_types_supported": ["code"],
+  "response_modes_supported": ["query"],
+  "grant_types_supported": ["authorization_code", "refresh_token"],
+  "token_endpoint_auth_methods_supported": ["none", "client_secret_post"],
+  "code_challenge_methods_supported": ["S256"],
+  "scopes_supported": ["User.Read", "Mail.Read", "..."]
+}
+```
+
+### Protected Resource Metadata (RFC 9728)
+
+Endpoint: `/.well-known/oauth-protected-resource`
+
+```json
+{
+  "resource": "https://your-server.com/mcp",
+  "authorization_servers": ["https://your-server.com"],
+  "scopes_supported": ["User.Read", "Mail.Read", "..."],
+  "bearer_methods_supported": ["header"],
+  "resource_documentation": "https://your-server.com"
+}
+```
+
+## Implementation Guidelines
+
+### 1. MicrosoftOAuthProvider Extension
+
+The `MicrosoftOAuthProvider` class should implement:
+
+```typescript
+import { ProxyOAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/providers/proxyProvider.js';
+
+export class MicrosoftOAuthProvider extends ProxyOAuthServerProvider {
+  private registeredClients: Map<string, RegisteredClient> = new Map();
+
+  async registerClient(request: ClientRegistrationRequest): Promise<ClientRegistrationResponse> {
+    // Validate redirect_uris
+    // Generate unique client_id
+    // Store client metadata
+    // Return registration response
+  }
+
+  async getClient(clientId: string): Promise<RegisteredClient | null> {
+    // Return registered client or null
+  }
+}
+```
+
+### 2. Token Validation
+
+Access tokens MUST be validated by:
+1. Checking token format (JWT or opaque)
+2. Verifying with Microsoft Graph API (`/me` endpoint)
+3. Extracting user context for request handling
+
+```typescript
+verifyAccessToken: async (token: string): Promise<AuthInfo> => {
+  const response = await fetch('https://graph.microsoft.com/v1.0/me', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  
+  if (!response.ok) {
+    throw new Error(`Token verification failed: ${response.status}`);
+  }
+  
+  return {
+    token,
+    clientId: extractClientId(token),
+    scopes: extractScopes(token),
+  };
+}
+```
+
+### 3. PKCE Support (Required for Public Clients)
+
+Public clients (without client_secret) MUST use PKCE:
+
+```typescript
+// code_challenge_method: S256
+const codeVerifier = generateCodeVerifier();  // 43-128 characters
+const codeChallenge = base64url(sha256(codeVerifier));
+```
+
+### 4. Scope Management
+
+Scopes should map to Microsoft Graph permissions:
+
+```typescript
+const SCOPE_MAPPING = {
+  'User.Read': 'Basic user profile',
+  'Mail.Read': 'Read user mail',
+  'Mail.ReadWrite': 'Read and write user mail',
+  'Calendars.Read': 'Read user calendars',
+  'Files.Read': 'Read user files',
+  // ... additional scopes
+};
+```
+
+## Error Handling
+
+### Registration Errors (RFC 7591 Section 3.2.2)
+
+```typescript
+interface RegistrationError {
+  error: 'invalid_redirect_uri' | 'invalid_client_metadata' | 'invalid_software_statement';
+  error_description?: string;
+}
+```
+
+### Token Errors (RFC 6749 Section 5.2)
+
+```typescript
+interface TokenError {
+  error: 'invalid_request' | 'invalid_client' | 'invalid_grant' | 
+         'unauthorized_client' | 'unsupported_grant_type';
+  error_description?: string;
+}
+```
+
+## Security Requirements
+
+### MUST Implement:
+- [ ] HTTPS for all endpoints in production
+- [ ] PKCE for all public clients
+- [ ] Token validation via Microsoft Graph API
+- [ ] Secure storage of client secrets
+- [ ] Rate limiting on registration endpoint
+- [ ] Input validation with Zod schemas
+
+### SHOULD Implement:
+- [ ] Client credential rotation
+- [ ] Registration access tokens for client management
+- [ ] Audit logging for all OAuth operations
+
+### MUST NOT:
+- [ ] Store tokens in logs
+- [ ] Accept redirect_uris with localhost in production (except for development)
+- [ ] Skip token validation
+
+## Cursor Integration
+
+When integrating with Cursor IDE:
+
+1. **MCP Server Login:**
+   ```bash
+   cursor-agent mcp login <server-name>
+   ```
+
+2. **List MCP Tools:**
+   ```bash
+   cursor-agent mcp list-tools
+   ```
+
+3. **Configuration in `.cursor/mcp.json`:**
+   ```json
+   {
+     "mcpServers": {
+       "ms365": {
+         "url": "https://your-server.com/mcp",
+         "transportType": "streamable-http"
+       }
+     }
+   }
+   ```
+
+## File Structure
+
+```
+src/
+├── oauth-provider.ts          # MicrosoftOAuthProvider with DCR support
+├── oauth-client-store.ts      # Client storage implementation
+├── server.ts                  # Express routes for OAuth endpoints
+├── lib/
+│   └── microsoft-auth.ts      # Microsoft-specific auth helpers
+└── types/
+    └── oauth.ts               # OAuth type definitions
+```
+
+## Testing
+
+Test OAuth flows with:
+
+```typescript
+describe('Dynamic Client Registration', () => {
+  it('should register a new client with valid redirect_uris', async () => {
+    const response = await request(app)
+      .post('/register')
+      .send({
+        redirect_uris: ['http://localhost:3000/callback'],
+        client_name: 'Test Client',
+        grant_types: ['authorization_code'],
+      });
+    
+    expect(response.status).toBe(201);
+    expect(response.body.client_id).toBeDefined();
+  });
+});
+```
+
+## References
+
+- [MCP Specification](https://modelcontextprotocol.io)
+- [MCP Auth SDK](https://mcp-auth.dev)
+- [RFC 7591 - OAuth 2.0 Dynamic Client Registration](https://tools.ietf.org/html/rfc7591)
+- [RFC 8414 - OAuth 2.0 Authorization Server Metadata](https://tools.ietf.org/html/rfc8414)
+- [RFC 9728 - OAuth 2.0 Protected Resource Metadata](https://tools.ietf.org/html/rfc9728)
+- [OAuth 2.1 IETF Draft](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1)
