@@ -231,7 +231,12 @@ async function executeGraphTool(
         let nextLink = combinedResponse['@odata.nextLink'];
         let pageCount = 1;
 
-        while (nextLink && pageCount < 100) {
+        const maxPages = parseInt(
+          process.env.MS365_MCP_MAX_PAGES || '500',
+          10
+        ); // Default 500, configurable via ENV
+
+        while (nextLink && pageCount < maxPages) {
           logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);
 
           const url = new URL(nextLink);
@@ -257,8 +262,8 @@ async function executeGraphTool(
           }
         }
 
-        if (pageCount >= 100) {
-          logger.warn(`Reached maximum page limit (100) for pagination`);
+        if (pageCount >= maxPages) {
+          logger.warn(`Reached maximum page limit (${maxPages}) for pagination`);
         }
 
         combinedResponse.value = allItems;

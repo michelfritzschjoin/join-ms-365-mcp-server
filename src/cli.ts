@@ -48,6 +48,10 @@ program
   .option('--force-work-scopes', 'Backwards compatibility alias for --org-mode (deprecated)')
   .option('--toon', '(experimental) Enable TOON output format for 30-60% token reduction')
   .option('--discovery', 'Enable runtime tool discovery and loading (experimental feature)')
+  .option(
+    '--enable-discovery-tools',
+    'Enable intelligent discovery tools (deep-research, discover-project, discover-person, etc.)'
+  )
   .option('--cloud <type>', 'Microsoft cloud environment: global (default) or china (21Vianet)');
 
 export interface CommandOptions {
@@ -69,6 +73,7 @@ export interface CommandOptions {
   forceWorkScopes?: boolean;
   toon?: boolean;
   discovery?: boolean;
+  enableDiscoveryTools?: boolean;
   cloud?: string;
 
   [key: string]: unknown;

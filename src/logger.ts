@@ -10,16 +10,27 @@ if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir);
 }
 
+// Determine log format
+const logFormat = process.env.LOG_FORMAT || 'text';
+const useJsonFormat = logFormat.toLowerCase() === 'json';
+
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
   format: winston.format.combine(
     winston.format.timestamp({
       format: 'YYYY-MM-DD HH:mm:ss',
     }),
-    winston.format.printf(({ level, message, timestamp }) => {
-      return `${timestamp} ${level.toUpperCase()}: ${message}`;
-    })
+    winston.format.errors({ stack: true }),
+    useJsonFormat
+      ? winston.format.json()
+      : winston.format.printf(({ level, message, timestamp, ...meta }) => {
+          const metaStr = Object.keys(meta).length > 0 ? ` ${JSON.stringify(meta)}` : '';
+          return `${timestamp} ${level.toUpperCase()}: ${message}${metaStr}`;
+        })
   ),
+  defaultMeta: {
+    service: 'ms-365-mcp-server',
+  },
   transports: [
     new winston.transports.File({
       filename: path.join(logsDir, 'error.log'),

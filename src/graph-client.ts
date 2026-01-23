@@ -5,6 +5,15 @@ import { encode as toonEncode } from '@toon-format/toon';
 import type { AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
 import { getRequestTokens } from './request-context.js';
+import {
+  GraphApiError,
+  RateLimitError,
+  ServiceUnavailableError,
+  AuthenticationError,
+  AuthorizationError,
+  isRetryableError,
+  getRetryAfter,
+} from './errors.js';
 
 interface GraphRequestOptions {
   headers?: Record<string, string>;
@@ -49,77 +58,176 @@ class GraphClient {
     this.outputFormat = outputFormat;
   }
 
-  async makeRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<unknown> {
+  async makeRequest(
+    endpoint: string,
+    options: GraphRequestOptions = {},
+    maxRetries = 3
+  ): Promise<unknown> {
     const contextTokens = getRequestTokens();
-    let accessToken =
-      options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    
+    // Try to get token from various sources
+    let accessToken: string | null = null;
+    try {
+      accessToken =
+        options.accessToken ?? contextTokens?.accessToken ?? (await this.authManager.getToken());
+    } catch (error) {
+      // Token acquisition failed - this is OK, we'll throw a helpful error below
+      logger.debug('Token acquisition failed, will return authentication error', {
+        error: (error as Error).message,
+      });
+    }
+    
     const refreshToken = options.refreshToken ?? contextTokens?.refreshToken;
 
     if (!accessToken) {
-      throw new Error('No access token available');
+      throw new AuthenticationError(
+        'No access token available. Please authenticate first using the login tool or provide an OAuth token via Authorization header.'
+      );
     }
 
-    try {
-      let response = await this.performRequest(endpoint, accessToken, options);
+    let lastError: unknown;
+    let attempt = 0;
 
-      if (response.status === 401 && refreshToken) {
-        // Token expired, try to refresh
-        const newTokens = await this.refreshAccessToken(refreshToken);
-        accessToken = newTokens.accessToken;
+    while (attempt <= maxRetries) {
+      try {
+        let response = await this.performRequest(endpoint, accessToken, options);
 
-        // Retry the request with new token
-        response = await this.performRequest(endpoint, accessToken, options);
-      }
+        // Handle 401 - Token expired
+        if (response.status === 401 && refreshToken) {
+          // Token expired, try to refresh
+          const newTokens = await this.refreshAccessToken(refreshToken);
+          accessToken = newTokens.accessToken;
 
-      if (response.status === 403) {
-        const errorText = await response.text();
-        if (errorText.includes('scope') || errorText.includes('permission')) {
-          throw new Error(
-            `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
+          // Retry the request with new token
+          response = await this.performRequest(endpoint, accessToken, options);
+        }
+
+        // Handle 403 - Authorization error
+        if (response.status === 403) {
+          const errorText = await response.text();
+          if (errorText.includes('scope') || errorText.includes('permission')) {
+            throw new AuthorizationError(
+              `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`
+            );
+          }
+          throw new AuthorizationError(
+            `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
           );
         }
-        throw new Error(
-          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`
+
+        // Handle 429 - Rate limit
+        if (response.status === 429) {
+          const retryAfterHeader = response.headers.get('Retry-After');
+          const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+          throw new RateLimitError(retryAfter, response);
+        }
+
+        // Handle 503 - Service unavailable
+        if (response.status === 503) {
+          const retryAfterHeader = response.headers.get('Retry-After');
+          const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+          throw new ServiceUnavailableError(retryAfter, response);
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new GraphApiError(
+            `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`,
+            response.status,
+            false,
+            undefined,
+            response
+          );
+        }
+
+        const text = await response.text();
+        let result: unknown;
+
+        if (text === '') {
+          result = { message: 'OK!' };
+        } else {
+          try {
+            result = JSON.parse(text);
+          } catch {
+            result = { message: 'OK!', rawResponse: text };
+          }
+        }
+
+        // If includeHeaders is requested, add response headers to the result
+        if (options.includeHeaders) {
+          const etag = response.headers.get('ETag') || response.headers.get('etag');
+
+          // Simple approach: just add ETag to the result if it's an object
+          if (result && typeof result === 'object' && !Array.isArray(result)) {
+            return {
+              ...result,
+              _etag: etag || 'no-etag-found',
+            };
+          }
+        }
+
+        return result;
+      } catch (error) {
+        lastError = error;
+
+        // Check if error is retryable
+        if (isRetryableError(error) && attempt < maxRetries) {
+          const retryAfter = getRetryAfter(error);
+          const backoffDelay = this.calculateBackoff(attempt, retryAfter);
+
+          logger.warn(
+            `Retryable error (attempt ${attempt + 1}/${maxRetries}): ${(error as Error).message}. Retrying in ${backoffDelay}ms`
+          );
+
+          await this.sleep(backoffDelay);
+          attempt++;
+          continue;
+        }
+
+        // Not retryable or max retries reached
+        if (error instanceof GraphApiError) {
+          throw error;
+        }
+
+        logger.error('Microsoft Graph API request failed:', error);
+        throw new GraphApiError(
+          (error as Error).message || 'Unknown error',
+          500,
+          false,
+          undefined,
+          error
         );
       }
-
-      if (!response.ok) {
-        throw new Error(
-          `Microsoft Graph API error: ${response.status} ${response.statusText} - ${await response.text()}`
-        );
-      }
-
-      const text = await response.text();
-      let result: any;
-
-      if (text === '') {
-        result = { message: 'OK!' };
-      } else {
-        try {
-          result = JSON.parse(text);
-        } catch {
-          result = { message: 'OK!', rawResponse: text };
-        }
-      }
-
-      // If includeHeaders is requested, add response headers to the result
-      if (options.includeHeaders) {
-        const etag = response.headers.get('ETag') || response.headers.get('etag');
-
-        // Simple approach: just add ETag to the result if it's an object
-        if (result && typeof result === 'object' && !Array.isArray(result)) {
-          return {
-            ...result,
-            _etag: etag || 'no-etag-found',
-          };
-        }
-      }
-
-      return result;
-    } catch (error) {
-      logger.error('Microsoft Graph API request failed:', error);
-      throw error;
     }
+
+    // Should not reach here, but handle it anyway
+    throw lastError;
+  }
+
+  /**
+   * Calculate exponential backoff delay
+   */
+  private calculateBackoff(attempt: number, retryAfter?: number): number {
+    // If Retry-After header is provided, use it
+    if (retryAfter) {
+      return retryAfter * 1000; // Convert seconds to milliseconds
+    }
+
+    // Exponential backoff: 1s, 2s, 4s, 8s, etc.
+    const baseDelay = 1000; // 1 second
+    const maxDelay = 30000; // 30 seconds max
+    const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+
+    // Add jitter to prevent thundering herd
+    const jitter = Math.random() * 1000; // 0-1 second jitter
+    return delay + jitter;
+  }
+
+  /**
+   * Sleep for specified milliseconds
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private async refreshAccessToken(

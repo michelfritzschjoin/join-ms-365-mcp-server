@@ -5,6 +5,10 @@ import { getCloudEndpoints, type CloudType } from '../cloud-config.js';
 /**
  * Microsoft Bearer Token Auth Middleware validates that the request has a valid Microsoft access token
  * The token is passed in the Authorization header as a Bearer token
+ * 
+ * This middleware is OPTIONAL - if no token is provided, the request continues without authentication.
+ * This allows MCP Inspector and other tools to connect without requiring OAuth tokens upfront.
+ * The actual API calls will fail if authentication is required but no token is available.
  */
 export const microsoftBearerTokenAuthMiddleware = (
   req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
@@ -13,24 +17,26 @@ export const microsoftBearerTokenAuthMiddleware = (
 ): void => {
   const authHeader = req.headers.authorization;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Missing or invalid access token' });
-    return;
+  // Token is optional - allow requests without token for inspector/testing
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const accessToken = authHeader.substring(7);
+
+    // For Microsoft Graph, we don't validate the token here - we'll let the API calls fail if it's invalid
+    // and handle token refresh in the GraphClient
+
+    // Extract refresh token from a custom header (if provided)
+    const refreshToken = (req.headers['x-microsoft-refresh-token'] as string) || '';
+
+    // Store tokens in request for later use
+    req.microsoftAuth = {
+      accessToken,
+      refreshToken,
+    };
+  } else {
+    // No token provided - this is OK for inspector/testing mode
+    // The request will continue, but API calls may fail if they require authentication
+    logger.debug('Request without Bearer token - continuing without authentication (OK for inspector/testing)');
   }
-
-  const accessToken = authHeader.substring(7);
-
-  // For Microsoft Graph, we don't validate the token here - we'll let the API calls fail if it's invalid
-  // and handle token refresh in the GraphClient
-
-  // Extract refresh token from a custom header (if provided)
-  const refreshToken = (req.headers['x-microsoft-refresh-token'] as string) || '';
-
-  // Store tokens in request for later use
-  req.microsoftAuth = {
-    accessToken,
-    refreshToken,
-  };
 
   next();
 };

@@ -6,6 +6,7 @@ import express, { Request, Response } from 'express';
 import logger, { enableConsoleLogging } from './logger.js';
 import { registerAuthTools } from './auth-tools.js';
 import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
+import { registerDiscoveryTools as registerIntelligentDiscoveryTools } from './discovery-tools.js';
 import GraphClient from './graph-client.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import { MicrosoftOAuthProvider } from './oauth-provider.js';
@@ -51,6 +52,7 @@ class MicrosoftGraphServer {
   private graphClient: GraphClient | null;
   private server: McpServer | null;
   private secrets: AppSecrets | null;
+  private version: string;
 
   constructor(authManager: AuthManager, options: CommandOptions = {}) {
     this.authManager = authManager;
@@ -58,9 +60,11 @@ class MicrosoftGraphServer {
     this.graphClient = null; // Initialized in start() after secrets are loaded
     this.server = null;
     this.secrets = null;
+    this.version = '0.0.0-development';
   }
 
   async initialize(version: string): Promise<void> {
+    this.version = version;
     // Load secrets first
     this.secrets = await getSecrets();
 
@@ -95,6 +99,15 @@ class MicrosoftGraphServer {
         this.options.orgMode
       );
     }
+
+    // Register intelligent discovery tools if enabled
+    if (process.env.MS365_MCP_ENABLE_DISCOVERY_TOOLS === 'true' || this.options.enableDiscoveryTools) {
+      logger.info('Intelligent discovery tools enabled');
+      if (!this.secrets) {
+        throw new Error('Secrets not loaded');
+      }
+      registerIntelligentDiscoveryTools(this.server, this.graphClient, this.secrets);
+    }
   }
 
   async start(): Promise<void> {
@@ -121,27 +134,27 @@ class MicrosoftGraphServer {
 
       const app = express();
       app.set('trust proxy', true);
+
+      // Import middleware
+      const { securityHeadersMiddleware } = await import('./middleware/security-headers.js');
+      const { rateLimitMiddleware } = await import('./middleware/rate-limit.js');
+      const { corsMiddleware } = await import('./middleware/cors.js');
+      const { requestLoggerMiddleware } = await import('./middleware/request-logger.js');
+
+      // Enable request logging FIRST if verbose mode is enabled (before other middleware)
+      // This ensures we capture all requests including health checks
+      if (this.options.v || process.env.DEBUG_REQUESTS === 'true') {
+        logger.info('Request logging enabled - all HTTP requests will be logged');
+        app.use(requestLoggerMiddleware);
+      }
+
       app.use(express.json());
       app.use(express.urlencoded({ extended: true }));
 
-      // Add CORS headers for all routes
-      const corsOrigin = process.env.MS365_MCP_CORS_ORIGIN || '*';
-      app.use((req, res, next) => {
-        res.header('Access-Control-Allow-Origin', corsOrigin);
-        res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-        res.header(
-          'Access-Control-Allow-Headers',
-          'Origin, X-Requested-With, Content-Type, Accept, Authorization, mcp-protocol-version'
-        );
-
-        // Handle preflight requests
-        if (req.method === 'OPTIONS') {
-          res.sendStatus(200);
-          return;
-        }
-
-        next();
-      });
+      // Apply middleware in order
+      app.use(securityHeadersMiddleware);
+      app.use(rateLimitMiddleware);
+      app.use(corsMiddleware);
 
       const oauthProvider = new MicrosoftOAuthProvider(this.authManager, this.secrets!);
 
@@ -191,6 +204,26 @@ class MicrosoftGraphServer {
           `${cloudEndpoints.authority}/${tenantId}/oauth2/v2.0/authorize`
         );
 
+        // #region agent log
+        const requestHost = req.get('host');
+        const requestProtocol = req.protocol;
+        const requestUrl = `${requestProtocol}://${requestHost}${req.url}`;
+        const redirectUriParam = url.searchParams.get('redirect_uri');
+        fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            location: 'server.ts:189',
+            message: 'OAuth authorize request',
+            data: { requestHost, requestProtocol, requestUrl, redirectUriParam, isNgrok: requestHost?.includes('ngrok') || false },
+            timestamp: Date.now(),
+            sessionId: 'debug-session',
+            runId: 'run1',
+            hypothesisId: 'D'
+          })
+        }).catch(() => {});
+        // #endregion
+
         // Only forward parameters that Microsoft OAuth 2.0 v2.0 supports
         const allowedParams = [
           'response_type',
@@ -222,6 +255,602 @@ class MicrosoftGraphServer {
 
         // Redirect to Microsoft's authorization page
         res.redirect(microsoftAuthUrl.toString());
+      });
+
+      // Mount MCP Auth Router FIRST - it may handle OAuth callbacks
+      const authRouter = mcpAuthRouter({
+        provider: oauthProvider,
+        issuerUrl: new URL(`http://localhost:${port}`),
+      });
+      
+      // #region agent log
+      // Instrumentation: Track requests before router
+      app.use((req, res, next) => {
+        if (req.path === '/callback' || req.url?.startsWith('/callback')) {
+          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              location: 'server.ts:238',
+              message: 'Request to /callback before router',
+              data: { path: req.path, url: req.url, method: req.method, headersSent: res.headersSent },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'A'
+            })
+          }).catch(() => {});
+        }
+        next();
+      });
+      // #endregion
+      
+      // Mount the auth router BEFORE custom handlers so it can handle callbacks first
+      app.use(authRouter);
+      
+      // #region agent log
+      // Instrumentation: Track requests after router
+      app.use((req, res, next) => {
+        if (req.path === '/callback' || req.url?.startsWith('/callback')) {
+          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              location: 'server.ts:252',
+              message: 'Request to /callback after router',
+              data: { path: req.path, url: req.url, method: req.method, headersSent: res.headersSent },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'A'
+            })
+          }).catch(() => {});
+        }
+        next();
+      });
+      // #endregion
+      
+      // OAuth callback endpoint - receives authorization code from Microsoft
+      // The mcpAuthRouter is mounted before this handler, so it will handle the callback first if it matches
+      // If the router doesn't handle /callback (it likely handles /auth/callback instead), our handler will execute
+      app.get('/callback', async (req, res) => {
+        // #region agent log
+        const requestHost = req.get('host');
+        const requestProtocol = req.protocol;
+        const requestUrl = `${requestProtocol}://${requestHost}${req.url}`;
+        const isNgrok = requestHost?.includes('ngrok') || false;
+        fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            location: 'server.ts:243',
+            message: 'Custom /callback handler executing',
+            data: { headersSent: res.headersSent, hasCode: !!req.query.code, url: req.url, requestHost, requestProtocol, requestUrl, isNgrok },
+            timestamp: Date.now(),
+            sessionId: 'debug-session',
+            runId: 'run1',
+            hypothesisId: 'D'
+          })
+        }).catch(() => {});
+        // #endregion
+        try {
+          logger.info('OAuth callback received', {
+            query: Object.keys(req.query),
+            hasCode: !!req.query.code,
+            hasError: !!req.query.error,
+            state: req.query.state,
+          });
+
+          const code = req.query.code as string | undefined;
+          const error = req.query.error as string | undefined;
+          const errorDescription = req.query.error_description as string | undefined;
+          const state = req.query.state as string | undefined;
+
+          // Handle OAuth errors from Microsoft
+          if (error) {
+            logger.error('OAuth callback error from Microsoft', {
+              error,
+              errorDescription,
+              state,
+            });
+
+            // Return error page - don't redirect to avoid loops
+            return res.status(400).send(`
+              <!DOCTYPE html>
+              <html>
+                <head>
+                  <title>OAuth Error</title>
+                  <meta charset="utf-8">
+                  <style>
+                    body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                      max-width: 600px;
+                      margin: 50px auto;
+                      padding: 20px;
+                      background: #f5f5f5;
+                    }
+                    .container {
+                      background: white;
+                      padding: 30px;
+                      border-radius: 8px;
+                      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    }
+                    h1 {
+                      color: #d13438;
+                      margin-top: 0;
+                    }
+                    .error {
+                      color: #d13438;
+                      font-weight: bold;
+                    }
+                    code {
+                      background: #f5f5f5;
+                      padding: 2px 6px;
+                      border-radius: 3px;
+                      font-size: 0.9em;
+                    }
+                  </style>
+                </head>
+                <body>
+                  <div class="container">
+                    <h1>✗ OAuth Authorization Error</h1>
+                    <p class="error"><strong>Error:</strong> ${error}</p>
+                    ${errorDescription ? `<p><strong>Description:</strong> ${errorDescription}</p>` : ''}
+                    <p>Please try again or contact support if the problem persists.</p>
+                  </div>
+                  <script>
+                    // Send error to parent window if in iframe
+                    if (window.parent !== window) {
+                      window.parent.postMessage({
+                        type: 'oauth-error',
+                        error: '${error}',
+                        error_description: '${errorDescription || ''}',
+                        state: '${state || ''}'
+                      }, '*');
+                    }
+                  </script>
+                </body>
+              </html>
+            `);
+          }
+
+          // Handle successful authorization
+          if (code) {
+            logger.info('Authorization code received successfully', {
+              codeLength: code.length,
+              state,
+            });
+
+            // Check if client wants HTML response (via Accept header or format parameter)
+            // Default to JSON for programmatic clients (MCP protocol expects structured responses)
+            // Only return HTML if explicitly requested (browsers with text/html Accept header)
+            const acceptHeader = req.get('Accept') || '';
+            const formatParam = req.query.format as string | undefined;
+            // Only return HTML if:
+            // 1. format=html is explicitly set, OR
+            // 2. Accept header includes text/html AND doesn't include application/json
+            const wantsHtml = formatParam === 'html' || (acceptHeader.includes('text/html') && !acceptHeader.includes('application/json') && formatParam !== 'json');
+            // Default to JSON for all MCP clients - HTML only if explicitly requested
+            const wantsJson = !wantsHtml;
+            
+            // #region agent log
+            const userAgent = req.get('User-Agent') || '';
+            fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                location: 'server.ts:394',
+                message: 'Checking response format',
+                data: { wantsJson, wantsHtml, acceptHeader: req.get('Accept'), userAgent: userAgent.substring(0, 100), formatParam: req.query.format, headersSent: res.headersSent },
+                timestamp: Date.now(),
+                sessionId: 'debug-session',
+                runId: 'run1',
+                hypothesisId: 'B'
+              })
+            }).catch(() => {});
+            // #endregion
+            
+            // Default to JSON for programmatic clients (MCP protocol expects structured responses)
+            // Only return HTML if explicitly requested (browsers with text/html Accept header)
+            
+            // Check if client explicitly requests token exchange (via query parameter)
+            const requestToken = req.query.exchange_token === 'true' || req.query.exchange_token === '1';
+            
+            // Try to automatically exchange code for token ONLY if:
+            // 1. Client explicitly requests it (exchange_token=true), AND
+            // 2. We have a code_verifier (for PKCE flows) OR client_secret (for confidential clients)
+            // Otherwise, return the code and let the MCP client (like OpenWebUI) handle the exchange
+            const codeVerifier = req.query.code_verifier as string | undefined;
+            const hasCodeVerifier = !!codeVerifier;
+            const hasClientSecret = !!this.secrets?.clientSecret;
+            
+            // Only attempt automatic token exchange if explicitly requested AND we have the necessary credentials
+            const shouldAttemptAutoExchange = requestToken && (hasCodeVerifier || hasClientSecret);
+            
+            if (shouldAttemptAutoExchange) {
+              const protocol = req.secure ? 'https' : 'http';
+              const baseUrl = `${protocol}://${req.get('host')}`;
+              const redirectUri = req.query.redirect_uri as string || `${baseUrl}/callback`;
+              
+              // Attempt automatic token exchange for MCP clients
+              try {
+                const tenantId = this.secrets?.tenantId || 'common';
+                const clientId = this.secrets!.clientId;
+                const clientSecret = this.secrets?.clientSecret;
+                
+                logger.info('Attempting automatic token exchange for MCP client', {
+                  redirectUri,
+                  hasClientSecret: !!clientSecret,
+                  hasCodeVerifier,
+                });
+
+                const { exchangeCodeForToken } = await import('./lib/microsoft-auth.js');
+                const tokenResult = await exchangeCodeForToken(
+                  code,
+                  redirectUri,
+                  clientId,
+                  clientSecret,
+                  tenantId,
+                  codeVerifier, // Use code_verifier if provided (for PKCE)
+                  this.secrets!.cloudType
+                );
+
+                // Return token directly to MCP client - always JSON for MCP clients
+                logger.info('Token exchange successful, returning token to client');
+                if (wantsJson) {
+                  return res.json({
+                    ...tokenResult,
+                    message: 'Token exchange successful',
+                  });
+                }
+                // Only return HTML if explicitly requested
+                return res.send(`
+                  <!DOCTYPE html>
+                  <html>
+                    <head>
+                      <title>Authorization Successful</title>
+                      <meta charset="utf-8">
+                      <script>
+                        // Return token via postMessage
+                        const tokenData = ${JSON.stringify(tokenResult)};
+                        
+                        // Send to parent/opener
+                        if (window.parent !== window) {
+                          window.parent.postMessage({ type: 'oauth-token', ...tokenData }, '*');
+                        }
+                        if (window.opener && !window.opener.closed) {
+                          window.opener.postMessage({ type: 'oauth-token', ...tokenData }, '*');
+                        }
+                        
+                        // Store token
+                        try {
+                          localStorage.setItem('oauth_access_token', tokenData.access_token);
+                          localStorage.setItem('oauth_refresh_token', tokenData.refresh_token);
+                        } catch(e) {}
+                        
+                        // Close window
+                        setTimeout(() => { if (window.opener) window.close(); }, 500);
+                      </script>
+                    </head>
+                    <body>
+                      <h1>Authorization Successful</h1>
+                      <p>Token received. Closing window...</p>
+                    </body>
+                  </html>
+                `);
+              } catch (tokenError) {
+                const errorMessage = (tokenError as Error).message;
+                const isPKCEError = errorMessage.includes('code_verifier') || errorMessage.includes('code_challenge') || errorMessage.includes('AADSTS50148');
+                
+                if (isPKCEError) {
+                  logger.info('PKCE detected - skipping automatic token exchange, returning code to client', {
+                    error: errorMessage,
+                  });
+                } else {
+                  logger.warn('Automatic token exchange failed, falling back to code return', {
+                    error: errorMessage,
+                  });
+                }
+                // Fall through to return code (JSON or HTML based on wantsJson)
+              }
+            }
+            
+            // For MCP clients, always return JSON - never HTML
+            if (wantsJson) {
+              logger.info('Returning authorization code as JSON response for MCP client');
+              return res.json({
+                code,
+                state: state || null,
+                message: 'Authorization code received successfully',
+              });
+            }
+            
+            // Only return HTML if explicitly requested (browsers with text/html Accept header)
+            const protocol = req.secure ? 'https' : 'http';
+            const baseUrl = `${protocol}://${req.get('host')}`;
+            
+            logger.info('Returning authorization code to MCP client via HTML page with postMessage', {
+              codeLength: code.length,
+              state,
+            });
+
+            // Return success page - code is in URL, client can extract it
+            // Also provide multiple ways for the client to receive the code
+            return res.send(`
+              <!DOCTYPE html>
+              <html>
+                <head>
+                  <title>Authorization Successful</title>
+                  <meta charset="utf-8">
+                  <style>
+                    body {
+                      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+                      max-width: 600px;
+                      margin: 50px auto;
+                      padding: 20px;
+                      background: #f5f5f5;
+                    }
+                    .container {
+                      background: white;
+                      padding: 30px;
+                      border-radius: 8px;
+                      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                    }
+                    h1 {
+                      color: #107c10;
+                      margin-top: 0;
+                    }
+                    .success {
+                      color: #107c10;
+                      font-weight: bold;
+                    }
+                    code {
+                      background: #f5f5f5;
+                      padding: 2px 6px;
+                      border-radius: 3px;
+                      font-size: 0.9em;
+                    }
+                  </style>
+                </head>
+                <body>
+                  <div class="container">
+                    <h1>✓ Authorization Successful</h1>
+                    <p class="success">Authorization code received successfully.</p>
+                    <p>You can close this window. The authorization code has been processed.</p>
+                    <p><small>Code: <code>${code.substring(0, 20)}...</code></small></p>
+                  </div>
+                  <script>
+                    (function() {
+                      const code = '${code}';
+                      const state = '${state || ''}';
+                      const callbackData = {
+                        type: 'oauth-callback',
+                        code: code,
+                        state: state,
+                        url: window.location.href
+                      };
+                      
+                      // Also send in MCP-compatible format
+                      const mcpCallbackData = {
+                        type: 'mcp-oauth-callback',
+                        code: code,
+                        state: state || null
+                      };
+
+                      // Method 1: Send to parent window if in iframe (for OpenWebUI and other MCP clients)
+                      if (window.parent !== window) {
+                        try {
+                          // Send both formats for compatibility
+                          window.parent.postMessage(callbackData, '*');
+                          window.parent.postMessage(mcpCallbackData, '*');
+                          console.log('Sent authorization code to parent window via postMessage');
+                          // #region agent log
+                          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              location: 'server.ts:588',
+                              message: 'postMessage sent to parent window',
+                              data: { hasParent: window.parent !== window, codeLength: callbackData.code.length, sentBothFormats: true },
+                              timestamp: Date.now(),
+                              sessionId: 'debug-session',
+                              runId: 'run1',
+                              hypothesisId: 'C'
+                            })
+                          }).catch(() => {});
+                          // #endregion
+                        } catch (e) {
+                          console.error('Failed to send to parent:', e);
+                          // #region agent log
+                          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              location: 'server.ts:602',
+                              message: 'postMessage to parent failed',
+                              data: { error: String(e) },
+                              timestamp: Date.now(),
+                              sessionId: 'debug-session',
+                              runId: 'run1',
+                              hypothesisId: 'C'
+                            })
+                          }).catch(() => {});
+                          // #endregion
+                        }
+                      }
+
+                      // Method 2: Send to opener window if opened as popup (for OpenWebUI and other MCP clients)
+                      if (window.opener && !window.opener.closed) {
+                        try {
+                          // Send both formats for compatibility
+                          window.opener.postMessage(callbackData, '*');
+                          window.opener.postMessage(mcpCallbackData, '*');
+                          console.log('Sent authorization code to opener window via postMessage');
+                          // #region agent log
+                          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              location: 'server.ts:620',
+                              message: 'postMessage sent to opener window',
+                              data: { hasOpener: !!window.opener, openerClosed: window.opener?.closed, codeLength: callbackData.code.length, sentBothFormats: true },
+                              timestamp: Date.now(),
+                              sessionId: 'debug-session',
+                              runId: 'run1',
+                              hypothesisId: 'C'
+                            })
+                          }).catch(() => {});
+                          // #endregion
+                        } catch (e) {
+                          console.error('Failed to send to opener:', e);
+                          // #region agent log
+                          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                              location: 'server.ts:632',
+                              message: 'postMessage to opener failed',
+                              data: { error: String(e) },
+                              timestamp: Date.now(),
+                              sessionId: 'debug-session',
+                              runId: 'run1',
+                              hypothesisId: 'C'
+                            })
+                          }).catch(() => {});
+                          // #endregion
+                        }
+                      }
+
+                      // Method 3: Store in localStorage (for same-origin clients)
+                      try {
+                        localStorage.setItem('oauth_code', code);
+                        localStorage.setItem('oauth_state', state);
+                        localStorage.setItem('oauth_callback_time', Date.now().toString());
+                        console.log('Stored code in localStorage');
+                      } catch (e) {
+                        console.warn('Could not store in localStorage:', e);
+                      }
+
+                      // Method 4: Store in sessionStorage
+                      try {
+                        sessionStorage.setItem('oauth_code', code);
+                        sessionStorage.setItem('oauth_state', state);
+                        console.log('Stored code in sessionStorage');
+                      } catch (e) {
+                        console.warn('Could not store in sessionStorage:', e);
+                      }
+
+                      // Method 5: Dispatch custom event
+                      try {
+                        const event = new CustomEvent('oauth-callback', {
+                          detail: callbackData,
+                          bubbles: true,
+                          cancelable: true
+                        });
+                        window.dispatchEvent(event);
+                        document.dispatchEvent(event);
+                        console.log('Dispatched oauth-callback event');
+                      } catch (e) {
+                        console.warn('Could not dispatch event:', e);
+                      }
+
+                      // Method 6: Set window.name (for cross-origin popups)
+                      try {
+                        window.name = JSON.stringify(callbackData);
+                        console.log('Set window.name with callback data');
+                      } catch (e) {
+                        console.warn('Could not set window.name:', e);
+                      }
+
+                      // Auto-close popup windows after a delay
+                      if (window.opener && !window.opener.closed) {
+                        setTimeout(function() {
+                          try {
+                            window.close();
+                          } catch (e) {
+                            console.warn('Could not close window:', e);
+                          }
+                        }, 1000);
+                      }
+                    })();
+                  </script>
+                </body>
+              </html>
+            `);
+          }
+
+          // No code and no error - invalid request
+          logger.warn('OAuth callback received without code or error');
+          res.status(400).send(`
+            <html>
+              <head><title>Invalid Request</title></head>
+              <body>
+                <h1>Invalid OAuth Callback</h1>
+                <p>No authorization code or error received.</p>
+              </body>
+            </html>
+          `);
+        } catch (error) {
+          logger.error('OAuth callback error:', error);
+          if (!res.headersSent) {
+            res.status(500).send(`
+              <html>
+                <head><title>Server Error</title></head>
+                <body>
+                  <h1>Server Error</h1>
+                  <p>An error occurred processing the OAuth callback.</p>
+                </body>
+              </html>
+            `);
+          }
+        }
+      });
+
+      // OAuth callback endpoint - also handle POST requests (if Microsoft uses POST)
+      app.post('/callback', async (req, res) => {
+        try {
+          logger.info('OAuth callback POST received', {
+            body: Object.keys(req.body || {}),
+            hasCode: !!req.body?.code,
+            hasError: !!req.body?.error,
+          });
+
+          // Handle POST callback similar to GET
+          const code = req.body?.code as string | undefined;
+          const error = req.body?.error as string | undefined;
+          const errorDescription = req.body?.error_description as string | undefined;
+          const state = req.body?.state as string | undefined;
+
+          if (error) {
+            logger.error('OAuth callback POST error', { error, errorDescription, state });
+            return res.status(400).json({
+              error,
+              error_description: errorDescription,
+              state,
+            });
+          }
+
+          if (code) {
+            logger.info('Authorization code received via POST', { codeLength: code.length, state });
+            // Return JSON response for POST requests
+            return res.json({
+              code,
+              state,
+              message: 'Authorization code received successfully',
+            });
+          }
+
+          res.status(400).json({
+            error: 'invalid_request',
+            error_description: 'No authorization code or error received',
+          });
+        } catch (error) {
+          logger.error('OAuth callback POST error:', error);
+          res.status(500).json({
+            error: 'server_error',
+            error_description: 'Internal server error processing callback',
+          });
+        }
       });
 
       // Token exchange endpoint
@@ -313,12 +942,72 @@ class MicrosoftGraphServer {
         }
       });
 
-      app.use(
-        mcpAuthRouter({
-          provider: oauthProvider,
-          issuerUrl: new URL(`http://localhost:${port}`),
-        })
-      );
+      // OAuth client registration endpoint (MCP OAuth specification)
+      // This endpoint allows MCP clients to register themselves for OAuth flows
+      app.post('/register', async (req, res) => {
+        try {
+          logger.info('OAuth client registration request received', {
+            method: req.method,
+            contentType: req.get('Content-Type'),
+          });
+
+          const body = req.body;
+          const protocol = req.secure ? 'https' : 'http';
+          const baseUrl = `${protocol}://${req.get('host')}`;
+
+          // #region agent log
+          const requestHost = req.get('host');
+          const isNgrok = requestHost?.includes('ngrok') || false;
+          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              location: 'server.ts:978',
+              message: 'OAuth client registration',
+              data: { baseUrl, requestHost, isNgrok, port },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'D'
+            })
+          }).catch(() => {});
+          // #endregion
+
+          // MCP OAuth client registration response
+          // Returns the client configuration including redirect URIs
+          const clientId = this.secrets!.clientId;
+          const scopes = buildScopesFromEndpoints(this.options.orgMode, this.options.enabledTools);
+
+          const registrationResponse = {
+            client_id: clientId,
+            client_secret: this.secrets?.clientSecret || undefined,
+            redirect_uris: [
+              `${baseUrl}/callback`,
+              `http://localhost:${port}/callback`,
+              `http://127.0.0.1:${port}/callback`,
+            ],
+            token_endpoint_auth_method: this.secrets?.clientSecret ? 'client_secret_post' : 'none',
+            grant_types: ['authorization_code', 'refresh_token'],
+            response_types: ['code'],
+            scopes: scopes,
+            issuer: baseUrl,
+            authorization_endpoint: `${baseUrl}/authorize`,
+            token_endpoint: `${baseUrl}/token`,
+          };
+
+          logger.info('OAuth client registration successful', {
+            client_id: clientId.substring(0, 8) + '...',
+          });
+
+          res.status(201).json(registrationResponse);
+        } catch (error) {
+          logger.error('OAuth client registration error:', error);
+          res.status(500).json({
+            error: 'server_error',
+            error_description: 'Failed to process client registration',
+          });
+        }
+      });
 
       // Microsoft Graph MCP endpoints with bearer token auth
       // Handle both GET and POST methods as required by MCP Streamable HTTP specification
@@ -329,6 +1018,46 @@ class MicrosoftGraphServer {
           req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
           res: Response
         ) => {
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              location: 'server.ts:1037',
+              message: 'MCP GET request received',
+              data: {
+                origin: req.headers.origin,
+                host: req.get('host'),
+                userAgent: req.get('user-agent')?.substring(0, 100),
+                hasAuth: !!req.microsoftAuth,
+                query: req.query,
+                url: req.url
+              },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'E'
+            })
+          }).catch(() => {});
+          // #endregion
+          
+          // Handle simple verification requests (GET requests without query params are likely verification)
+          const hasQueryParams = Object.keys(req.query).length > 0;
+          const isVerificationRequest = !hasQueryParams || req.query.verify === 'true';
+
+          if (isVerificationRequest) {
+            logger.info('Simple verification GET request detected, returning verification response');
+            return res.json({
+              status: 'ok',
+              service: 'Microsoft 365 MCP Server',
+              version: this.version,
+              mcp: {
+                endpoint: '/mcp',
+                protocol: 'streamable-http',
+              },
+            });
+          }
+
           const handler = async () => {
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: undefined, // Stateless mode
@@ -356,6 +1085,27 @@ class MicrosoftGraphServer {
             }
           } catch (error) {
             logger.error('Error handling MCP GET request:', error);
+            // #region agent log
+            fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                location: 'server.ts:1085',
+                message: 'MCP GET request error',
+                data: {
+                  error: String(error),
+                  errorMessage: error instanceof Error ? error.message : 'Unknown error',
+                  headersSent: res.headersSent,
+                  origin: req.headers.origin,
+                  host: req.get('host')
+                },
+                timestamp: Date.now(),
+                sessionId: 'debug-session',
+                runId: 'run1',
+                hypothesisId: 'G'
+              })
+            }).catch(() => {});
+            // #endregion
             if (!res.headersSent) {
               res.status(500).json({
                 jsonrpc: '2.0',
@@ -377,6 +1127,74 @@ class MicrosoftGraphServer {
           req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
           res: Response
         ) => {
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              location: 'server.ts:1101',
+              message: 'MCP POST request received',
+              data: {
+                origin: req.headers.origin,
+                host: req.get('host'),
+                userAgent: req.get('user-agent')?.substring(0, 100),
+                contentType: req.get('Content-Type'),
+                hasBody: !!req.body,
+                hasAuth: !!req.microsoftAuth,
+                method: req.body?.method,
+                jsonrpc: req.body?.jsonrpc,
+                url: req.url
+              },
+              timestamp: Date.now(),
+              sessionId: 'debug-session',
+              runId: 'run1',
+              hypothesisId: 'E'
+            })
+          }).catch(() => {});
+          // #endregion
+          
+          // Log incoming request for debugging
+          logger.info('MCP POST request received', {
+            contentType: req.get('Content-Type'),
+            hasBody: !!req.body,
+            bodyType: typeof req.body,
+            bodyKeys: req.body && typeof req.body === 'object' ? Object.keys(req.body) : undefined,
+            method: req.body?.method,
+            jsonrpc: req.body?.jsonrpc,
+          });
+
+          // Handle simple verification requests (not proper MCP JSON-RPC)
+          const body = req.body;
+          const contentType = req.get('Content-Type') || '';
+          const userAgent = req.get('User-Agent') || '';
+          
+          // Check if this is a verification request from Open WebUI or similar tools
+          const isVerificationRequest =
+            !body ||
+            (typeof body === 'object' && Object.keys(body).length === 0) ||
+            (typeof body === 'string' && body.trim() === '') ||
+            (contentType.includes('application/x-www-form-urlencoded') && !body?.jsonrpc) ||
+            (body?.method === 'initialize' && body?.params === undefined) ||
+            userAgent.includes('open-webui') ||
+            req.query?.verify === 'true';
+
+          if (isVerificationRequest && (!body?.jsonrpc || !body?.method || body?.method === 'initialize' && !body?.params)) {
+            logger.info('Verification request detected, returning verification response', {
+              hasBody: !!body,
+              method: body?.method,
+              userAgent,
+            });
+            return res.json({
+              status: 'ok',
+              service: 'Microsoft 365 MCP Server',
+              version: this.version,
+              mcp: {
+                endpoint: '/mcp',
+                protocol: 'streamable-http',
+              },
+            });
+          }
+
           const handler = async () => {
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: undefined, // Stateless mode
@@ -387,6 +1205,12 @@ class MicrosoftGraphServer {
             });
 
             await this.server!.connect(transport);
+            
+            // Ensure response headers are set before handling request
+            if (!res.headersSent) {
+              res.setHeader('Content-Type', 'application/json');
+            }
+            
             await transport.handleRequest(req as any, res as any, req.body);
           };
 
@@ -404,6 +1228,28 @@ class MicrosoftGraphServer {
             }
           } catch (error) {
             logger.error('Error handling MCP POST request:', error);
+            // #region agent log
+            fetch('http://127.0.0.1:7245/ingest/76c7865f-57f2-4bf0-8001-38b29d141bbc', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                location: 'server.ts:1251',
+                message: 'MCP POST request error',
+                data: {
+                  error: String(error),
+                  errorMessage: error instanceof Error ? error.message : 'Unknown error',
+                  headersSent: res.headersSent,
+                  origin: req.headers.origin,
+                  host: req.get('host'),
+                  hasAuth: !!req.microsoftAuth
+                },
+                timestamp: Date.now(),
+                sessionId: 'debug-session',
+                runId: 'run1',
+                hypothesisId: 'G'
+              })
+            }).catch(() => {});
+            // #endregion
             if (!res.headersSent) {
               res.status(500).json({
                 jsonrpc: '2.0',
@@ -420,25 +1266,103 @@ class MicrosoftGraphServer {
 
       // Health check endpoint
       app.get('/', (req, res) => {
-        res.send('Microsoft 365 MCP Server is running');
+        res.json({
+          status: 'ok',
+          service: 'Microsoft 365 MCP Server',
+          version: this.version,
+          endpoints: {
+            mcp: '/mcp',
+            authorize: '/authorize',
+            token: '/token',
+            oauthDiscovery: '/.well-known/oauth-authorization-server',
+            protectedResourceDiscovery: '/.well-known/oauth-protected-resource',
+          },
+        });
+      });
+
+      // POST handler for root endpoint (for health checks or other purposes)
+      app.post('/', (req, res) => {
+        res.json({
+          status: 'ok',
+          service: 'Microsoft 365 MCP Server',
+          message: 'POST requests to root endpoint are supported',
+          version: this.version,
+        });
+      });
+
+      // Favicon handler - return 204 No Content to prevent 404 errors
+      app.get('/favicon.ico', (req, res) => {
+        res.status(204).end();
+      });
+
+      // Verification endpoint for tool server verification (Open WebUI compatibility)
+      app.get('/verify', async (req, res) => {
+        try {
+          res.json({
+            status: 'ok',
+            service: 'Microsoft 365 MCP Server',
+            version: this.version,
+            mcp: {
+              endpoint: '/mcp',
+              protocol: 'streamable-http',
+            },
+          });
+        } catch (error) {
+          logger.error('Error in verification endpoint:', error);
+          res.status(500).json({
+            status: 'error',
+            message: 'Verification failed',
+          });
+        }
+      });
+
+      // POST verification endpoint
+      app.post('/verify', async (req, res) => {
+        try {
+          res.json({
+            status: 'ok',
+            service: 'Microsoft 365 MCP Server',
+            version: this.version,
+            mcp: {
+              endpoint: '/mcp',
+              protocol: 'streamable-http',
+            },
+          });
+        } catch (error) {
+          logger.error('Error in verification endpoint:', error);
+          res.status(500).json({
+            status: 'error',
+            message: 'Verification failed',
+          });
+        }
       });
 
       if (host) {
+        const isAllInterfaces = host === '0.0.0.0' || host === '::';
         app.listen(port, host, () => {
-          logger.info(`Server listening on ${host}:${port}`);
-          logger.info(`  - MCP endpoint: http://${host}:${port}/mcp`);
-          logger.info(`  - OAuth endpoints: http://${host}:${port}/auth/*`);
-          logger.info(
-            `  - OAuth discovery: http://${host}:${port}/.well-known/oauth-authorization-server`
-          );
+          if (isAllInterfaces) {
+            logger.info(`Server listening on all interfaces (${host}:${port})`);
+            logger.info(`  - MCP endpoint: http://0.0.0.0:${port}/mcp (accessible from any interface)`);
+            logger.info(`  - OAuth endpoints: http://0.0.0.0:${port}/auth/* (accessible from any interface)`);
+            logger.info(
+              `  - OAuth discovery: http://0.0.0.0:${port}/.well-known/oauth-authorization-server (accessible from any interface)`
+            );
+          } else {
+            logger.info(`Server listening on ${host}:${port}`);
+            logger.info(`  - MCP endpoint: http://${host}:${port}/mcp`);
+            logger.info(`  - OAuth endpoints: http://${host}:${port}/auth/*`);
+            logger.info(
+              `  - OAuth discovery: http://${host}:${port}/.well-known/oauth-authorization-server`
+            );
+          }
         });
       } else {
         app.listen(port, () => {
           logger.info(`Server listening on all interfaces (0.0.0.0:${port})`);
-          logger.info(`  - MCP endpoint: http://localhost:${port}/mcp`);
-          logger.info(`  - OAuth endpoints: http://localhost:${port}/auth/*`);
+          logger.info(`  - MCP endpoint: http://0.0.0.0:${port}/mcp (accessible from any interface)`);
+          logger.info(`  - OAuth endpoints: http://0.0.0.0:${port}/auth/* (accessible from any interface)`);
           logger.info(
-            `  - OAuth discovery: http://localhost:${port}/.well-known/oauth-authorization-server`
+            `  - OAuth discovery: http://0.0.0.0:${port}/.well-known/oauth-authorization-server (accessible from any interface)`
           );
         });
       }

@@ -1,6 +1,25 @@
 #!/usr/bin/env node
 
-import 'dotenv/config';
+// Load environment variables from .env file
+import { config } from 'dotenv';
+import { resolve } from 'path';
+import { existsSync } from 'fs';
+
+// Try to load .env file from project root
+const envPath = resolve(process.cwd(), '.env');
+if (existsSync(envPath)) {
+  const result = config({ path: envPath });
+  if (result.error) {
+    console.warn(`Warning: Error loading .env file: ${result.error.message}`);
+  }
+} else {
+  // Fallback: try to load from default location
+  const result = config();
+  if (result.error && !existsSync(resolve(process.cwd(), '.env'))) {
+    console.warn('Warning: .env file not found. Environment variables may not be loaded.');
+  }
+}
+
 import { parseArgs } from './cli.js';
 import logger from './logger.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
