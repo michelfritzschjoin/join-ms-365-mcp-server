@@ -6,7 +6,16 @@ COPY package*.json ./
 RUN npm ci --ignore-scripts
 
 COPY . .
-RUN npm run generate
+
+# Only run generate if client.ts doesn't exist
+# This allows pre-generated files to be used in Docker builds
+RUN if [ ! -f "src/generated/client.ts" ]; then \
+      echo "Generated client not found, running generation..."; \
+      npm run generate || (echo "⚠️ Generation failed - ensure src/generated/client.ts exists" && exit 1); \
+    else \
+      echo "✅ Using pre-generated client file"; \
+    fi
+
 RUN npm run build
 
 FROM node:20-alpine AS release
@@ -20,3 +29,4 @@ ENV NODE_ENV=production
 RUN npm ci --ignore-scripts --omit=dev
 
 ENTRYPOINT ["node", "dist/index.js"]
+

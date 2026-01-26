@@ -113,7 +113,11 @@ export class SearchFirstStrategy {
 
       // Build search request body
       const now = new Date();
-      const startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString();
+      const startDate = new Date(
+        now.getFullYear() - 1,
+        now.getMonth(),
+        now.getDate()
+      ).toISOString();
       const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
 
       const requestBody = {

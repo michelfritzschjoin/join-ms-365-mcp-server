@@ -106,15 +106,28 @@ class MicrosoftGraphServer {
     }
 
     // Register intelligent discovery tools if enabled
-    if (
-      process.env.MS365_MCP_ENABLE_DISCOVERY_TOOLS === 'true' ||
-      this.options.enableDiscoveryTools
-    ) {
+    // NOTE: The Learning System requires discovery tools to be enabled!
+    const discoveryToolsEnabled =
+      process.env.MS365_MCP_ENABLE_DISCOVERY_TOOLS === 'true' || this.options.enableDiscoveryTools;
+
+    if (discoveryToolsEnabled) {
       logger.info('Intelligent discovery tools enabled');
       if (!this.secrets) {
         throw new Error('Secrets not loaded');
       }
       registerIntelligentDiscoveryTools(this.server, this.graphClient, this.secrets);
+    } else {
+      // Warn if learning is enabled but discovery tools are not
+      const learningEnabled =
+        process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
+        process.env.MS365_MCP_LEARNING_ENABLED !== '0';
+
+      if (learningEnabled && process.env.MS365_MCP_LEARNING_ENABLED) {
+        logger.warn(
+          'MS365_MCP_LEARNING_ENABLED is set but Learning System requires Discovery Tools! ' +
+            'Set MS365_MCP_ENABLE_DISCOVERY_TOOLS=true to activate the Learning System.'
+        );
+      }
     }
 
     // Register compound tools (multi-step contextual tools)

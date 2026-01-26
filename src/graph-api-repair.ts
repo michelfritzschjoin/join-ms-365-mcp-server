@@ -126,7 +126,7 @@ export class GraphApiRepairManager {
           // Update current request for next strategy in chain
           currentRequest = result.repairedRequest;
           finalResult = result;
-          
+
           logger.info(`Repair strategy ${strategy.name} succeeded`, {
             endpoint: currentRequest.endpoint,
           });

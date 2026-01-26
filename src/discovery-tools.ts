@@ -60,8 +60,7 @@ function initializeDiscoveryComponents(graphClient: GraphClient, secrets: AppSec
     learningEnabled,
     clusterEnabled,
     nlpEnabled,
-    knowledgeBasePath:
-      process.env.MS365_MCP_KNOWLEDGE_BASE_PATH || './data/knowledge-base.json',
+    knowledgeBasePath: process.env.MS365_MCP_KNOWLEDGE_BASE_PATH || './data/knowledge-base.json',
     decayDays: process.env.MS365_MCP_LEARNING_DECAY_DAYS || '90',
     decayFactor: process.env.MS365_MCP_LEARNING_DECAY_FACTOR || '0.1',
   });
@@ -1163,6 +1162,162 @@ while adding new ones.`,
           isError: true,
         };
       }
+    }
+  );
+
+  // ============================================================================
+  // LEARNING STATUS TOOL - Check if Learning System is active and working
+  // ============================================================================
+
+  server.tool(
+    'learning-status',
+    `Check the status of the MCP Learning System.
+
+This tool provides a comprehensive status check of the learning system including:
+- Whether learning is enabled (MS365_MCP_LEARNING_ENABLED)
+- Knowledge base path and accessibility
+- Current learning statistics
+- Pattern clustering status
+- NLP enhancement status
+
+Use this tool to verify the learning system is active and functioning correctly.`,
+    {},
+    {
+      title: 'learning-status',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async () => {
+      // Check environment configuration
+      const learningEnabled =
+        process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
+        process.env.MS365_MCP_LEARNING_ENABLED !== '0';
+      const clusterEnabled =
+        process.env.MS365_MCP_LEARNING_CLUSTER_ENABLED === 'true' ||
+        process.env.MS365_MCP_LEARNING_CLUSTER_ENABLED !== 'false';
+      const nlpEnabled =
+        process.env.MS365_MCP_LEARNING_NLP_ENABLED === 'true' ||
+        process.env.MS365_MCP_LEARNING_NLP_ENABLED !== 'false';
+
+      // Get knowledge base data
+      let kbStatus = {
+        accessible: false,
+        totalPatterns: 0,
+        totalQueries: 0,
+        totalSynonyms: 0,
+        totalEntityMappings: 0,
+        totalDataLocations: 0,
+        totalUserFeedback: 0,
+        totalToolUsagePatterns: 0,
+        totalConfidenceScores: 0,
+        lastUpdated: 'unknown',
+        version: 0,
+      };
+
+      if (knowledgeBaseInstance) {
+        try {
+          const kbData = knowledgeBaseInstance.getAllData();
+          kbStatus = {
+            accessible: true,
+            totalPatterns: Object.keys(kbData.queryPatterns).length,
+            totalQueries: Object.keys(kbData.successfulQueries).length,
+            totalSynonyms: Object.keys(kbData.learnedSynonyms).length,
+            totalEntityMappings: Object.keys(kbData.entityMappings).length,
+            totalDataLocations: Object.keys(kbData.dataLocations).length,
+            totalUserFeedback: Object.values(kbData.userFeedback).reduce(
+              (sum, arr) => sum + arr.length,
+              0
+            ),
+            totalToolUsagePatterns: Object.keys(kbData.toolUsagePatterns).length,
+            totalConfidenceScores: Object.keys(kbData.confidenceScores).length,
+            lastUpdated: kbData.lastUpdated,
+            version: kbData.version,
+          };
+        } catch (error) {
+          logger.warn(`Failed to read knowledge base: ${error}`);
+        }
+      }
+
+      // Check learning system availability
+      const learningSystemAvailable = !!learningSystemInstance;
+
+      // Get performance metrics if available
+      let performanceMetrics = null;
+      if (learningDashboard) {
+        try {
+          performanceMetrics = learningDashboard.getLearningStats();
+        } catch (error) {
+          logger.warn(`Failed to get performance metrics: ${error}`);
+        }
+      }
+
+      const status = {
+        learningSystem: {
+          enabled: learningEnabled,
+          environmentVariable:
+            process.env.MS365_MCP_LEARNING_ENABLED || '(not set - defaults to true)',
+          available: learningSystemAvailable,
+          clusteringEnabled: clusterEnabled,
+          nlpEnabled: nlpEnabled,
+        },
+        configuration: {
+          knowledgeBasePath:
+            process.env.MS365_MCP_KNOWLEDGE_BASE_PATH || './data/knowledge-base.json',
+          decayDays: parseInt(process.env.MS365_MCP_LEARNING_DECAY_DAYS || '90', 10),
+          decayFactor: parseFloat(process.env.MS365_MCP_LEARNING_DECAY_FACTOR || '0.1'),
+          clusterThreshold: parseFloat(process.env.MS365_MCP_LEARNING_CLUSTER_THRESHOLD || '0.7'),
+        },
+        knowledgeBase: kbStatus,
+        performanceMetrics: performanceMetrics
+          ? {
+              totalQueries: performanceMetrics.totalQueries,
+              successfulQueries: performanceMetrics.successfulQueries,
+              failedQueries: performanceMetrics.failedQueries,
+              successRate: performanceMetrics.successRate,
+              averageResultsPerQuery: performanceMetrics.averageResultsPerQuery,
+              averageConfidence: performanceMetrics.averageConfidence,
+            }
+          : null,
+        recommendations: [] as string[],
+      };
+
+      // Add recommendations based on status
+      if (!learningEnabled) {
+        status.recommendations.push(
+          'Learning is disabled. Set MS365_MCP_LEARNING_ENABLED=true to enable.'
+        );
+      }
+      if (kbStatus.totalPatterns === 0 && kbStatus.totalQueries === 0) {
+        status.recommendations.push(
+          'Knowledge base is empty. Use ms365-search or deep-research tools to start learning.'
+        );
+      }
+      if (kbStatus.totalUserFeedback === 0) {
+        status.recommendations.push(
+          'No user feedback recorded. Use provide-feedback tool to improve learning quality.'
+        );
+      }
+      if (!clusterEnabled) {
+        status.recommendations.push(
+          'Pattern clustering is disabled. Set MS365_MCP_LEARNING_CLUSTER_ENABLED=true for better pattern grouping.'
+        );
+      }
+
+      logger.info('Learning status check completed', {
+        enabled: learningEnabled,
+        available: learningSystemAvailable,
+        kbAccessible: kbStatus.accessible,
+        totalPatterns: kbStatus.totalPatterns,
+      });
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(status, null, 2),
+          },
+        ],
+      };
     }
   );
 

@@ -4,24 +4,58 @@ import { execSync } from 'child_process';
 
 export function generateMcpTools(openApiSpec, outputDir) {
   try {
-    console.log('Generating client code from OpenAPI spec using openapi-zod-client...');
+    const rootDir = path.resolve(outputDir, '../..');
+    const openapiDir = path.join(rootDir, 'openapi');
+    const openapiTrimmedFile = path.join(openapiDir, 'openapi-trimmed.yaml');
+    const clientFilePath = path.join(outputDir, 'client.ts');
+
+    // Check if client file already exists - skip generation if it does
+    if (fs.existsSync(clientFilePath)) {
+      console.log('Generated client file already exists, skipping generation...');
+      return true;
+    }
+
+    if (!fs.existsSync(openapiTrimmedFile)) {
+      throw new Error(`OpenAPI trimmed file not found: ${openapiTrimmedFile}`);
+    }
 
     if (!fs.existsSync(outputDir)) {
       fs.mkdirSync(outputDir, { recursive: true });
       console.log(`Created directory: ${outputDir}`);
     }
 
-    const rootDir = path.resolve(outputDir, '../..');
-    const openapiDir = path.join(rootDir, 'openapi');
-    const openapiTrimmedFile = path.join(openapiDir, 'openapi-trimmed.yaml');
+    console.log('Generating client code from OpenAPI spec using openapi-zod-client...');
 
-    const clientFilePath = path.join(outputDir, 'client.ts');
-    execSync(
-      `npx -y openapi-zod-client "${openapiTrimmedFile}" -o "${clientFilePath}" --with-description --strict-objects --additional-props-default-value=false`,
-      {
-        stdio: 'inherit',
+    // Check if we're in Docker/CI environment
+    const isDocker = fs.existsSync('/.dockerenv') || process.env.CI === 'true';
+    const isArm64 = process.arch === 'arm64';
+
+    if (isDocker && isArm64) {
+      console.warn('⚠️  Warning: Running on ARM64 in Docker - generation may fail in emulated environments');
+      console.warn('   If generation fails, ensure generated files are committed or use native ARM64 build');
+    }
+
+    try {
+      execSync(
+        `npx -y openapi-zod-client "${openapiTrimmedFile}" -o "${clientFilePath}" --with-description --strict-objects --additional-props-default-value=false`,
+        {
+          stdio: 'inherit',
+          timeout: 300000, // 5 minute timeout
+        }
+      );
+    } catch (execError) {
+      // If generation fails and we're in Docker, check if file was partially created
+      if (isDocker && fs.existsSync(clientFilePath)) {
+        console.warn('⚠️  Generation command failed but file exists - using existing file');
+        console.warn('   This may indicate a partial generation or emulation issue');
+      } else {
+        throw execError;
       }
-    );
+    }
+
+    if (!fs.existsSync(clientFilePath)) {
+      throw new Error('Client file was not generated');
+    }
 
     console.log(`Generated client code at: ${clientFilePath}`);
 
@@ -44,3 +78,4 @@ export function generateMcpTools(openApiSpec, outputDir) {
     throw new Error(`Error generating client code: ${error.message}`);
   }
 }
+
