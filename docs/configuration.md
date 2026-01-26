@@ -86,6 +86,22 @@ All configuration is done through environment variables. Copy `.example.env` to 
 
 \*Required if you want to use the Learning System
 
+### Chat Memory Configuration
+
+| Variable                           | Description                                | Default | Required |
+| ---------------------------------- | ------------------------------------------ | ------- | -------- |
+| `MS365_MCP_CHAT_MEMORY_ENABLED`    | Enable per-chat memory for context         | `true`  | No       |
+| `MS365_MCP_CHAT_MEMORY_TTL`        | Chat memory TTL in hours (max 72)          | `72`    | No       |
+| `MS365_MCP_CHAT_MEMORY_MAX_HISTORY`| Max conversation entries per chat          | `50`    | No       |
+
+### Privacy & Data Protection (GDPR/DSGVO)
+
+| Variable                   | Description                                        | Default | Required |
+| -------------------------- | -------------------------------------------------- | ------- | -------- |
+| `MS365_MCP_ANONYMIZE_PII`  | Anonymize PII in knowledge base storage            | `true`  | No       |
+
+> **Security Warning**: Setting `MS365_MCP_ANONYMIZE_PII=false` disables the automatic removal of personally identifiable information (email addresses, phone numbers, IDs, etc.) before storing data in the knowledge base. This is **NOT recommended in production** and may violate GDPR/DSGVO compliance. Only disable for development or debugging purposes.
+
 #### Learning System Tools
 
 When properly configured, the following tools are available:

@@ -529,6 +529,75 @@ async function getMessagesFromChats(
 }
 
 /**
+ * Fetch all joined teams with pagination support
+ * Microsoft Graph API may return paginated results for users with many teams
+ * @param graphClient - The Graph API client
+ * @param selectFields - Optional fields to select (default: id,displayName,description,webUrl)
+ * @returns Array of all joined teams
+ */
+async function getAllJoinedTeams(
+  graphClient: GraphClient,
+  selectFields: string = 'id,displayName,description,webUrl'
+): Promise<GraphTeam[]> {
+  const allTeams: GraphTeam[] = [];
+  const maxPages = parseInt(process.env.MS365_MCP_MAX_PAGES || '50', 10);
+  let pageCount = 0;
+
+  try {
+    // First request
+    let response = (await graphClient.makeRequest('/me/joinedTeams', {
+      method: 'GET',
+      queryParams: {
+        $select: selectFields,
+        $top: '999', // Request maximum items per page
+      },
+    })) as { value?: GraphTeam[]; '@odata.nextLink'?: string };
+
+    if (response?.value && Array.isArray(response.value)) {
+      allTeams.push(...response.value);
+    }
+
+    // Handle pagination with @odata.nextLink
+    while (response?.['@odata.nextLink'] && pageCount < maxPages) {
+      pageCount++;
+      const nextLink = response['@odata.nextLink'];
+      logger.debug(`Fetching teams page ${pageCount + 1} from: ${nextLink}`);
+
+      try {
+        const url = new URL(nextLink);
+        const nextPath = url.pathname.replace('/v1.0', '');
+        const nextQueryParams: Record<string, string> = {};
+        for (const [key, value] of url.searchParams.entries()) {
+          nextQueryParams[key] = value;
+        }
+
+        response = (await graphClient.makeRequest(nextPath, {
+          method: 'GET',
+          queryParams: nextQueryParams,
+        })) as { value?: GraphTeam[]; '@odata.nextLink'?: string };
+
+        if (response?.value && Array.isArray(response.value)) {
+          allTeams.push(...response.value);
+        }
+      } catch (pageError) {
+        logger.warn(`Error fetching teams page ${pageCount + 1}: ${pageError}`);
+        break;
+      }
+    }
+
+    if (pageCount >= maxPages) {
+      logger.warn(`Reached maximum page limit (${maxPages}) for teams pagination`);
+    }
+
+    logger.info(`Fetched ${allTeams.length} joined teams across ${pageCount + 1} page(s)`);
+    return allTeams;
+  } catch (error) {
+    logger.error(`Error fetching joined teams: ${error}`);
+    return allTeams;
+  }
+}
+
+/**
  * Find a Teams channel by name across all joined teams
  * Searches through all teams the user is a member of to find a channel by name
  * @param graphClient - The Graph API client
@@ -542,25 +611,14 @@ async function findTeamsChannel(
   teamName?: string
 ): Promise<{ team: GraphTeam; channel: GraphChannel } | null> {
   try {
-    // Step 1: Get all joined teams
-    const teamsResponse = await graphClient.makeRequest('/me/joinedTeams', {
-      method: 'GET',
-      queryParams: {
-        $select: 'id,displayName,description,webUrl',
-      },
-    });
+    // Step 1: Get all joined teams with pagination support
+    const teams = await getAllJoinedTeams(graphClient);
 
-    if (
-      !teamsResponse ||
-      typeof teamsResponse !== 'object' ||
-      !('value' in teamsResponse) ||
-      !Array.isArray(teamsResponse.value)
-    ) {
+    if (teams.length === 0) {
       logger.warn('No teams found for user');
       return null;
     }
 
-    const teams = teamsResponse.value as GraphTeam[];
     const channelNameLower = channelName.toLowerCase();
     const teamNameLower = teamName?.toLowerCase();
 
@@ -2979,16 +3037,19 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
 
       if (isChatMemoryEnabled() && chatId) {
         memoryStore = getChatMemoryStore();
-        memoryContext = memoryStore.buildContextForQuery(chatId);
+        // SECURITY: Pass userId to ensure user only accesses their own memory
+        memoryContext = memoryStore.buildContextForQuery(chatId, userId);
 
         // Apply stored preferences if available
-        const prefs = memoryStore.getPreferences(chatId);
+        // SECURITY: Pass userId to ensure user only accesses their own preferences
+        const prefs = memoryStore.getPreferences(chatId, userId);
         if (prefs?.language && language === 'auto') {
           language = prefs.language;
         }
 
         logger.debug('Chat memory context available', {
           chatId: chatId.substring(0, 8),
+          userId: userId?.substring(0, 8),
           hasContext: !!memoryContext,
           prefsApplied: !!prefs?.language,
         });
@@ -4266,26 +4327,33 @@ Dieses Tool führt automatisch aus:
       const result = await findTeamsChannel(graphClient, channelName, teamName);
 
       if (!result) {
-        // Build helpful error message with available teams
+        // Build helpful error message with all available teams (with pagination)
         let availableTeams: string[] = [];
         try {
-          const teamsResponse = await graphClient.makeRequest('/me/joinedTeams', {
-            method: 'GET',
-            queryParams: { $select: 'displayName' },
-          });
-          if (
-            teamsResponse &&
-            typeof teamsResponse === 'object' &&
-            'value' in teamsResponse &&
-            Array.isArray(teamsResponse.value)
-          ) {
-            availableTeams = (teamsResponse.value as Array<{ displayName: string }>).map(
-              (t) => t.displayName
-            );
-          }
+          const allTeams = await getAllJoinedTeams(graphClient, 'displayName');
+          availableTeams = allTeams.map((t) => t.displayName).sort();
         } catch {
           // Ignore errors when listing teams
         }
+
+        // Check if the team exists but was filtered due to channel not found
+        const teamExists = teamName
+          ? availableTeams.some((t) => t.toLowerCase().includes(teamName.toLowerCase()))
+          : false;
+
+        const errorDetail =
+          teamName && teamExists
+            ? `Team "${teamName}" was found, but channel "${channelName}" does not exist or you don't have access.`
+            : teamName && !teamExists
+              ? `Team "${teamName}" was not found. Check the team name spelling or permissions.`
+              : `Channel "${channelName}" was not found in any of your ${availableTeams.length} teams.`;
+
+        const errorDetailDe =
+          teamName && teamExists
+            ? `Team "${teamName}" wurde gefunden, aber der Kanal "${channelName}" existiert nicht oder Sie haben keinen Zugriff.`
+            : teamName && !teamExists
+              ? `Team "${teamName}" wurde nicht gefunden. Prüfen Sie die Schreibweise oder Berechtigungen.`
+              : `Kanal "${channelName}" wurde in keinem Ihrer ${availableTeams.length} Teams gefunden.`;
 
         return {
           content: [
@@ -4295,17 +4363,18 @@ Dieses Tool führt automatisch aus:
                 {
                   success: false,
                   error: 'Channel not found',
-                  message_en: `Could not find a channel matching "${channelName}"${teamName ? ` in team "${teamName}"` : ''}. Make sure the channel exists and you have access to it.`,
-                  message_de: `Konnte keinen Kanal mit dem Namen "${channelName}"${teamName ? ` im Team "${teamName}"` : ''} finden. Stellen Sie sicher, dass der Kanal existiert und Sie Zugriff haben.`,
+                  message_en: `Could not find a channel matching "${channelName}"${teamName ? ` in team "${teamName}"` : ''}. ${errorDetail}`,
+                  message_de: `Konnte keinen Kanal mit dem Namen "${channelName}"${teamName ? ` im Team "${teamName}"` : ''} finden. ${errorDetailDe}`,
                   searchedFor: {
                     channelName,
                     teamName: teamName || 'all teams',
                   },
-                  availableTeams: availableTeams.slice(0, 10),
+                  totalTeamsSearched: availableTeams.length,
+                  availableTeams: availableTeams, // Show all teams for better debugging
                   hint_en:
-                    'Try specifying the team name or check if you have the required permissions (ChannelMessage.Read.All)',
+                    'Try specifying the exact team name or check if you have the required permissions (ChannelMessage.Read.All)',
                   hint_de:
-                    'Versuchen Sie den Teamnamen anzugeben oder prüfen Sie die Berechtigungen (ChannelMessage.Read.All)',
+                    'Versuchen Sie den exakten Teamnamen anzugeben oder prüfen Sie die Berechtigungen (ChannelMessage.Read.All)',
                 },
                 null,
                 2
@@ -9826,9 +9895,12 @@ Note: Chat memory is automatically cleared after 72 hours of inactivity.`,
         };
       }
 
+      // SECURITY: Get userId for user-scoped memory access
+      const userId = getUserId();
       const memoryStore = getChatMemoryStore();
-      const summary = memoryStore.getMemorySummary(chatId);
-      const serialized = memoryStore.serializeMemory(chatId);
+      // SECURITY: Pass userId to ensure user only accesses their own memory
+      const summary = memoryStore.getMemorySummary(chatId, userId);
+      const serialized = memoryStore.serializeMemory(chatId, userId);
       const stats = memoryStore.getStats();
 
       return {
@@ -9839,6 +9911,7 @@ Note: Chat memory is automatically cleared after 72 hours of inactivity.`,
               {
                 status: 'SUCCESS',
                 chatId: chatId.substring(0, 8) + '...',
+                userId: userId ? userId.substring(0, 8) + '...' : 'anonymous',
                 summary,
                 memory: serialized,
                 globalStats: {
@@ -9922,11 +9995,14 @@ Use this when you want to start fresh without previous context.`,
         };
       }
 
+      // SECURITY: Get userId for user-scoped memory access
+      const userId = getUserId();
       const memoryStore = getChatMemoryStore();
 
       if (!confirm) {
         // Preview what would be cleared
-        const serialized = memoryStore.serializeMemory(chatId);
+        // SECURITY: Pass userId to ensure user only accesses their own memory
+        const serialized = memoryStore.serializeMemory(chatId, userId);
         if (!serialized) {
           return {
             content: [
@@ -9973,7 +10049,8 @@ Use this when you want to start fresh without previous context.`,
       }
 
       // Actually clear the memory
-      const cleared = memoryStore.clearMemory(chatId);
+      // SECURITY: Pass userId to ensure user can only clear their own memory
+      const cleared = memoryStore.clearMemory(chatId, userId);
 
       return {
         content: [
@@ -9984,7 +10061,7 @@ Use this when you want to start fresh without previous context.`,
                 status: cleared ? 'CLEARED' : 'NOT_FOUND',
                 message: cleared
                   ? 'Chat memory has been cleared successfully.'
-                  : 'No memory found to clear.',
+                  : 'No memory found to clear (or access denied).',
                 chatId: chatId.substring(0, 8) + '...',
               },
               null,
@@ -10140,7 +10217,8 @@ Preferences are automatically applied to subsequent queries in this chat.`,
           }
         }
 
-        const prefs = memoryStore.getPreferences(chatId);
+        // SECURITY: Pass userId to ensure user only accesses their own preferences
+        const prefs = memoryStore.getPreferences(chatId, userId);
 
         return {
           content: [

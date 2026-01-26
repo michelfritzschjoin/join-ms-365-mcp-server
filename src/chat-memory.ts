@@ -98,6 +98,8 @@ interface ChatMemoryStoreConfig {
   ttlHours: number;
   maxHistoryPerChat: number;
   cleanupIntervalMinutes: number;
+  /** Require user validation for memory access (default: true) */
+  requireUserValidation: boolean;
 }
 
 /**
@@ -107,7 +109,72 @@ const DEFAULT_CONFIG: ChatMemoryStoreConfig = {
   ttlHours: 72, // 72 hours max
   maxHistoryPerChat: 50,
   cleanupIntervalMinutes: 30,
+  requireUserValidation: true, // Security: require user validation by default
 };
+
+/**
+ * SECURITY: Build a secure memory key combining userId and chatId
+ * This prevents users from accessing other users' chat memories by guessing chatIds.
+ *
+ * Key format: "user:{userId}:chat:{chatId}" or "anon:chat:{chatId}" for anonymous sessions
+ *
+ * @param chatId - The chat session ID
+ * @param userId - The authenticated user ID (from token)
+ * @returns Secure composite key
+ */
+function buildSecureMemoryKey(chatId: string, userId?: string): string {
+  if (userId) {
+    return `user:${userId}:chat:${chatId}`;
+  }
+  // Anonymous sessions use a different prefix - should be rare in production
+  logger.warn('Building memory key without userId - potential security concern', {
+    chatIdPrefix: chatId.substring(0, 8),
+  });
+  return `anon:chat:${chatId}`;
+}
+
+/**
+ * SECURITY: Extract original chatId from a secure memory key
+ * @param secureKey - The secure composite key
+ * @returns The original chatId
+ */
+function extractChatIdFromKey(secureKey: string): string {
+  const parts = secureKey.split(':chat:');
+  return parts.length > 1 ? parts[1] : secureKey;
+}
+
+/**
+ * SECURITY: Validate that the user has access to the memory
+ * @param memory - The chat memory to validate
+ * @param userId - The user attempting to access the memory
+ * @returns True if access is allowed
+ */
+function validateMemoryAccess(memory: ChatMemory, userId?: string): boolean {
+  // If memory has no userId, it was created anonymously - allow access for backward compatibility
+  if (!memory.userId) {
+    logger.debug('Memory has no userId - allowing access (legacy mode)');
+    return true;
+  }
+
+  // If no userId provided in request, deny access to user-owned memory
+  if (!userId) {
+    logger.warn('Access denied: Attempting to access user-owned memory without authentication', {
+      memoryUserId: memory.userId.substring(0, 8),
+    });
+    return false;
+  }
+
+  // Validate user matches
+  if (memory.userId !== userId) {
+    logger.warn("SECURITY: User attempted to access another user's chat memory", {
+      requestingUser: userId.substring(0, 8),
+      memoryOwner: memory.userId.substring(0, 8),
+    });
+    return false;
+  }
+
+  return true;
+}
 
 /**
  * ChatMemoryStore - Singleton managing all chat memories
@@ -230,16 +297,56 @@ export class ChatMemoryStore {
   }
 
   /**
+   * SECURITY: Get the secure storage key for a chat/user combination
+   * This ensures users can only access their own chat memories.
+   */
+  private getSecureKey(chatId: string, userId?: string): string {
+    return buildSecureMemoryKey(chatId, userId);
+  }
+
+  /**
    * Get or create memory for a chat session
+   * SECURITY: Now uses composite key (userId + chatId) to prevent cross-user access
+   *
+   * @param chatId - The chat session ID
+   * @param userId - The authenticated user ID (required for user-scoped memory)
+   * @returns ChatMemory for this user's chat session
    */
   getMemory(chatId: string, userId?: string): ChatMemory {
-    let memory = this.memories.get(chatId);
+    // SECURITY: Use composite key to isolate user data
+    const secureKey = this.getSecureKey(chatId, userId);
+    let memory = this.memories.get(secureKey);
 
     if (!memory) {
-      memory = this.createEmptyMemory(chatId, userId);
-      this.memories.set(chatId, memory);
-      logger.debug(`Created new chat memory for ${chatId}`);
+      // SECURITY: Also check if there's an old-style memory (chatId only) for migration
+      const legacyMemory = this.memories.get(chatId);
+      if (legacyMemory && validateMemoryAccess(legacyMemory, userId)) {
+        // Migrate legacy memory to secure key
+        this.memories.delete(chatId);
+        legacyMemory.userId = userId;
+        this.memories.set(secureKey, legacyMemory);
+        logger.info('Migrated legacy chat memory to secure key', {
+          chatIdPrefix: chatId.substring(0, 8),
+          userIdPrefix: userId?.substring(0, 8),
+        });
+        memory = legacyMemory;
+      } else {
+        memory = this.createEmptyMemory(chatId, userId);
+        this.memories.set(secureKey, memory);
+        logger.debug(`Created new chat memory`, {
+          chatIdPrefix: chatId.substring(0, 8),
+          userIdPrefix: userId?.substring(0, 8),
+          secureKey: secureKey.substring(0, 20) + '...',
+        });
+      }
     } else {
+      // SECURITY: Validate that requesting user owns this memory
+      if (this.config.requireUserValidation && !validateMemoryAccess(memory, userId)) {
+        // Access denied - return a new empty memory instead of exposing other user's data
+        logger.warn('SECURITY: Access denied to chat memory - returning empty memory');
+        return this.createEmptyMemory(chatId, userId);
+      }
+
       // Update last activity
       memory.lastActivity = new Date();
       // Update userId if provided and not set
@@ -252,10 +359,44 @@ export class ChatMemoryStore {
   }
 
   /**
-   * Check if memory exists for a chat
+   * SECURITY: Get memory with strict validation (read-only access)
+   * Returns null if user doesn't have access, instead of creating new memory.
+   *
+   * @param chatId - The chat session ID
+   * @param userId - The authenticated user ID
+   * @returns ChatMemory if user has access, null otherwise
    */
-  hasMemory(chatId: string): boolean {
-    return this.memories.has(chatId);
+  getMemorySecure(chatId: string, userId?: string): ChatMemory | null {
+    const secureKey = this.getSecureKey(chatId, userId);
+    const memory = this.memories.get(secureKey);
+
+    if (!memory) {
+      // Also check legacy key
+      const legacyMemory = this.memories.get(chatId);
+      if (legacyMemory && validateMemoryAccess(legacyMemory, userId)) {
+        return legacyMemory;
+      }
+      return null;
+    }
+
+    if (this.config.requireUserValidation && !validateMemoryAccess(memory, userId)) {
+      logger.warn('SECURITY: getMemorySecure access denied', {
+        chatIdPrefix: chatId.substring(0, 8),
+        requestingUserPrefix: userId?.substring(0, 8),
+      });
+      return null;
+    }
+
+    return memory;
+  }
+
+  /**
+   * Check if memory exists for a chat
+   * SECURITY: Now checks with user-scoped key
+   */
+  hasMemory(chatId: string, userId?: string): boolean {
+    const secureKey = this.getSecureKey(chatId, userId);
+    return this.memories.has(secureKey) || this.memories.has(chatId);
   }
 
   /**
@@ -330,9 +471,10 @@ export class ChatMemoryStore {
 
   /**
    * Get recent conversation context
+   * SECURITY: Uses secure lookup with user validation
    */
-  getRecentContext(chatId: string, limit: number = 5): ConversationEntry[] {
-    const memory = this.memories.get(chatId);
+  getRecentContext(chatId: string, userId?: string, limit: number = 5): ConversationEntry[] {
+    const memory = this.getMemorySecure(chatId, userId);
     if (!memory) {
       return [];
     }
@@ -342,9 +484,10 @@ export class ChatMemoryStore {
 
   /**
    * Get all mentioned entities for a chat
+   * SECURITY: Uses secure lookup with user validation
    */
-  getMentionedEntities(chatId: string): MentionedEntities | null {
-    const memory = this.memories.get(chatId);
+  getMentionedEntities(chatId: string, userId?: string): MentionedEntities | null {
+    const memory = this.getMemorySecure(chatId, userId);
     if (!memory) {
       return null;
     }
@@ -368,9 +511,10 @@ export class ChatMemoryStore {
 
   /**
    * Get preferences for a chat
+   * SECURITY: Uses secure lookup with user validation
    */
-  getPreferences(chatId: string): ChatPreferences | null {
-    const memory = this.memories.get(chatId);
+  getPreferences(chatId: string, userId?: string): ChatPreferences | null {
+    const memory = this.getMemorySecure(chatId, userId);
     if (!memory) {
       return null;
     }
@@ -380,8 +524,48 @@ export class ChatMemoryStore {
 
   /**
    * Clear memory for a specific chat
+   * SECURITY: Uses secure key and validates user access before clearing
    */
-  clearMemory(chatId: string): boolean {
+  clearMemory(chatId: string, userId?: string): boolean {
+    const secureKey = this.getSecureKey(chatId, userId);
+
+    // Try secure key first
+    if (this.memories.has(secureKey)) {
+      const memory = this.memories.get(secureKey);
+      if (memory && this.config.requireUserValidation && !validateMemoryAccess(memory, userId)) {
+        logger.warn("SECURITY: Attempted to clear another user's memory", {
+          chatIdPrefix: chatId.substring(0, 8),
+          requestingUserPrefix: userId?.substring(0, 8),
+        });
+        return false;
+      }
+      this.memories.delete(secureKey);
+      logger.info(`Cleared chat memory (secure key)`, { chatIdPrefix: chatId.substring(0, 8) });
+      return true;
+    }
+
+    // Try legacy key for backward compatibility
+    if (this.memories.has(chatId)) {
+      const memory = this.memories.get(chatId);
+      if (memory && this.config.requireUserValidation && !validateMemoryAccess(memory, userId)) {
+        logger.warn("SECURITY: Attempted to clear another user's legacy memory", {
+          chatIdPrefix: chatId.substring(0, 8),
+        });
+        return false;
+      }
+      this.memories.delete(chatId);
+      logger.info(`Cleared chat memory (legacy key)`, { chatIdPrefix: chatId.substring(0, 8) });
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * LEGACY: Clear memory for a specific chat without user validation
+   * @deprecated Use clearMemory(chatId, userId) instead for security
+   */
+  clearMemoryUnsafe(chatId: string): boolean {
     const existed = this.memories.has(chatId);
     this.memories.delete(chatId);
     if (existed) {
@@ -464,9 +648,10 @@ export class ChatMemoryStore {
 
   /**
    * Serialize a single memory to JSON-compatible format
+   * SECURITY: Uses secure lookup with user validation
    */
-  serializeMemory(chatId: string): SerializedChatMemory | null {
-    const memory = this.memories.get(chatId);
+  serializeMemory(chatId: string, userId?: string): SerializedChatMemory | null {
+    const memory = this.getMemorySecure(chatId, userId);
     if (!memory) {
       return null;
     }
@@ -503,9 +688,10 @@ export class ChatMemoryStore {
 
   /**
    * Get a formatted summary of chat memory for display
+   * SECURITY: Uses secure lookup with user validation
    */
-  getMemorySummary(chatId: string): string {
-    const memory = this.memories.get(chatId);
+  getMemorySummary(chatId: string, userId?: string): string {
+    const memory = this.getMemorySecure(chatId, userId);
     if (!memory) {
       return 'No memory found for this chat session.';
     }
@@ -574,9 +760,10 @@ export class ChatMemoryStore {
 
   /**
    * Build context string for query enhancement
+   * SECURITY: Uses secure lookup with user validation
    */
-  buildContextForQuery(chatId: string): string | null {
-    const memory = this.memories.get(chatId);
+  buildContextForQuery(chatId: string, userId?: string): string | null {
+    const memory = this.getMemorySecure(chatId, userId);
     if (!memory || memory.conversationHistory.length === 0) {
       return null;
     }

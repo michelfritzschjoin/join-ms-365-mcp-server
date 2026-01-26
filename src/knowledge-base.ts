@@ -1,11 +1,106 @@
 /**
  * Knowledge Base for persisting learned synonyms, query patterns, and entity mappings
+ *
+ * SECURITY: This knowledge base stores anonymized query patterns only.
+ * Personal data, email addresses, names, and other PII are sanitized before storage.
  */
 
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import logger from './logger.js';
+
+/**
+ * SECURITY: Check if PII anonymization is enabled
+ * Controlled via environment variable MS365_MCP_ANONYMIZE_PII
+ *
+ * Default: true (enabled) - PII is anonymized before storage
+ * Set to "false" or "0" to disable (NOT recommended in production!)
+ *
+ * @returns True if PII anonymization is enabled
+ */
+function isPIIAnonymizationEnabled(): boolean {
+  const envValue = process.env.MS365_MCP_ANONYMIZE_PII;
+  // Enabled by default unless explicitly disabled
+  return envValue !== 'false' && envValue !== '0';
+}
+
+/**
+ * SECURITY: Patterns to detect and remove PII from stored data
+ * These patterns match common forms of personally identifiable information.
+ */
+const PII_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
+  // Email addresses
+  { pattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, replacement: '[EMAIL]' },
+  // UUIDs/GUIDs (common for user/object IDs)
+  {
+    pattern: /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+    replacement: '[ID]',
+  },
+  // Phone numbers (various formats)
+  { pattern: /(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g, replacement: '[PHONE]' },
+  // German phone numbers
+  { pattern: /\+49\s?\d{3,4}\s?\d{4,8}/g, replacement: '[PHONE]' },
+  // Credit card numbers (basic pattern)
+  { pattern: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/g, replacement: '[CARD]' },
+  // IP addresses
+  { pattern: /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, replacement: '[IP]' },
+  // Social Security Numbers (US)
+  { pattern: /\b\d{3}-\d{2}-\d{4}\b/g, replacement: '[SSN]' },
+  // Dates that might be birthdays (DD.MM.YYYY, MM/DD/YYYY formats)
+  { pattern: /\b\d{1,2}[./-]\d{1,2}[./-](19|20)\d{2}\b/g, replacement: '[DATE]' },
+  // Long numeric strings (potential account numbers)
+  { pattern: /\b\d{10,}\b/g, replacement: '[NUMBER]' },
+];
+
+/**
+ * SECURITY: Sanitize a string by removing potentially sensitive information
+ * This function should be called before storing any user input in the knowledge base.
+ *
+ * Can be disabled via MS365_MCP_ANONYMIZE_PII=false (NOT recommended in production!)
+ *
+ * @param input - The string to sanitize
+ * @returns Sanitized string with PII removed (or original if disabled)
+ */
+function sanitizeForStorage(input: string): string {
+  if (!input) return input;
+
+  // Check if anonymization is enabled
+  if (!isPIIAnonymizationEnabled()) {
+    return input;
+  }
+
+  let sanitized = input;
+  for (const { pattern, replacement } of PII_PATTERNS) {
+    sanitized = sanitized.replace(pattern, replacement);
+  }
+
+  return sanitized;
+}
+
+/**
+ * SECURITY: Check if a string contains potential PII
+ * @param input - The string to check
+ * @returns True if PII is detected
+ */
+function containsPII(input: string): boolean {
+  if (!input) return false;
+
+  // If anonymization is disabled, don't check for PII
+  if (!isPIIAnonymizationEnabled()) {
+    return false;
+  }
+
+  for (const { pattern } of PII_PATTERNS) {
+    if (pattern.test(input)) {
+      return true;
+    }
+    // Reset regex lastIndex since we're using global flag
+    pattern.lastIndex = 0;
+  }
+
+  return false;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -230,7 +325,7 @@ export class KnowledgeBase {
    */
   private trimEntries(): void {
     // Keep only most recent and most successful entries
-    const trimMap = <T extends { lastUsed?: Date; successCount?: number }>(
+    const trimMapWithTimestamp = <T extends { lastUsed?: Date; successCount?: number }>(
       map: Record<string, T>,
       maxSize: number
     ): Record<string, T> => {
@@ -252,24 +347,57 @@ export class KnowledgeBase {
       return Object.fromEntries(entries.slice(0, maxSize));
     };
 
+    // Separate function for SuccessfulQuery which uses 'timestamp' instead of 'lastUsed'
+    const trimSuccessfulQueries = (
+      map: Record<string, SuccessfulQuery>,
+      maxSize: number
+    ): Record<string, SuccessfulQuery> => {
+      const entries = Object.entries(map);
+      if (entries.length <= maxSize) {
+        return map;
+      }
+
+      // Sort by timestamp (most recent first) and results count
+      entries.sort((a, b) => {
+        const aDate = a[1].timestamp?.getTime() || 0;
+        const bDate = b[1].timestamp?.getTime() || 0;
+        if (bDate !== aDate) {
+          return bDate - aDate;
+        }
+        return (b[1].results || 0) - (a[1].results || 0);
+      });
+
+      return Object.fromEntries(entries.slice(0, maxSize));
+    };
+
     const maxPerType = Math.floor(this.maxEntries / 5);
-    this.data.successfulQueries = trimMap(this.data.successfulQueries, maxPerType);
-    this.data.queryPatterns = trimMap(this.data.queryPatterns, maxPerType);
-    this.data.entityMappings = trimMap(this.data.entityMappings, maxPerType);
-    this.data.dataLocations = trimMap(this.data.dataLocations, maxPerType);
+    this.data.successfulQueries = trimSuccessfulQueries(this.data.successfulQueries, maxPerType);
+    this.data.queryPatterns = trimMapWithTimestamp(this.data.queryPatterns, maxPerType);
+    this.data.entityMappings = trimMapWithTimestamp(this.data.entityMappings, maxPerType);
+    this.data.dataLocations = trimMapWithTimestamp(this.data.dataLocations, maxPerType);
   }
 
   /**
    * Record a successful query
+   * SECURITY: Query is sanitized before storage to remove PII
    */
   recordSuccessfulQuery(query: string, results: number, sources: string[], context?: string): void {
-    const key = this.normalizeKey(query);
+    // SECURITY: Sanitize query before storage
+    const sanitizedQuery = sanitizeForStorage(query);
+    const sanitizedContext = context ? sanitizeForStorage(context) : undefined;
+
+    // Log if PII was detected and removed
+    if (containsPII(query)) {
+      logger.debug('SECURITY: PII detected and sanitized from query before storage');
+    }
+
+    const key = this.normalizeKey(sanitizedQuery);
     this.data.successfulQueries[key] = {
-      query,
+      query: sanitizedQuery,
       results,
       sources,
       timestamp: new Date(),
-      context,
+      context: sanitizedContext,
     };
   }
 
@@ -286,14 +414,19 @@ export class KnowledgeBase {
 
   /**
    * Record a learned synonym
+   * SECURITY: Synonyms are sanitized before storage
    */
   recordSynonym(original: string, synonym: string): void {
-    const key = this.normalizeKey(original);
+    // SECURITY: Sanitize before storage
+    const sanitizedOriginal = sanitizeForStorage(original);
+    const sanitizedSynonym = sanitizeForStorage(synonym);
+
+    const key = this.normalizeKey(sanitizedOriginal);
     if (!this.data.learnedSynonyms[key]) {
       this.data.learnedSynonyms[key] = [];
     }
-    if (!this.data.learnedSynonyms[key].includes(synonym)) {
-      this.data.learnedSynonyms[key].push(synonym);
+    if (!this.data.learnedSynonyms[key].includes(sanitizedSynonym)) {
+      this.data.learnedSynonyms[key].push(sanitizedSynonym);
     }
   }
 
@@ -491,6 +624,7 @@ export class KnowledgeBase {
 
   /**
    * Record user feedback
+   * SECURITY: All user input is sanitized before storage
    */
   recordUserFeedback(
     query: string,
@@ -499,18 +633,23 @@ export class KnowledgeBase {
     comment?: string,
     context?: string
   ): void {
-    const key = this.normalizeKey(query);
+    // SECURITY: Sanitize all user-provided data
+    const sanitizedQuery = sanitizeForStorage(query);
+    const sanitizedComment = comment ? sanitizeForStorage(comment) : undefined;
+    const sanitizedContext = context ? sanitizeForStorage(context) : undefined;
+
+    const key = this.normalizeKey(sanitizedQuery);
     if (!this.data.userFeedback[key]) {
       this.data.userFeedback[key] = [];
     }
 
     this.data.userFeedback[key].push({
-      query,
+      query: sanitizedQuery,
       resultId,
       feedbackType,
-      comment,
+      comment: sanitizedComment,
       timestamp: new Date(),
-      context,
+      context: sanitizedContext,
     });
 
     // Keep only last 100 feedback entries per query

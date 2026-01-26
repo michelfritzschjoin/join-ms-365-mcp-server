@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'crypto';
 
 /**
  * Request context that is passed through async operations
@@ -13,12 +14,44 @@ export interface RequestContext {
   chatId?: string;
   /** User ID extracted from token for user-scoped memory */
   userId?: string;
+  /** Token hash for logging (never log actual token) */
+  tokenHash?: string;
 }
 
 /**
  * AsyncLocalStorage for request context propagation
  */
 export const requestContext = new AsyncLocalStorage<RequestContext>();
+
+/**
+ * SECURITY: Create a safe hash of the token for logging purposes
+ * Never log the actual token, only its hash for correlation.
+ *
+ * @param token - The access token to hash
+ * @returns A truncated SHA-256 hash (first 16 chars)
+ */
+export function createTokenHash(token: string): string {
+  if (!token) return 'no-token';
+  return createHash('sha256').update(token).digest('hex').substring(0, 16);
+}
+
+/**
+ * SECURITY: Validate that we have a proper authentication context
+ * @returns True if we have valid authentication tokens
+ */
+export function hasValidAuth(): boolean {
+  const ctx = requestContext.getStore();
+  return !!(ctx?.accessToken && ctx.accessToken.length > 0);
+}
+
+/**
+ * SECURITY: Check if we have user identification
+ * @returns True if we have a user ID from the token
+ */
+export function hasUserIdentity(): boolean {
+  const ctx = requestContext.getStore();
+  return !!(ctx?.userId && ctx.userId.length > 0);
+}
 
 /**
  * Get the current request tokens from context
@@ -42,4 +75,43 @@ export function getChatId(): string | undefined {
  */
 export function getUserId(): string | undefined {
   return requestContext.getStore()?.userId;
+}
+
+/**
+ * SECURITY: Get user ID with requirement check
+ * Throws error if user ID is not available (for protected operations)
+ *
+ * @returns User ID
+ * @throws Error if user ID is not available
+ */
+export function requireUserId(): string {
+  const userId = getUserId();
+  if (!userId) {
+    throw new Error(
+      'SECURITY: User identification required but not available. ' +
+        'This operation requires authentication with a valid Microsoft Graph token.'
+    );
+  }
+  return userId;
+}
+
+/**
+ * SECURITY: Get user context for logging (anonymized)
+ * Returns an object suitable for logging without exposing sensitive data.
+ */
+export function getSecureLogContext(): {
+  hasAuth: boolean;
+  hasUserId: boolean;
+  userIdPrefix?: string;
+  chatIdPrefix?: string;
+  tokenHash?: string;
+} {
+  const ctx = requestContext.getStore();
+  return {
+    hasAuth: hasValidAuth(),
+    hasUserId: hasUserIdentity(),
+    userIdPrefix: ctx?.userId?.substring(0, 8),
+    chatIdPrefix: ctx?.chatId?.substring(0, 8),
+    tokenHash: ctx?.tokenHash,
+  };
 }

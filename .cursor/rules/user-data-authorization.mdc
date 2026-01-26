@@ -1,0 +1,280 @@
+# User Data Authorization & Access Control
+
+Diese Regel stellt sicher, dass Nutzer **ausschließlich Daten erhalten, auf die sie berechtigt sind**. Dies ist fundamental für GDPR/DSGVO-Compliance und ISO 27001.
+
+## Kernprinzip
+
+> **Ein Nutzer darf NUR auf seine eigenen Daten zugreifen oder auf Daten, für die er explizit berechtigt ist.**
+
+## Autorisierungsarchitektur
+
+```
+┌─────────────────────┐
+│   User Request      │
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  Token Validation   │◄── Ist Token gültig?
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  User Context       │◄── Wer ist der Nutzer?
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  Permission Check   │◄── Hat Nutzer Berechtigung?
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  Data Scoping       │◄── Nur autorisierte Daten zurückgeben
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  Response           │
+└─────────────────────┘
+```
+
+## Implementierungsregeln
+
+### 1. IMMER User Context aus Token extrahieren
+
+```typescript
+// ✅ KORREKT: User Context aus validiertem Token
+async function handleRequest(accessToken: string): Promise<void> {
+  // Token validieren und User Context extrahieren
+  const userContext = await validateAndExtractUserContext(accessToken);
+  
+  // Alle Operationen im User Context ausführen
+  const data = await fetchUserData(userContext.userId, userContext.scopes);
+}
+
+// ❌ FALSCH: Keine User Context Validierung
+async function handleRequestWRONG(userId: string): Promise<void> {
+  // NIEMALS User ID direkt aus Request übernehmen ohne Validierung!
+  const data = await fetchUserData(userId);
+}
+```
+
+### 2. Microsoft Graph API: IMMER /me Endpoint verwenden
+
+```typescript
+// ✅ KORREKT: /me Endpoint - automatisch auf eingeloggten User beschränkt
+const myMail = await graphClient.api('/me/messages').get();
+const myCalendar = await graphClient.api('/me/calendar/events').get();
+const myFiles = await graphClient.api('/me/drive/root/children').get();
+
+// ❌ FALSCH: Explizite User ID ohne Berechtigungsprüfung
+const otherUserMail = await graphClient.api('/users/{other-user-id}/messages').get();
+```
+
+### 3. Zugriff auf andere User nur mit expliziter Berechtigung
+
+```typescript
+// ✅ KORREKT: Prüfung vor Zugriff auf andere User
+async function getUserProfile(targetUserId: string, requestContext: RequestContext): Promise<User> {
+  // Prüfen ob es der eigene User ist
+  if (targetUserId === requestContext.userId || targetUserId === 'me') {
+    return graphClient.api('/me').get();
+  }
+  
+  // Prüfen ob User.Read.All Berechtigung vorhanden
+  if (!requestContext.scopes.includes('User.Read.All')) {
+    throw new AuthorizationError(
+      'Keine Berechtigung, andere Benutzerprofile zu lesen. ' +
+      'Erforderliche Berechtigung: User.Read.All'
+    );
+  }
+  
+  // Nur Basisprofil zurückgeben (keine sensiblen Daten)
+  return graphClient.api(`/users/${targetUserId}`)
+    .select(['id', 'displayName', 'mail', 'jobTitle', 'department'])
+    .get();
+}
+```
+
+### 4. Delegated Permissions = User-Scoped Access
+
+```typescript
+// Delegated Permissions beschränken automatisch auf User-Kontext
+const DELEGATED_SCOPE_BEHAVIOR = {
+  'Mail.Read': 'Nur eigene E-Mails des eingeloggten Users',
+  'Calendars.Read': 'Nur eigene Kalender des eingeloggten Users',
+  'Files.Read': 'Nur eigene Dateien des eingeloggten Users',
+  'Files.Read.All': 'Dateien auf die der User Zugriff hat (inkl. geteilte)',
+  'Chat.Read': 'Nur Chats an denen der User teilnimmt',
+  'Tasks.Read': 'Nur eigene Aufgaben des eingeloggten Users',
+};
+```
+
+## Verbotene Muster
+
+### ❌ NIEMALS: User ID aus Request-Parametern ohne Validierung
+
+```typescript
+// ❌ VERBOTEN: Sicherheitslücke - ermöglicht Zugriff auf fremde Daten
+app.get('/api/mail/:userId', async (req, res) => {
+  const mail = await graphClient.api(`/users/${req.params.userId}/messages`).get();
+  res.json(mail);
+});
+```
+
+### ❌ NIEMALS: Admin-Berechtigungen für reguläre Operationen
+
+```typescript
+// ❌ VERBOTEN: Application Permissions für User-Daten
+// Application Permissions umgehen den User-Kontext!
+const allUsersMail = await graphClient.api('/users/{id}/messages').get(); // Mit App Permission
+```
+
+### ❌ NIEMALS: Sensible Daten anderer User exponieren
+
+```typescript
+// ❌ VERBOTEN: Persönliche Daten anderer User
+const SENSITIVE_USER_FIELDS = [
+  'mobilePhone',
+  'businessPhones', 
+  'streetAddress',
+  'city',
+  'postalCode',
+  'birthday',
+  'hireDate',
+  'employeeId',
+  'aboutMe',
+  'interests',
+  'skills',
+];
+```
+
+## Erlaubte Szenarien für Zugriff auf andere User
+
+### Szenario 1: Geteilte Ressourcen
+
+```typescript
+// ✅ OK: Zugriff auf geteilte Dateien (User hat Berechtigung)
+const sharedWithMe = await graphClient.api('/me/drive/sharedWithMe').get();
+
+// ✅ OK: Geteilte Kalender (User wurde eingeladen)
+const sharedCalendars = await graphClient.api('/me/calendars').get();
+```
+
+### Szenario 2: Meeting-Teilnehmer auflösen
+
+```typescript
+// ✅ OK: Basis-Profil von Meeting-Teilnehmern (mit User.Read.All oder User.ReadBasic.All)
+async function resolveAttendees(attendeeEmails: string[]): Promise<AttendeeInfo[]> {
+  return Promise.all(
+    attendeeEmails.map(async (email) => {
+      try {
+        const user = await graphClient.api(`/users/${email}`)
+          .select(['displayName', 'mail', 'jobTitle']) // NUR Basisdaten
+          .get();
+        return { displayName: user.displayName, email: user.mail };
+      } catch {
+        return { displayName: email, email }; // Fallback
+      }
+    })
+  );
+}
+```
+
+### Szenario 3: Organisationsverzeichnis durchsuchen
+
+```typescript
+// ✅ OK: User-Suche mit User.Read.All (nur Basisdaten zurückgeben)
+async function searchUsers(query: string): Promise<BasicUserInfo[]> {
+  const result = await graphClient.api('/users')
+    .filter(`startswith(displayName, '${sanitize(query)}')`)
+    .select(['id', 'displayName', 'mail', 'jobTitle', 'department'])
+    .top(10)
+    .get();
+  
+  return result.value;
+}
+```
+
+## Implementierungs-Checkliste
+
+### Bei jeder API-Operation prüfen:
+
+- [ ] Token validiert und User Context extrahiert?
+- [ ] Wird `/me` Endpoint verwendet wo möglich?
+- [ ] Bei Zugriff auf andere User: Berechtigung geprüft?
+- [ ] Nur notwendige Felder zurückgegeben (Data Minimization)?
+- [ ] Sensible Felder gefiltert bei fremden User-Profilen?
+- [ ] Audit-Log für Zugriff erstellt?
+
+### Code Review Checkliste:
+
+- [ ] Keine hartcodierten User IDs
+- [ ] Keine User IDs direkt aus Request-Parametern ohne Validierung
+- [ ] Keine Application Permissions für User-spezifische Daten
+- [ ] Fehlerbehandlung gibt keine sensiblen Informationen preis
+- [ ] Pagination respektiert User-Berechtigungen
+
+## Error Handling
+
+```typescript
+// Standardisierte Autorisierungsfehler
+class AuthorizationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthorizationError';
+  }
+}
+
+// Verwendung
+function assertUserAccess(targetUserId: string, currentUserId: string): void {
+  if (targetUserId !== currentUserId && targetUserId !== 'me') {
+    throw new AuthorizationError(
+      'Zugriff verweigert: Sie können nur auf Ihre eigenen Daten zugreifen.'
+    );
+  }
+}
+```
+
+## Audit Logging
+
+```typescript
+// Alle Zugriffe protokollieren (ohne sensible Daten!)
+interface AccessAuditLog {
+  timestamp: string;
+  userId: string;              // Wer greift zu
+  action: string;              // Was wird getan
+  targetResource: string;      // Worauf wird zugegriffen
+  targetUserId?: string;       // Falls auf anderen User zugegriffen
+  result: 'success' | 'denied';
+  reason?: string;             // Bei 'denied': Grund
+  // NIEMALS: Tokens, Passwörter, persönliche Daten
+}
+```
+
+## Microsoft Graph Berechtigungsmatrix
+
+| Operation | Endpoint | Erlaubt | Berechtigung |
+|-----------|----------|---------|--------------|
+| Eigene Mails | `/me/messages` | ✅ | Mail.Read |
+| Fremde Mails | `/users/{id}/messages` | ❌ | - |
+| Eigener Kalender | `/me/calendar` | ✅ | Calendars.Read |
+| Fremder Kalender | `/users/{id}/calendar` | ⚠️ | Nur wenn geteilt |
+| Eigene Dateien | `/me/drive` | ✅ | Files.Read |
+| Geteilte Dateien | `/me/drive/sharedWithMe` | ✅ | Files.Read.All |
+| Eigenes Profil | `/me` | ✅ | User.Read |
+| Anderer User (Basis) | `/users/{id}` | ⚠️ | User.Read.All |
+
+## Compliance-Referenzen
+
+- **GDPR Art. 5(1)(f)**: Integrität und Vertraulichkeit
+- **GDPR Art. 25**: Datenschutz durch Technikgestaltung
+- **GDPR Art. 32**: Sicherheit der Verarbeitung
+- **ISO 27001 A.9**: Zugangskontrolle
+- **ISO 27001 A.9.4**: System- und Anwendungszugangskontrolle
+
+## Zusammenfassung
+
+| Regel | Beschreibung |
+|-------|--------------|
+| **User Context First** | Immer User aus validiertem Token extrahieren |
+| **Use /me Endpoint** | Für eigene Daten immer `/me` verwenden |
+| **Least Privilege** | Nur minimale Daten zurückgeben |
+| **No Cross-User Access** | Kein Zugriff auf fremde User ohne Berechtigung |
+| **Audit Everything** | Alle Zugriffe protokollieren |

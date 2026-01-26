@@ -20,7 +20,7 @@ import {
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
-import { requestContext } from './request-context.js';
+import { requestContext, createTokenHash } from './request-context.js';
 import { randomUUID } from 'crypto';
 
 /**
@@ -1523,18 +1523,24 @@ class MicrosoftGraphServer {
             logger.debug('MCP GET request context', { chatId, userId: userId?.substring(0, 8) });
 
             if (req.microsoftAuth) {
+              // SECURITY: Include token hash for secure logging/correlation
+              const tokenHash = createTokenHash(req.microsoftAuth.accessToken);
               await requestContext.run(
                 {
                   accessToken: req.microsoftAuth.accessToken,
                   refreshToken: req.microsoftAuth.refreshToken,
                   chatId,
                   userId,
+                  tokenHash,
                 },
                 handler
               );
             } else {
               // Even without auth, provide chat context
-              await requestContext.run({ accessToken: '', chatId, userId }, handler);
+              await requestContext.run(
+                { accessToken: '', chatId, userId, tokenHash: 'no-auth' },
+                handler
+              );
             }
           } catch (error) {
             logger.error('Error handling MCP GET request:', error);
@@ -1678,18 +1684,24 @@ class MicrosoftGraphServer {
             logger.debug('MCP POST request context', { chatId, userId: userId?.substring(0, 8) });
 
             if (req.microsoftAuth) {
+              // SECURITY: Include token hash for secure logging/correlation
+              const tokenHash = createTokenHash(req.microsoftAuth.accessToken);
               await requestContext.run(
                 {
                   accessToken: req.microsoftAuth.accessToken,
                   refreshToken: req.microsoftAuth.refreshToken,
                   chatId,
                   userId,
+                  tokenHash,
                 },
                 handler
               );
             } else {
               // Even without auth, provide chat context
-              await requestContext.run({ accessToken: '', chatId, userId }, handler);
+              await requestContext.run(
+                { accessToken: '', chatId, userId, tokenHash: 'no-auth' },
+                handler
+              );
             }
           } catch (error) {
             logger.error('Error handling MCP POST request:', error);
