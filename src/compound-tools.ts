@@ -168,6 +168,8 @@ interface SearchHit {
   type?: string;
   date?: string;
   from?: string;
+  rank?: number;
+  relevanceScore?: number;
 }
 
 interface SearchApiResults {
@@ -178,6 +180,44 @@ interface SearchApiResults {
   listItems: SearchHit[];
   chats: SearchHit[];
   people: SearchHit[];
+}
+
+/**
+ * Central Search Options for Microsoft Search API
+ */
+interface CentralSearchOptions {
+  /** Entity types to search (default: all) */
+  entityTypes?: Array<
+    'message' | 'event' | 'driveItem' | 'site' | 'list' | 'listItem' | 'chatMessage' | 'person'
+  >;
+  /** Maximum results to return (default: 100) */
+  maxResults?: number;
+  /** Minimum relevance score 0-100 (default: 0 = no filter) */
+  minRelevance?: number;
+  /** Include time context for events (default: true) */
+  includeTimeContext?: boolean;
+  /** Sort by rank (default: true) */
+  sortByRank?: boolean;
+  /** Custom time range for events */
+  timeRange?: {
+    startDateTime: string;
+    endDateTime: string;
+  };
+}
+
+/**
+ * Central Search Result with metadata
+ */
+interface CentralSearchResult {
+  query: string;
+  searchedAt: string;
+  totalHits: number;
+  results: SearchApiResults;
+  metadata: {
+    entityTypesCounts: Record<string, number>;
+    averageRank: number;
+    searchDuration: number;
+  };
 }
 
 interface FollowUpResults {
@@ -599,50 +639,21 @@ async function findFilesFromPerson(
     logger.warn(`Error getting shared files: ${error}`);
   }
 
-  // 2. Search OneDrive/SharePoint for files mentioning the person
+  // 2. Search OneDrive/SharePoint for files mentioning the person using Central Search
   try {
-    const searchResponse = await graphClient.makeRequest('/search/query', {
-      method: 'POST',
-      body: JSON.stringify({
-        requests: [
-          {
-            entityTypes: ['driveItem'],
-            query: {
-              queryString: `author:"${userDisplayName}" OR createdBy:"${userDisplayName}"`,
-            },
-            from: 0,
-            size: limit,
-          },
-        ],
-      }),
-    });
+    const searchResult = await executeCentralSearch(
+      graphClient,
+      `author:"${userDisplayName}" OR createdBy:"${userDisplayName}"`,
+      {
+        entityTypes: ['driveItem'],
+        maxResults: limit,
+        sortByRank: true,
+      }
+    );
 
-    if (
-      searchResponse &&
-      typeof searchResponse === 'object' &&
-      'value' in searchResponse &&
-      Array.isArray(searchResponse.value)
-    ) {
-      const searchValues = searchResponse.value as Array<{
-        hitsContainers?: Array<{
-          hits?: Array<{
-            resource?: GraphDriveItem;
-          }>;
-        }>;
-      }>;
-
-      for (const container of searchValues) {
-        if (container.hitsContainers) {
-          for (const hitsContainer of container.hitsContainers) {
-            if (hitsContainer.hits) {
-              for (const hit of hitsContainer.hits) {
-                if (hit.resource) {
-                  allFiles.push(hit.resource);
-                }
-              }
-            }
-          }
-        }
+    for (const hit of searchResult.results.files) {
+      if (hit.resource) {
+        allFiles.push(hit.resource as GraphDriveItem);
       }
     }
   } catch (error) {
@@ -822,21 +833,46 @@ async function queryInsights(graphClient: GraphClient): Promise<any[]> {
   }
 }
 
-async function executeSearchApiFirst(
+/**
+ * CENTRAL MICROSOFT SEARCH API FUNCTION
+ *
+ * This is the primary search function that ALL tools should use.
+ * Features:
+ * - Unified search across all Microsoft 365 products
+ * - Proper ranking and relevance scoring
+ * - Configurable entity types
+ * - Time context for events
+ * - Automatic categorization of results
+ *
+ * @param graphClient - The Graph API client
+ * @param query - Search query string
+ * @param options - Optional search configuration
+ * @returns Structured search results with ranking
+ */
+async function executeCentralSearch(
   graphClient: GraphClient,
   query: string,
-  maxResults: number = 500
-): Promise<SearchApiResults> {
-  const entityTypes = [
-    'message',
-    'event',
-    'driveItem',
-    'site',
-    'list',
-    'listItem',
-    'chatMessage',
-    'person',
-  ];
+  options: CentralSearchOptions = {}
+): Promise<CentralSearchResult> {
+  const startTime = Date.now();
+
+  const {
+    entityTypes = [
+      'message',
+      'event',
+      'driveItem',
+      'site',
+      'list',
+      'listItem',
+      'chatMessage',
+      'person',
+    ],
+    maxResults = 100,
+    minRelevance = 0,
+    includeTimeContext = true,
+    sortByRank = true,
+    timeRange,
+  } = options;
 
   const results: SearchApiResults = {
     emails: [],
@@ -848,36 +884,57 @@ async function executeSearchApiFirst(
     people: [],
   };
 
+  const entityTypesCounts: Record<string, number> = {};
+  let totalRank = 0;
+  let hitCount = 0;
+
   try {
+    // Build time context for events
     const now = new Date();
-    const startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString();
-    const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
+    const defaultStartDate = new Date(
+      now.getFullYear() - 2,
+      now.getMonth(),
+      now.getDate()
+    ).toISOString();
+    const defaultEndDate = new Date(
+      now.getFullYear() + 1,
+      now.getMonth(),
+      now.getDate()
+    ).toISOString();
+
+    const searchRequest: Record<string, unknown> = {
+      entityTypes,
+      query: { queryString: query },
+      from: 0,
+      size: Math.min(maxResults, 500),
+    };
+
+    // Add time context if events are included
+    if (includeTimeContext && entityTypes.includes('event')) {
+      searchRequest.timeContext = {
+        startDateTime: timeRange?.startDateTime || defaultStartDate,
+        endDateTime: timeRange?.endDateTime || defaultEndDate,
+      };
+    }
+
+    logger.info(`Central Search: "${query}" across [${entityTypes.join(', ')}]`);
 
     const response = await graphClient.makeRequest('/search/query', {
       method: 'POST',
       body: JSON.stringify({
-        requests: [
-          {
-            entityTypes,
-            query: { queryString: query },
-            from: 0,
-            size: Math.min(maxResults, 500),
-            // Mandatory for 'event' entityType
-            timeContext: {
-              startDateTime: startDate,
-              endDateTime: endDate,
-            },
-          },
-        ],
+        requests: [searchRequest],
       }),
     });
 
     if (response && typeof response === 'object' && 'value' in response) {
-      const searchValues = (response as { value: any[] }).value as Array<{
+      const searchValues = (response as { value: unknown[] }).value as Array<{
         hitsContainers?: Array<{
+          total?: number;
+          moreResultsAvailable?: boolean;
           hits?: Array<{
-            resource?: any;
+            rank?: number;
             summary?: string;
+            resource?: Record<string, unknown>;
           }>;
         }>;
       }>;
@@ -888,53 +945,61 @@ async function executeSearchApiFirst(
             if (hitsContainer.hits) {
               for (const hit of hitsContainer.hits) {
                 if (hit.resource) {
-                  const type = (hit.resource['@odata.type'] || '').toLowerCase();
-                  const rank = (hit as { rank?: number }).rank || 0;
+                  const type = ((hit.resource['@odata.type'] as string) || '').toLowerCase();
+                  const rank = hit.rank || 0;
+
+                  // Calculate relevance score (0-100 based on position)
+                  // Higher rank = more relevant in Microsoft Search
+                  const relevanceScore = Math.max(0, 100 - hitCount * 2);
+
+                  // Skip if below minimum relevance
+                  if (minRelevance > 0 && relevanceScore < minRelevance) {
+                    continue;
+                  }
+
+                  totalRank += rank;
+                  hitCount++;
+
                   const hitData: SearchHit = {
-                    resource: { ...hit.resource, _rank: rank },
+                    resource: { ...hit.resource, _rank: rank, _relevance: relevanceScore },
                     summary: hit.summary,
-                    name: hit.resource.name || hit.resource.subject || hit.resource.displayName,
-                    webUrl: hit.resource.webUrl,
+                    name:
+                      (hit.resource.name as string) ||
+                      (hit.resource.subject as string) ||
+                      (hit.resource.displayName as string),
+                    webUrl: (hit.resource.webUrl as string) || (hit.resource.webLink as string),
+                    rank,
+                    relevanceScore,
                   };
 
-                  // Enhanced person detection with multiple type variations
-                  const isPerson =
-                    type.includes('person') ||
-                    type.includes('microsoft.graph.person') ||
-                    type.includes('#microsoft.graph.person') ||
-                    type.includes('contact') ||
-                    type.includes('microsoft.graph.contact') ||
-                    type.includes('orgcontact') ||
-                    type.includes('user') ||
-                    (hit.resource.displayName &&
-                      (hit.resource.emailAddresses ||
-                        hit.resource.userPrincipalName ||
-                        hit.resource.mail ||
-                        hit.resource.scoredEmailAddresses) &&
-                      !type.includes('message') &&
-                      !type.includes('event') &&
-                      !type.includes('driveitem') &&
-                      !type.includes('site') &&
-                      !type.includes('list'));
+                  // Enhanced categorization
+                  const category = categorizeSearchHit(type, hit.resource);
+                  entityTypesCounts[category] = (entityTypesCounts[category] || 0) + 1;
 
-                  // Categorize by type with priority order
-                  if (type.includes('message') && !type.includes('chat')) {
-                    results.emails.push(hitData);
-                  } else if (type.includes('event')) {
-                    results.events.push(hitData);
-                  } else if (type.includes('driveitem')) {
-                    results.files.push(hitData);
-                  } else if (type.includes('site') && !type.includes('listitem')) {
-                    results.sites.push(hitData);
-                  } else if (type.includes('listitem') || type.includes('list')) {
-                    results.listItems.push(hitData);
-                  } else if (type.includes('chatmessage')) {
-                    results.chats.push(hitData);
-                  } else if (isPerson) {
-                    results.people.push(hitData);
-                  } else {
-                    // Log unrecognized types for debugging
-                    logger.debug(`Unrecognized search result type: ${type}`);
+                  switch (category) {
+                    case 'email':
+                      results.emails.push(hitData);
+                      break;
+                    case 'event':
+                      results.events.push(hitData);
+                      break;
+                    case 'file':
+                      results.files.push(hitData);
+                      break;
+                    case 'site':
+                      results.sites.push(hitData);
+                      break;
+                    case 'listItem':
+                      results.listItems.push(hitData);
+                      break;
+                    case 'chat':
+                      results.chats.push(hitData);
+                      break;
+                    case 'person':
+                      results.people.push(hitData);
+                      break;
+                    default:
+                      logger.debug(`Unrecognized search result type: ${type}`);
                   }
                 }
               }
@@ -943,12 +1008,105 @@ async function executeSearchApiFirst(
         }
       }
     }
+
+    // Sort all results by rank if enabled
+    if (sortByRank) {
+      const sortFn = (a: SearchHit, b: SearchHit) => (b.rank || 0) - (a.rank || 0);
+      results.emails.sort(sortFn);
+      results.events.sort(sortFn);
+      results.files.sort(sortFn);
+      results.sites.sort(sortFn);
+      results.listItems.sort(sortFn);
+      results.chats.sort(sortFn);
+      results.people.sort(sortFn);
+    }
   } catch (error) {
-    logger.error(`Microsoft Search API failed: ${error}`);
+    logger.error(`Central Search API failed: ${error}`);
   }
 
-  return results;
+  const totalHits =
+    results.emails.length +
+    results.events.length +
+    results.files.length +
+    results.sites.length +
+    results.listItems.length +
+    results.chats.length +
+    results.people.length;
+
+  return {
+    query,
+    searchedAt: new Date().toISOString(),
+    totalHits,
+    results,
+    metadata: {
+      entityTypesCounts,
+      averageRank: hitCount > 0 ? totalRank / hitCount : 0,
+      searchDuration: Date.now() - startTime,
+    },
+  };
 }
+
+/**
+ * Categorize a search hit based on its type and properties
+ */
+function categorizeSearchHit(
+  type: string,
+  resource: Record<string, unknown>
+): 'email' | 'event' | 'file' | 'site' | 'listItem' | 'chat' | 'person' | 'unknown' {
+  // Check for person types first (more specific)
+  if (
+    type.includes('person') ||
+    type.includes('contact') ||
+    type.includes('orgcontact') ||
+    type.includes('user') ||
+    (resource.displayName &&
+      (resource.emailAddresses ||
+        resource.userPrincipalName ||
+        resource.mail ||
+        resource.scoredEmailAddresses) &&
+      !type.includes('message') &&
+      !type.includes('event') &&
+      !type.includes('driveitem'))
+  ) {
+    return 'person';
+  }
+
+  if (type.includes('message') && !type.includes('chat')) return 'email';
+  if (type.includes('event')) return 'event';
+  if (type.includes('driveitem')) return 'file';
+  if (type.includes('site') && !type.includes('listitem')) return 'site';
+  if (type.includes('listitem') || type.includes('list')) return 'listItem';
+  if (type.includes('chatmessage')) return 'chat';
+
+  return 'unknown';
+}
+
+/**
+ * Legacy wrapper for executeSearchApiFirst - uses executeCentralSearch internally
+ */
+async function executeSearchApiFirst(
+  graphClient: GraphClient,
+  query: string,
+  maxResults: number = 500
+): Promise<SearchApiResults> {
+  const result = await executeCentralSearch(graphClient, query, {
+    maxResults,
+    sortByRank: true,
+  });
+  return result.results;
+}
+
+// All entity types supported by Microsoft Search API
+const ALL_SEARCH_ENTITY_TYPES = [
+  'message',
+  'event',
+  'driveItem',
+  'site',
+  'list',
+  'listItem',
+  'chatMessage',
+  'person',
+] as const;
 
 async function executeFollowUpQueries(
   graphClient: GraphClient,
@@ -980,7 +1138,7 @@ async function executeFollowUpQueries(
 
 /**
  * Execute a universal search across all Microsoft 365 products
- * This is the core search function used by intelligent tools
+ * Uses the centralized search API for consistent ranking and relevance
  */
 async function executeUniversalSearch(
   graphClient: GraphClient,
@@ -992,164 +1150,100 @@ async function executeUniversalSearch(
   summary: string;
   totalResults: number;
 }> {
-  const results: Record<string, unknown> = {
-    query,
-    searchedAt: new Date().toISOString(),
-  };
-  let totalResults = 0;
+  // Use the centralized search function
+  const searchResult = await executeCentralSearch(graphClient, query, {
+    maxResults: limit,
+    sortByRank: true,
+    includeTimeContext: true,
+  });
+
   const summaryParts: string[] = [];
+  const results: Record<string, unknown> = {
+    query: searchResult.query,
+    searchedAt: searchResult.searchedAt,
+    metadata: searchResult.metadata,
+  };
 
-  // Search emails
-  try {
-    const emailResponse = await graphClient.makeRequest('/me/messages', {
-      method: 'GET',
-      queryParams: {
-        $search: `"${query}"`,
-        $top: String(limit),
-        $select: 'id,subject,bodyPreview,receivedDateTime,from',
-      },
-    });
-
-    if (
-      emailResponse &&
-      typeof emailResponse === 'object' &&
-      'value' in emailResponse &&
-      Array.isArray((emailResponse as { value: unknown[] }).value)
-    ) {
-      const emails = (emailResponse as { value: GraphEmail[] }).value;
-      results.emails = {
-        count: emails.length,
-        items: emails.map((e) => ({
-          subject: e.subject,
-          from: e.from?.emailAddress?.address,
-          date: e.receivedDateTime,
-          preview: e.bodyPreview?.substring(0, 150),
-        })),
-      };
-      totalResults += emails.length;
-      if (emails.length > 0) {
-        summaryParts.push(`${emails.length} emails`);
-      }
-    }
-  } catch (error) {
-    results.emails = { error: `Search failed: ${error}`, count: 0 };
-  }
-
-  // Search files using Microsoft Search API
-  try {
-    const searchResponse = await graphClient.makeRequest('/search/query', {
-      method: 'POST',
-      body: JSON.stringify({
-        requests: [
-          {
-            entityTypes: ['driveItem', 'listItem', 'site'],
-            query: { queryString: query },
-            from: 0,
-            size: limit,
-          },
-        ],
-      }),
-    });
-
-    if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
-      const items: Array<{ name?: string; webUrl?: string; type?: string }> = [];
-      const searchValues = (searchResponse as { value: unknown[] }).value as Array<{
-        hitsContainers?: Array<{
-          hits?: Array<{
-            resource?: { name?: string; webUrl?: string; '@odata.type'?: string };
-          }>;
-        }>;
-      }>;
-
-      for (const container of searchValues) {
-        if (container.hitsContainers) {
-          for (const hitsContainer of container.hitsContainers) {
-            if (hitsContainer.hits) {
-              for (const hit of hitsContainer.hits) {
-                if (hit.resource) {
-                  items.push({
-                    name: hit.resource.name,
-                    webUrl: hit.resource.webUrl,
-                    type: hit.resource['@odata.type'],
-                  });
-                }
-              }
-            }
-          }
-        }
-      }
-
-      results.files = { count: items.length, items };
-      totalResults += items.length;
-      if (items.length > 0) {
-        summaryParts.push(`${items.length} files`);
-      }
-    }
-  } catch (error) {
-    results.files = { error: `Search failed: ${error}`, count: 0 };
-  }
-
-  // Search calendar events
-  try {
-    const now = new Date();
-    const startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString();
-    const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
-
-    // Build query string with all parameters (startDateTime and endDateTime are REQUIRED for calendarView)
-    const queryParams: Record<string, string> = {
-      startDateTime: startDate,
-      endDateTime: endDate,
-      $search: `"${query}"`,
-      $top: String(limit),
-      $select: 'id,subject,start,end,organizer,location',
+  // Map results to the expected format
+  if (searchResult.results.emails.length > 0) {
+    results.emails = {
+      count: searchResult.results.emails.length,
+      items: searchResult.results.emails.slice(0, limit).map((hit) => ({
+        subject: hit.resource?.subject,
+        from: hit.resource?.from?.emailAddress?.address,
+        date: hit.resource?.receivedDateTime,
+        preview: hit.resource?.bodyPreview?.substring(0, 150),
+        relevance: hit.relevanceScore,
+      })),
     };
+    summaryParts.push(`${searchResult.results.emails.length} emails`);
+  }
 
-    const calendarResponse = await graphClient.makeRequest(
-      `/me/calendarView?${buildGraphQueryString(queryParams)}`,
-      {
-        method: 'GET',
-      }
-    );
+  if (searchResult.results.files.length > 0) {
+    results.files = {
+      count: searchResult.results.files.length,
+      items: searchResult.results.files.slice(0, limit).map((hit) => ({
+        name: hit.name,
+        webUrl: hit.webUrl,
+        type: hit.resource?.['@odata.type'],
+        relevance: hit.relevanceScore,
+      })),
+    };
+    summaryParts.push(`${searchResult.results.files.length} files`);
+  }
 
-    if (
-      calendarResponse &&
-      typeof calendarResponse === 'object' &&
-      'value' in calendarResponse &&
-      Array.isArray((calendarResponse as { value: unknown[] }).value)
-    ) {
-      const events = (calendarResponse as { value: GraphEvent[] }).value;
-      results.calendar = {
-        count: events.length,
-        items: events.map((e) => ({
-          subject: e.subject,
-          start: e.start?.dateTime,
-          end: e.end?.dateTime,
-          organizer: e.organizer?.emailAddress?.address,
-          location: e.location?.displayName,
-        })),
-      };
-      totalResults += events.length;
-      if (events.length > 0) {
-        summaryParts.push(`${events.length} calendar events`);
-      }
-    }
-  } catch (error) {
-    results.calendar = { error: `Search failed: ${error}`, count: 0 };
+  if (searchResult.results.events.length > 0) {
+    results.calendar = {
+      count: searchResult.results.events.length,
+      items: searchResult.results.events.slice(0, limit).map((hit) => ({
+        subject: hit.resource?.subject,
+        start: hit.resource?.start?.dateTime,
+        end: hit.resource?.end?.dateTime,
+        organizer: hit.resource?.organizer?.emailAddress?.address,
+        location: hit.resource?.location?.displayName,
+        relevance: hit.relevanceScore,
+      })),
+    };
+    summaryParts.push(`${searchResult.results.events.length} calendar events`);
+  }
+
+  if (searchResult.results.sites.length > 0) {
+    results.sites = {
+      count: searchResult.results.sites.length,
+      items: searchResult.results.sites.slice(0, limit).map((hit) => ({
+        name: hit.name,
+        webUrl: hit.webUrl,
+        relevance: hit.relevanceScore,
+      })),
+    };
+    summaryParts.push(`${searchResult.results.sites.length} sites`);
+  }
+
+  if (searchResult.results.people.length > 0) {
+    results.people = {
+      count: searchResult.results.people.length,
+      items: searchResult.results.people.slice(0, limit).map((hit) => ({
+        name: hit.name,
+        email: hit.resource?.emailAddresses?.[0]?.address || hit.resource?.mail,
+        relevance: hit.relevanceScore,
+      })),
+    };
+    summaryParts.push(`${searchResult.results.people.length} people`);
   }
 
   // Generate summary
   let summary: string;
-  if (totalResults === 0) {
-    summary = `No results found for "${query}" in Microsoft 365. The search covered emails, files, and calendar events.`;
+  if (searchResult.totalHits === 0) {
+    summary = `No results found for "${query}" in Microsoft 365.`;
   } else {
-    summary = `Found ${totalResults} results for "${query}": ${summaryParts.join(', ')}.`;
+    summary = `Found ${searchResult.totalHits} results for "${query}": ${summaryParts.join(', ')}.`;
   }
 
   return {
-    success: totalResults > 0,
+    success: searchResult.totalHits > 0,
     results,
     summary,
-    totalResults,
+    totalResults: searchResult.totalHits,
   };
 }
 
@@ -2067,49 +2161,21 @@ export function registerCompoundTools(
 
         case 'files': {
           const searchQuery = entities.topic || 'recent';
-          const response = await graphClient.makeRequest('/search/query', {
-            method: 'POST',
-            body: JSON.stringify({
-              requests: [
-                {
-                  entityTypes: ['driveItem'],
-                  query: { queryString: searchQuery },
-                  from: 0,
-                  size: 25,
-                },
-              ],
-            }),
+          // Use centralized search for consistent ranking
+          const searchResult = await executeCentralSearch(graphClient, searchQuery, {
+            entityTypes: ['driveItem'],
+            maxResults: 25,
+            sortByRank: true,
           });
 
-          if (response && typeof response === 'object' && 'value' in response) {
-            const items: unknown[] = [];
-            const searchValues = (response as { value: unknown[] }).value as Array<{
-              hitsContainers?: Array<{
-                hits?: Array<{
-                  resource?: { name?: string; webUrl?: string; lastModifiedDateTime?: string };
-                }>;
-              }>;
-            }>;
-
-            for (const container of searchValues) {
-              if (container.hitsContainers) {
-                for (const hitsContainer of container.hitsContainers) {
-                  if (hitsContainer.hits) {
-                    for (const hit of hitsContainer.hits) {
-                      if (hit.resource) {
-                        items.push({
-                          name: hit.resource.name,
-                          webUrl: hit.resource.webUrl,
-                          lastModified: hit.resource.lastModifiedDateTime,
-                        });
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            results.data = items;
-            results.count = items.length;
+          if (searchResult.results.files.length > 0) {
+            results.data = searchResult.results.files.map((hit) => ({
+              name: hit.name,
+              webUrl: hit.webUrl,
+              lastModified: hit.resource?.lastModifiedDateTime,
+              relevance: hit.relevanceScore,
+            }));
+            results.count = searchResult.results.files.length;
           }
           break;
         }
@@ -2236,42 +2302,40 @@ export function registerCompoundTools(
 
         case 'sharepoint': {
           const searchQuery = entities.topic || 'recent';
-          const response = await graphClient.makeRequest('/search/query', {
-            method: 'POST',
-            body: JSON.stringify({
-              requests: [
-                {
-                  entityTypes: ['site', 'list', 'listItem'],
-                  query: { queryString: searchQuery },
-                  from: 0,
-                  size: 25,
-                },
-              ],
-            }),
+          // Use centralized search for SharePoint content
+          const searchResult = await executeCentralSearch(graphClient, searchQuery, {
+            entityTypes: ['site', 'list', 'listItem'],
+            maxResults: 25,
+            sortByRank: true,
           });
-          if (response && typeof response === 'object' && 'value' in response) {
-            const items: any[] = [];
-            const searchValues = (response as { value: any[] }).value || [];
-            for (const container of searchValues) {
-              if (container.hitsContainers) {
-                for (const hitsContainer of container.hitsContainers) {
-                  if (hitsContainer.hits) {
-                    for (const hit of hitsContainer.hits) {
-                      if (hit.resource) {
-                        items.push({
-                          name: hit.resource.name || hit.resource.displayName,
-                          webUrl: hit.resource.webUrl,
-                          type: hit.resource['@odata.type'],
-                        });
-                      }
-                    }
-                  }
-                }
-              }
-            }
-            results.data = items;
-            results.count = items.length;
+
+          const items: Array<{
+            name?: string;
+            webUrl?: string;
+            type?: string;
+            relevance?: number;
+          }> = [];
+
+          // Combine sites and listItems from search results
+          for (const hit of searchResult.results.sites) {
+            items.push({
+              name: hit.name || hit.resource?.displayName,
+              webUrl: hit.webUrl,
+              type: 'site',
+              relevance: hit.relevanceScore,
+            });
           }
+          for (const hit of searchResult.results.listItems) {
+            items.push({
+              name: hit.name || hit.resource?.displayName,
+              webUrl: hit.webUrl,
+              type: hit.resource?.['@odata.type'],
+              relevance: hit.relevanceScore,
+            });
+          }
+
+          results.data = items;
+          results.count = items.length;
           break;
         }
 
@@ -3921,6 +3985,7 @@ This is the ultimate tool for "Tell me everything about my interactions with [pe
 
   // ==========================================================================
   // 6. SEARCH EVERYTHING ABOUT TOPIC - Cross-product search (FALLBACK TOOL)
+  // Uses the CENTRAL SEARCH API function for unified ranking and relevance
   // ==========================================================================
   server.tool(
     'search-everything',
@@ -3940,6 +4005,11 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
 - 👤 People and contacts
 - 📋 Lists and SharePoint content
 
+**Features:**
+- Unified ranking and relevance scoring
+- Results sorted by Microsoft Search rank
+- No date filter restrictions - finds all relevant content
+
 **Examples of when to use this tool:**
 - "What do you know about [any topic]?" → Use search-everything
 - "Tell me about [company/project/person]" → Use search-everything
@@ -3947,9 +4017,7 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
 - "What did we discuss about [topic]?" → Use search-everything
 - Any question where you're not sure which specific tool to use → Use search-everything
 
-**RULE: When in doubt, use search-everything!**
-
-This is the go-to tool for any general query or when no specific tool matches the user's intent.`,
+**RULE: When in doubt, use search-everything!**`,
     {
       query: z
         .string()
@@ -3957,197 +4025,28 @@ This is the go-to tool for any general query or when no specific tool matches th
           'The search query - can be any topic, person, company, project, keyword, or phrase the user is asking about'
         ),
       limit: z.number().optional().describe('Maximum results per category (default: 25)'),
+      minRelevance: z
+        .number()
+        .min(0)
+        .max(100)
+        .optional()
+        .describe('Minimum relevance score 0-100 (default: 0 = all results)'),
     },
     {
       title: 'Universal Search (Fallback)',
       readOnlyHint: true,
       openWorldHint: true,
     },
-    async ({ query, limit = 25 }) => {
-      logger.info(`Searching everything for: "${query}" using Microsoft Search API`);
+    async ({ query, limit = 25, minRelevance = 0 }) => {
+      logger.info(`Search Everything: "${query}" (limit: ${limit}, minRelevance: ${minRelevance})`);
 
-      const results: Record<string, unknown> = {
-        query,
-        searchedAt: new Date().toISOString(),
-      };
-
-      // Use Microsoft Search API to search ALL entity types at once
-      // This is the primary and most comprehensive search method
-      const entityTypes = [
-        'message', // Emails
-        'event', // Calendar events
-        'driveItem', // Files
-        'site', // SharePoint sites
-        'list', // SharePoint lists
-        'listItem', // SharePoint list items
-        'chatMessage', // Teams messages
-        'person', // People
-      ];
-
-      // Structured results by category
-      const emails: Array<{
-        subject?: string;
-        from?: string;
-        date?: string;
-        preview?: string;
-        webUrl?: string;
-        rank?: number;
-      }> = [];
-      const events: Array<{
-        subject?: string;
-        start?: string;
-        end?: string;
-        organizer?: string;
-        webUrl?: string;
-        rank?: number;
-      }> = [];
-      const files: Array<{
-        name?: string;
-        webUrl?: string;
-        lastModified?: string;
-        type?: string;
-        rank?: number;
-      }> = [];
-      const sites: Array<{
-        name?: string;
-        webUrl?: string;
-        description?: string;
-        rank?: number;
-      }> = [];
-      const chats: Array<{
-        content?: string;
-        from?: string;
-        date?: string;
-        webUrl?: string;
-        rank?: number;
-      }> = [];
-      const people: Array<{
-        name?: string;
-        email?: string;
-        jobTitle?: string;
-        department?: string;
-        rank?: number;
-      }> = [];
-
-      try {
-        // Microsoft Search API - NO date filter for maximum results
-        const searchResponse = await graphClient.makeRequest('/search/query', {
-          method: 'POST',
-          body: JSON.stringify({
-            requests: [
-              {
-                entityTypes,
-                query: { queryString: query },
-                from: 0,
-                size: Math.min(limit * 2, 100), // Fetch more to filter by relevance
-              },
-            ],
-          }),
-        });
-
-        if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
-          const searchValues = (searchResponse as { value: unknown[] }).value as Array<{
-            hitsContainers?: Array<{
-              hits?: Array<{
-                rank?: number;
-                summary?: string;
-                resource?: Record<string, unknown>;
-              }>;
-              total?: number;
-              moreResultsAvailable?: boolean;
-            }>;
-          }>;
-
-          for (const container of searchValues) {
-            if (container.hitsContainers) {
-              for (const hitsContainer of container.hitsContainers) {
-                if (hitsContainer.hits) {
-                  for (const hit of hitsContainer.hits) {
-                    if (hit.resource) {
-                      const type = (hit.resource['@odata.type'] as string) || '';
-                      const rank = hit.rank || 0;
-
-                      // Categorize by type
-                      if (type.includes('message') && !type.includes('chat')) {
-                        emails.push({
-                          subject: hit.resource.subject as string,
-                          from: (hit.resource.from as { emailAddress?: { address?: string } })
-                            ?.emailAddress?.address,
-                          date: hit.resource.receivedDateTime as string,
-                          preview: (hit.resource.bodyPreview as string)?.substring(0, 150),
-                          webUrl: hit.resource.webLink as string,
-                          rank,
-                        });
-                      } else if (type.includes('event')) {
-                        events.push({
-                          subject: hit.resource.subject as string,
-                          start: (hit.resource.start as { dateTime?: string })?.dateTime,
-                          end: (hit.resource.end as { dateTime?: string })?.dateTime,
-                          organizer: (
-                            hit.resource.organizer as { emailAddress?: { name?: string } }
-                          )?.emailAddress?.name,
-                          webUrl: hit.resource.webLink as string,
-                          rank,
-                        });
-                      } else if (type.includes('driveItem')) {
-                        files.push({
-                          name: hit.resource.name as string,
-                          webUrl: hit.resource.webUrl as string,
-                          lastModified: hit.resource.lastModifiedDateTime as string,
-                          type: 'file',
-                          rank,
-                        });
-                      } else if (type.includes('site')) {
-                        sites.push({
-                          name:
-                            (hit.resource.displayName as string) || (hit.resource.name as string),
-                          webUrl: hit.resource.webUrl as string,
-                          description: hit.resource.description as string,
-                          rank,
-                        });
-                      } else if (type.includes('listItem')) {
-                        files.push({
-                          name:
-                            (hit.resource.name as string) ||
-                            ((hit.resource.fields as { Title?: string })?.Title as string),
-                          webUrl: hit.resource.webUrl as string,
-                          lastModified: hit.resource.lastModifiedDateTime as string,
-                          type: 'listItem',
-                          rank,
-                        });
-                      } else if (type.includes('chatMessage')) {
-                        chats.push({
-                          content: (hit.resource.body as { content?: string })?.content?.substring(
-                            0,
-                            200
-                          ),
-                          from: (hit.resource.from as { user?: { displayName?: string } })?.user
-                            ?.displayName,
-                          date: hit.resource.createdDateTime as string,
-                          webUrl: hit.resource.webUrl as string,
-                          rank,
-                        });
-                      } else if (type.includes('person')) {
-                        people.push({
-                          name: hit.resource.displayName as string,
-                          email: (hit.resource.emailAddresses as Array<{ address?: string }>)?.[0]
-                            ?.address,
-                          jobTitle: hit.resource.jobTitle as string,
-                          department: hit.resource.department as string,
-                          rank,
-                        });
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      } catch (error) {
-        logger.error(`Microsoft Search API failed: ${error}`);
-        results.searchError = `Search API failed: ${error}`;
-      }
+      // Use centralized search function
+      const searchResult = await executeCentralSearch(graphClient, query, {
+        maxResults: Math.min(limit * 2, 100),
+        minRelevance,
+        sortByRank: true,
+        includeTimeContext: true,
+      });
 
       // Also search people via /me/people for better person results
       try {
@@ -4173,18 +4072,24 @@ This is the go-to tool for any general query or when no specific tool matches th
               department?: string;
             };
             // Avoid duplicates
-            const exists = people.some(
+            const exists = searchResult.results.people.some(
               (existing) =>
-                existing.email === person.emailAddresses?.[0]?.address ||
-                existing.name === person.displayName
+                existing.resource?.emailAddresses?.[0]?.address ===
+                  person.emailAddresses?.[0]?.address || existing.name === person.displayName
             );
             if (!exists) {
-              people.push({
+              searchResult.results.people.push({
+                resource: {
+                  displayName: person.displayName,
+                  emailAddresses: person.emailAddresses,
+                  jobTitle: person.jobTitle,
+                  department: person.department,
+                  _rank: 50,
+                  _source: 'me/people',
+                },
                 name: person.displayName,
-                email: person.emailAddresses?.[0]?.address,
-                jobTitle: person.jobTitle,
-                department: person.department,
-                rank: 50, // Default rank for /me/people results
+                rank: 50,
+                relevanceScore: 50,
               });
             }
           }
@@ -4193,56 +4098,78 @@ This is the go-to tool for any general query or when no specific tool matches th
         logger.debug(`People search failed: ${error}`);
       }
 
-      // Sort all results by rank (higher = more relevant) and limit
-      const sortByRank = <T extends { rank?: number }>(arr: T[]): T[] =>
-        arr.sort((a, b) => (b.rank || 0) - (a.rank || 0)).slice(0, limit);
+      // Format results for output
+      const formatHits = (hits: SearchHit[], maxItems: number) =>
+        hits.slice(0, maxItems).map((hit) => ({
+          name: hit.name,
+          webUrl: hit.webUrl,
+          summary: hit.summary?.substring(0, 150),
+          relevance: hit.relevanceScore,
+        }));
 
-      // Build structured response
-      const totalResults =
-        emails.length + events.length + files.length + sites.length + chats.length + people.length;
+      const response: Record<string, unknown> = {
+        query: searchResult.query,
+        searchedAt: searchResult.searchedAt,
+        totalResults: searchResult.totalHits,
+        status: searchResult.totalHits > 0 ? 'SUCCESS' : 'NO_RESULTS',
+        message:
+          searchResult.totalHits > 0
+            ? `Found ${searchResult.totalHits} results for "${query}" across Microsoft 365`
+            : `No results found for "${query}"`,
+        metadata: {
+          searchDuration: `${searchResult.metadata.searchDuration}ms`,
+          averageRank: Math.round(searchResult.metadata.averageRank),
+          categories: searchResult.metadata.entityTypesCounts,
+        },
+      };
 
-      results.totalResults = totalResults;
-      results.status = totalResults > 0 ? 'SUCCESS' : 'NO_RESULTS';
-      results.message =
-        totalResults > 0
-          ? `Found ${totalResults} results for "${query}" across Microsoft 365`
-          : `No results found for "${query}"`;
-
-      // Include categories with results
-      if (emails.length > 0) {
-        results.emails = {
-          count: emails.length,
-          items: sortByRank(emails).map(({ rank, ...rest }) => rest),
+      // Add categories with results
+      if (searchResult.results.emails.length > 0) {
+        response.emails = {
+          count: searchResult.results.emails.length,
+          items: formatHits(searchResult.results.emails, limit),
         };
       }
-      if (events.length > 0) {
-        results.events = {
-          count: events.length,
-          items: sortByRank(events).map(({ rank, ...rest }) => rest),
+      if (searchResult.results.events.length > 0) {
+        response.events = {
+          count: searchResult.results.events.length,
+          items: formatHits(searchResult.results.events, limit),
         };
       }
-      if (files.length > 0) {
-        results.files = {
-          count: files.length,
-          items: sortByRank(files).map(({ rank, ...rest }) => rest),
+      if (searchResult.results.files.length > 0) {
+        response.files = {
+          count: searchResult.results.files.length,
+          items: formatHits(searchResult.results.files, limit),
         };
       }
-      if (sites.length > 0) {
-        results.sites = {
-          count: sites.length,
-          items: sortByRank(sites).map(({ rank, ...rest }) => rest),
+      if (searchResult.results.sites.length > 0) {
+        response.sites = {
+          count: searchResult.results.sites.length,
+          items: formatHits(searchResult.results.sites, limit),
         };
       }
-      if (chats.length > 0) {
-        results.teamsMessages = {
-          count: chats.length,
-          items: sortByRank(chats).map(({ rank, ...rest }) => rest),
+      if (searchResult.results.listItems.length > 0) {
+        response.listItems = {
+          count: searchResult.results.listItems.length,
+          items: formatHits(searchResult.results.listItems, limit),
         };
       }
-      if (people.length > 0) {
-        results.people = {
-          count: people.length,
-          items: sortByRank(people).map(({ rank, ...rest }) => rest),
+      if (searchResult.results.chats.length > 0) {
+        response.teamsMessages = {
+          count: searchResult.results.chats.length,
+          items: formatHits(searchResult.results.chats, limit),
+        };
+      }
+      if (searchResult.results.people.length > 0) {
+        response.people = {
+          count: searchResult.results.people.length,
+          items: searchResult.results.people.slice(0, limit).map((hit) => ({
+            name: hit.name,
+            email: hit.resource?.emailAddresses?.[0]?.address || hit.resource?.mail,
+            jobTitle: hit.resource?.jobTitle,
+            department: hit.resource?.department,
+            relevance: hit.relevanceScore,
+          })),
         };
       }
 
@@ -4250,7 +4177,7 @@ This is the go-to tool for any general query or when no specific tool matches th
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify(results, null, 2),
+            text: JSON.stringify(response, null, 2),
           },
         ],
       };
@@ -4970,59 +4897,27 @@ Use this for "What's the status of Project Apollo?", "Give me an overview of the
 
       const promises: Promise<void>[] = [];
 
-      // Files
+      // Files - use centralized search
       if (includeFiles) {
         promises.push(
           (async () => {
             try {
-              const searchResponse = await graphClient.makeRequest('/search/query', {
-                method: 'POST',
-                body: JSON.stringify({
-                  requests: [
-                    {
-                      entityTypes: ['driveItem', 'listItem'],
-                      query: { queryString: projectName },
-                      from: 0,
-                      size: 15,
-                    },
-                  ],
-                }),
+              const searchResult = await executeCentralSearch(graphClient, projectName, {
+                entityTypes: ['driveItem', 'listItem'],
+                maxResults: 15,
+                sortByRank: true,
               });
 
-              if (
-                searchResponse &&
-                typeof searchResponse === 'object' &&
-                'value' in searchResponse
-              ) {
-                const items: Array<{ name?: string; webUrl?: string; lastModified?: string }> = [];
-                const searchValues = searchResponse.value as Array<{
-                  hitsContainers?: Array<{
-                    hits?: Array<{
-                      resource?: {
-                        name?: string;
-                        webUrl?: string;
-                        lastModifiedDateTime?: string;
-                      };
-                    }>;
-                  }>;
-                }>;
+              const items = [...searchResult.results.files, ...searchResult.results.listItems].map(
+                (hit) => ({
+                  name: hit.name,
+                  webUrl: hit.webUrl,
+                  lastModified: hit.resource?.lastModifiedDateTime,
+                  relevance: hit.relevanceScore,
+                })
+              );
 
-                for (const container of searchValues) {
-                  for (const hc of container.hitsContainers || []) {
-                    for (const hit of hc.hits || []) {
-                      if (hit.resource) {
-                        items.push({
-                          name: hit.resource.name,
-                          webUrl: hit.resource.webUrl,
-                          lastModified: hit.resource.lastModifiedDateTime,
-                        });
-                      }
-                    }
-                  }
-                }
-
-                result.files = { count: items.length, items };
-              }
+              result.files = { count: items.length, items };
             } catch (error) {
               result.files = { error: `Could not fetch: ${error}` };
             }
@@ -7108,53 +7003,31 @@ Use this for "Give me everything about [customer]", "Customer 360 for Acme Corp"
         })()
       );
 
-      // Shared documents
+      // Shared documents - use centralized search
       promises.push(
         (async () => {
           try {
-            const searchResponse = await graphClient.makeRequest('/search/query', {
-              method: 'POST',
-              body: JSON.stringify({
-                requests: [
-                  {
-                    entityTypes: ['driveItem'],
-                    query: { queryString: `${companyName} OR "${companyName}"` },
-                    from: 0,
-                    size: 20,
-                  },
-                ],
-              }),
-            });
-
-            if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
-              const files: Array<{ name: string; webUrl?: string; modified?: string }> = [];
-              const searchValues = searchResponse.value as Array<{
-                hitsContainers?: Array<{
-                  hits?: Array<{
-                    resource?: { name?: string; webUrl?: string; lastModifiedDateTime?: string };
-                  }>;
-                }>;
-              }>;
-
-              for (const container of searchValues) {
-                for (const hc of container.hitsContainers || []) {
-                  for (const hit of hc.hits || []) {
-                    if (hit.resource) {
-                      files.push({
-                        name: hit.resource.name || 'Unknown',
-                        webUrl: hit.resource.webUrl,
-                        modified: hit.resource.lastModifiedDateTime,
-                      });
-                    }
-                  }
-                }
+            const searchResult = await executeCentralSearch(
+              graphClient,
+              `${companyName} OR "${companyName}"`,
+              {
+                entityTypes: ['driveItem'],
+                maxResults: 20,
+                sortByRank: true,
               }
+            );
 
-              result.documents = {
-                count: files.length,
-                files: files.slice(0, 15),
-              };
-            }
+            const files = searchResult.results.files.slice(0, 15).map((hit) => ({
+              name: hit.name || 'Unknown',
+              webUrl: hit.webUrl,
+              modified: hit.resource?.lastModifiedDateTime,
+              relevance: hit.relevanceScore,
+            }));
+
+            result.documents = {
+              count: files.length,
+              files,
+            };
           } catch (error) {
             result.documents = { error: `${error}` };
           }
@@ -7821,60 +7694,30 @@ Use this for "When did we decide on X?", "What was the context for decision Y?",
         })()
       );
 
-      // Search files/documents
+      // Search files/documents - use centralized search
       promises.push(
         (async () => {
           try {
-            const searchResponse = await graphClient.makeRequest('/search/query', {
-              method: 'POST',
-              body: JSON.stringify({
-                requests: [
-                  {
-                    entityTypes: ['driveItem', 'listItem'],
-                    query: { queryString: topic },
-                    from: 0,
-                    size: 20,
-                  },
-                ],
-              }),
+            const searchResult = await executeCentralSearch(graphClient, topic, {
+              entityTypes: ['driveItem', 'listItem'],
+              maxResults: 20,
+              sortByRank: true,
             });
 
-            if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
-              const files: Array<{
-                name: string;
-                webUrl?: string;
-                modified?: string;
-                preview?: string;
-              }> = [];
-              const searchValues = searchResponse.value as Array<{
-                hitsContainers?: Array<{
-                  hits?: Array<{
-                    resource?: { name?: string; webUrl?: string; lastModifiedDateTime?: string };
-                    summary?: string;
-                  }>;
-                }>;
-              }>;
+            const files = [...searchResult.results.files, ...searchResult.results.listItems].map(
+              (hit) => ({
+                name: hit.name || 'Unknown',
+                webUrl: hit.webUrl,
+                modified: hit.resource?.lastModifiedDateTime,
+                preview: hit.summary,
+                relevance: hit.relevanceScore,
+              })
+            );
 
-              for (const container of searchValues) {
-                for (const hc of container.hitsContainers || []) {
-                  for (const hit of hc.hits || []) {
-                    if (hit.resource) {
-                      files.push({
-                        name: hit.resource.name || 'Unknown',
-                        webUrl: hit.resource.webUrl,
-                        modified: hit.resource.lastModifiedDateTime,
-                        preview: hit.summary,
-                      });
-                    }
-                  }
-                }
-              }
-
-              result.relatedDocuments = {
-                count: files.length,
-                files,
-              };
-            }
+            result.relatedDocuments = {
+              count: files.length,
+              files,
+            };
           } catch (error) {
             result.relatedDocuments = { error: `${error}` };
           }
