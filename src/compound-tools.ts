@@ -16,6 +16,12 @@ import logger from './logger.js';
 import { getChatMemoryStore, isChatMemoryEnabled, type EntityType } from './chat-memory.js';
 import { getChatId, getUserId } from './request-context.js';
 import NLPEnhancer, { type DecomposedQuery } from './nlp-enhancer.js';
+import {
+  formatCalendarResponse,
+  calendarResponseToText,
+  formatMailResponse,
+  mailResponseToText,
+} from './response-formatter.js';
 
 /**
  * Build query string for Microsoft Graph API requests
@@ -234,10 +240,36 @@ interface FollowUpResults {
   insights?: any[];
 }
 
+/**
+ * Current date/time context for LLM reference
+ */
+interface DateTimeContext {
+  /** Current date in ISO format */
+  currentDate: string;
+  /** Current time in local format (HH:MM) */
+  currentTime: string;
+  /** Server timezone name (e.g., "Europe/Berlin") */
+  timezone: string;
+  /** UTC offset (e.g., "+01:00") */
+  utcOffset: string;
+  /** Human-readable current datetime */
+  formatted: string;
+  /** Reference dates for relative queries */
+  references: {
+    today: string;
+    tomorrow: string;
+    yesterday: string;
+    thisWeekStart: string;
+    thisWeekEnd: string;
+  };
+}
+
 interface EnhancedAskM365Response {
   question: string;
   language: string;
   searchedAt: string;
+  /** Current date/time context for accurate time references */
+  currentContext: DateTimeContext;
   intent: any;
   processingSteps: string[];
   resultsFound: boolean;
@@ -256,6 +288,76 @@ interface EnhancedAskM365Response {
     totalResults: number;
     queryTime: number;
     productsSearched: string[];
+  };
+}
+
+/**
+ * Generate current date/time context for LLM reference
+ * This helps the LLM understand relative time references like "tomorrow" or "yesterday"
+ */
+function generateDateTimeContext(lang: 'de' | 'en'): DateTimeContext {
+  const now = new Date();
+
+  // Get timezone info
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const utcOffsetMinutes = -now.getTimezoneOffset();
+  const utcOffsetHours = Math.floor(Math.abs(utcOffsetMinutes) / 60);
+  const utcOffsetMins = Math.abs(utcOffsetMinutes) % 60;
+  const utcOffset = `${utcOffsetMinutes >= 0 ? '+' : '-'}${String(utcOffsetHours).padStart(2, '0')}:${String(utcOffsetMins).padStart(2, '0')}`;
+
+  // Calculate reference dates
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+
+  // Calculate week boundaries (Monday as start of week for German/European convention)
+  const dayOfWeek = now.getDay();
+  const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const thisWeekStart = new Date(today.getTime() - daysToMonday * 24 * 60 * 60 * 1000);
+  const thisWeekEnd = new Date(thisWeekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+
+  // Format functions for local display
+  const formatDate = (d: Date): string => {
+    return lang === 'de'
+      ? d.toLocaleDateString('de-DE', {
+          weekday: 'long',
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+        })
+      : d.toLocaleDateString('en-US', {
+          weekday: 'long',
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+        });
+  };
+
+  const formatISODate = (d: Date): string => {
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    return `${yyyy}-${mm}-${dd}`;
+  };
+
+  const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+  return {
+    currentDate: formatISODate(now),
+    currentTime,
+    timezone,
+    utcOffset,
+    formatted:
+      lang === 'de'
+        ? `${formatDate(now)}, ${currentTime} Uhr (${timezone})`
+        : `${formatDate(now)}, ${currentTime} (${timezone})`,
+    references: {
+      today: formatISODate(today),
+      tomorrow: formatISODate(tomorrow),
+      yesterday: formatISODate(yesterday),
+      thisWeekStart: formatISODate(thisWeekStart),
+      thisWeekEnd: formatISODate(thisWeekEnd),
+    },
   };
 }
 
@@ -2326,83 +2428,128 @@ export function registerCompoundTools(
   };
 
   // Convert timeframe to date range
+  /**
+   * Helper function to get end of day (23:59:59.999) for a given date
+   */
+  function endOfDay(date: Date): Date {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+  }
+
+  /**
+   * Helper function to get start of day (00:00:00) for a given date
+   */
+  function startOfDay(date: Date): Date {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+  }
+
   function getDateRangeFromTimeframe(timeframe: string): { start: Date; end: Date } {
     const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const today = startOfDay(now);
     let start: Date;
     let end: Date;
 
     switch (timeframe) {
       case 'today':
         start = today;
-        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        end = endOfDay(today);
         break;
-      case 'yesterday':
-        start = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-        end = today;
+      case 'yesterday': {
+        const yesterdayDate = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+        start = startOfDay(yesterdayDate);
+        end = endOfDay(yesterdayDate);
         break;
-      case 'tomorrow':
-        start = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-        end = new Date(today.getTime() + 48 * 60 * 60 * 1000);
+      }
+      case 'tomorrow': {
+        const tomorrowDate = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        start = startOfDay(tomorrowDate);
+        end = endOfDay(tomorrowDate);
         break;
+      }
       case 'thisWeek': {
         const dayOfWeek = today.getDay();
-        start = new Date(today.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
-        end = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
+        const weekStart = new Date(today.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
+        const weekEnd = new Date(weekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+        start = startOfDay(weekStart);
+        end = endOfDay(weekEnd);
         break;
       }
       case 'lastWeek': {
         const lastWeekStart = new Date(
           today.getTime() - (today.getDay() + 7) * 24 * 60 * 60 * 1000
         );
-        start = lastWeekStart;
-        end = new Date(lastWeekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+        const lastWeekEnd = new Date(lastWeekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+        start = startOfDay(lastWeekStart);
+        end = endOfDay(lastWeekEnd);
         break;
       }
       case 'nextWeek': {
         const nextWeekStart = new Date(
           today.getTime() + (7 - today.getDay()) * 24 * 60 * 60 * 1000
         );
-        start = nextWeekStart;
-        end = new Date(nextWeekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+        const nextWeekEnd = new Date(nextWeekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+        start = startOfDay(nextWeekStart);
+        end = endOfDay(nextWeekEnd);
         break;
       }
-      case 'thisMonth':
-        start = new Date(now.getFullYear(), now.getMonth(), 1);
-        end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      case 'thisMonth': {
+        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+        const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0); // Last day of current month
+        start = startOfDay(monthStart);
+        end = endOfDay(monthEnd);
         break;
-      case 'lastMonth':
-        start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        end = new Date(now.getFullYear(), now.getMonth(), 1);
+      }
+      case 'lastMonth': {
+        const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0); // Last day of previous month
+        start = startOfDay(lastMonthStart);
+        end = endOfDay(lastMonthEnd);
         break;
-      case 'nextMonth':
-        start = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-        end = new Date(now.getFullYear(), now.getMonth() + 2, 1);
+      }
+      case 'nextMonth': {
+        const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        const nextMonthEnd = new Date(now.getFullYear(), now.getMonth() + 2, 0); // Last day of next month
+        start = startOfDay(nextMonthStart);
+        end = endOfDay(nextMonthEnd);
         break;
-      case 'last7Days':
-        start = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+      }
+      case 'last7Days': {
+        const last7Start = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+        start = startOfDay(last7Start);
+        end = endOfDay(today);
         break;
-      case 'last30Days':
-        start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+      }
+      case 'last30Days': {
+        const last30Start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+        start = startOfDay(last30Start);
+        end = endOfDay(today);
         break;
-      case 'last90Days':
-        start = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
-        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+      }
+      case 'last90Days': {
+        const last90Start = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
+        start = startOfDay(last90Start);
+        end = endOfDay(today);
         break;
-      case 'thisYear':
-        start = new Date(now.getFullYear(), 0, 1);
-        end = new Date(now.getFullYear() + 1, 0, 1);
+      }
+      case 'thisYear': {
+        const yearStart = new Date(now.getFullYear(), 0, 1);
+        const yearEnd = new Date(now.getFullYear(), 11, 31); // December 31st
+        start = startOfDay(yearStart);
+        end = endOfDay(yearEnd);
         break;
-      case 'lastYear':
-        start = new Date(now.getFullYear() - 1, 0, 1);
-        end = new Date(now.getFullYear(), 0, 1);
+      }
+      case 'lastYear': {
+        const lastYearStart = new Date(now.getFullYear() - 1, 0, 1);
+        const lastYearEnd = new Date(now.getFullYear() - 1, 11, 31); // December 31st of last year
+        start = startOfDay(lastYearStart);
+        end = endOfDay(lastYearEnd);
         break;
-      default:
-        // Default to last 14 days
-        start = new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000);
-        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+      }
+      default: {
+        // Default to last 14 days until end of today
+        const defaultStart = new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000);
+        start = startOfDay(defaultStart);
+        end = endOfDay(today);
+      }
     }
 
     return { start, end };
@@ -2572,9 +2719,9 @@ export function registerCompoundTools(
       switch (intent) {
         case 'email': {
           const queryParams: Record<string, string> = {
-            $top: '25',
+            $top: '50',
             $select:
-              'id,subject,bodyPreview,receivedDateTime,from,importance,isRead,hasAttachments',
+              'id,subject,bodyPreview,receivedDateTime,sentDateTime,from,toRecipients,ccRecipients,importance,isRead,isDraft,hasAttachments,webLink,categories,flag,conversationId',
             $orderby: 'receivedDateTime desc',
           };
 
@@ -2604,28 +2751,24 @@ export function registerCompoundTools(
           });
 
           if (response && typeof response === 'object' && 'value' in response) {
-            const emails = (response as { value: unknown[] }).value || [];
-            results.data = emails.map((e: unknown) => {
-              const email = e as {
-                subject?: string;
-                bodyPreview?: string;
-                receivedDateTime?: string;
-                from?: { emailAddress?: { name?: string; address?: string } };
-                importance?: string;
-                isRead?: boolean;
-                hasAttachments?: boolean;
-              };
-              return {
-                subject: email.subject || (lang === 'de' ? '(Kein Betreff)' : '(No subject)'),
-                preview: email.bodyPreview?.substring(0, 150),
-                from: email.from?.emailAddress?.name || email.from?.emailAddress?.address,
-                date: email.receivedDateTime,
-                importance: email.importance,
-                isRead: email.isRead,
-                hasAttachments: email.hasAttachments,
-              };
-            });
-            results.count = emails.length;
+            // Use the structured mail formatter with local time
+            const formattedResponse = formatMailResponse(response as Record<string, unknown>);
+
+            // Generate context for current date
+            const dateContext = generateDateTimeContext(lang);
+
+            results.data = {
+              _llmInstructions:
+                lang === 'de'
+                  ? `WICHTIG: Liste ALLE E-Mails unten mit Betreff, Absender, Datum und Uhrzeit (${dateContext.timezone}) auf. Heute ist ${dateContext.formatted}. Zeige die E-Mails NICHT als Zusammenfassung, sondern als vollständige Liste.`
+                  : `IMPORTANT: List ALL emails below with subject, sender, date and time (${dateContext.timezone}). Today is ${dateContext.formatted}. Do NOT show a summary, show the complete list of emails.`,
+              currentContext: dateContext,
+              summary: formattedResponse.summary,
+              messages: formattedResponse.messages,
+              groupedByDate: formattedResponse.groupedByDate,
+              _humanReadable: mailResponseToText(formattedResponse),
+            };
+            results.count = formattedResponse.summary.totalMessages;
           }
           break;
         }
@@ -2649,36 +2792,37 @@ export function registerCompoundTools(
             {
               method: 'GET',
               queryParams: {
-                $top: '25',
-                $select: 'subject,start,end,location,organizer,isAllDay,isCancelled',
+                $top: '50',
+                $select:
+                  'id,subject,start,end,location,organizer,attendees,isAllDay,isCancelled,isOnlineMeeting,onlineMeeting,bodyPreview,webLink',
                 $orderby: 'start/dateTime',
               },
             }
           );
 
           if (response && typeof response === 'object' && 'value' in response) {
-            const events = (response as { value: unknown[] }).value || [];
-            results.data = events.map((e: unknown) => {
-              const event = e as {
-                subject?: string;
-                start?: { dateTime?: string };
-                end?: { dateTime?: string };
-                location?: { displayName?: string };
-                organizer?: { emailAddress?: { name?: string } };
-                isAllDay?: boolean;
-                isCancelled?: boolean;
-              };
-              return {
-                subject: event.subject,
-                start: event.start?.dateTime,
-                end: event.end?.dateTime,
-                location: event.location?.displayName,
-                organizer: event.organizer?.emailAddress?.name,
-                isAllDay: event.isAllDay,
-                isCancelled: event.isCancelled,
-              };
-            });
-            results.count = events.length;
+            // Use the structured calendar formatter with local time
+            const formattedResponse = formatCalendarResponse(
+              response as Record<string, unknown>,
+              startDate.toISOString(),
+              endDate.toISOString()
+            );
+
+            // Generate context for current date
+            const dateContext = generateDateTimeContext(lang);
+
+            results.data = {
+              _llmInstructions:
+                lang === 'de'
+                  ? `WICHTIG: Liste ALLE Termine unten mit Betreff, Datum, Uhrzeit (${dateContext.timezone}, NICHT UTC!) und Ort auf. Heute ist ${dateContext.formatted}. "Morgen" bedeutet ${dateContext.references.tomorrow}. Zeige die Termine NICHT als Zusammenfassung, sondern als vollständige Liste mit lokalen Uhrzeiten.`
+                  : `IMPORTANT: List ALL events below with subject, date, time (${dateContext.timezone}, NOT UTC!) and location. Today is ${dateContext.formatted}. "Tomorrow" means ${dateContext.references.tomorrow}. Do NOT show a summary, show the complete list of events with local times.`,
+              currentContext: dateContext,
+              summary: formattedResponse.summary,
+              events: formattedResponse.events,
+              groupedByDate: formattedResponse.groupedByDate,
+              _humanReadable: calendarResponseToText(formattedResponse),
+            };
+            results.count = formattedResponse.summary.totalEvents;
           }
           break;
         }
@@ -3329,11 +3473,15 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
         }
       }
 
+      // Generate current date/time context for LLM reference
+      const currentContext = generateDateTimeContext(detectedLang);
+
       // Build Enhanced Response
       const response: EnhancedAskM365Response = {
         question,
         language: detectedLang,
         searchedAt: new Date().toISOString(),
+        currentContext,
         intent: intentResult,
         processingSteps,
         resultsFound: totalCount > 0,
@@ -3342,8 +3490,8 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
         message:
           totalCount > 0
             ? detectedLang === 'de'
-              ? `${totalCount} Ergebnisse in Microsoft 365 gefunden.`
-              : `Found ${totalCount} results across Microsoft 365.`
+              ? `${totalCount} Ergebnisse in Microsoft 365 gefunden. Heute ist ${currentContext.formatted}.`
+              : `Found ${totalCount} results across Microsoft 365. Today is ${currentContext.formatted}.`
             : msg.noResultsMessage(question),
         summary,
         // Include structured query analysis with Markdown summary
@@ -4027,9 +4175,17 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
           if (flaggedCount > 0) summaryParts.push(`🚩 ${flaggedCount} flagged`);
         }
 
+        // Generate date/time context
+        const dateContext = generateDateTimeContext(detectedLang);
+
         const result = {
+          _llmInstructions:
+            detectedLang === 'de'
+              ? `WICHTIG: Liste die E-Mails unten auf mit: Betreff, Absender (Name und E-Mail), Datum/Uhrzeit. Heute ist ${dateContext.formatted}. Zeige ALLE E-Mails aus der "emails" Liste, nicht nur eine Zusammenfassung!`
+              : `IMPORTANT: List the emails below with: subject, sender (name and email), date/time. Today is ${dateContext.formatted}. Show ALL emails from the "emails" list, not just a summary!`,
           status: 'SUCCESS',
           language: detectedLang,
+          currentContext: dateContext,
           title:
             detectedLang === 'de'
               ? `📧 Ihre E-Mails (${filter === 'all' ? 'Alle' : filter})`
