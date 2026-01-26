@@ -2184,7 +2184,7 @@ export function registerCompoundTools(
           const searchQuery = entities.person || entities.topic;
           if (searchQuery) {
             // Try multiple search strategies for better results
-            const searchStrategies = [
+            const searchStrategies: Array<Record<string, string>> = [
               { $search: `"${searchQuery}"` }, // Exact phrase
               { $search: searchQuery }, // Without quotes for partial matches
               { $filter: `startswith(displayName,'${searchQuery}')` }, // Starts with
@@ -4098,6 +4098,72 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
         logger.debug(`People search failed: ${error}`);
       }
 
+      // If no emails/files found but people were found, do a follow-up search with the actual person name
+      // This handles typos like "Johannis Kirk" -> "Johannes Kirk"
+      if (
+        searchResult.totalHits === 0 &&
+        searchResult.results.people.length > 0 &&
+        searchResult.results.people[0].name &&
+        searchResult.results.people[0].name.toLowerCase() !== query.toLowerCase()
+      ) {
+        const correctedName = searchResult.results.people[0].name;
+        logger.info(
+          `No results for "${query}" but found person "${correctedName}" - performing follow-up search`
+        );
+
+        try {
+          const followUpResult = await executeCentralSearch(graphClient, correctedName, {
+            entityTypes: ['message', 'event', 'driveItem', 'chatMessage'],
+            maxResults: Math.min(limit * 2, 50),
+            sortByRank: true,
+          });
+
+          // Merge follow-up results
+          if (followUpResult.results.emails.length > 0) {
+            searchResult.results.emails.push(...followUpResult.results.emails);
+            searchResult.metadata.entityTypesCounts['email'] =
+              (searchResult.metadata.entityTypesCounts['email'] || 0) +
+              followUpResult.results.emails.length;
+          }
+          if (followUpResult.results.events.length > 0) {
+            searchResult.results.events.push(...followUpResult.results.events);
+            searchResult.metadata.entityTypesCounts['event'] =
+              (searchResult.metadata.entityTypesCounts['event'] || 0) +
+              followUpResult.results.events.length;
+          }
+          if (followUpResult.results.files.length > 0) {
+            searchResult.results.files.push(...followUpResult.results.files);
+            searchResult.metadata.entityTypesCounts['file'] =
+              (searchResult.metadata.entityTypesCounts['file'] || 0) +
+              followUpResult.results.files.length;
+          }
+          if (followUpResult.results.chats.length > 0) {
+            searchResult.results.chats.push(...followUpResult.results.chats);
+            searchResult.metadata.entityTypesCounts['chat'] =
+              (searchResult.metadata.entityTypesCounts['chat'] || 0) +
+              followUpResult.results.chats.length;
+          }
+
+          // Update total hits
+          searchResult.totalHits =
+            searchResult.results.emails.length +
+            searchResult.results.events.length +
+            searchResult.results.files.length +
+            searchResult.results.sites.length +
+            searchResult.results.listItems.length +
+            searchResult.results.chats.length;
+
+          // Add note about correction
+          (searchResult as unknown as { correctedQuery?: string }).correctedQuery = correctedName;
+
+          logger.info(
+            `Follow-up search found ${followUpResult.totalHits} additional results for "${correctedName}"`
+          );
+        } catch (followUpError) {
+          logger.debug(`Follow-up search failed: ${followUpError}`);
+        }
+      }
+
       // Format results for output
       const formatHits = (hits: SearchHit[], maxItems: number) =>
         hits.slice(0, maxItems).map((hit) => ({
@@ -4107,6 +4173,8 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
           relevance: hit.relevanceScore,
         }));
 
+      const correctedQuery = (searchResult as unknown as { correctedQuery?: string })
+        .correctedQuery;
       const response: Record<string, unknown> = {
         query: searchResult.query,
         searchedAt: searchResult.searchedAt,
@@ -4114,8 +4182,11 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
         status: searchResult.totalHits > 0 ? 'SUCCESS' : 'NO_RESULTS',
         message:
           searchResult.totalHits > 0
-            ? `Found ${searchResult.totalHits} results for "${query}" across Microsoft 365`
+            ? correctedQuery
+              ? `Found ${searchResult.totalHits} results for "${correctedQuery}" (corrected from "${query}")`
+              : `Found ${searchResult.totalHits} results for "${query}" across Microsoft 365`
             : `No results found for "${query}"`,
+        ...(correctedQuery && { correctedQuery, originalQuery: query }),
         metadata: {
           searchDuration: `${searchResult.metadata.searchDuration}ms`,
           averageRank: Math.round(searchResult.metadata.averageRank),
