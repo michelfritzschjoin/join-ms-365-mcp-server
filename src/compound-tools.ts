@@ -584,6 +584,177 @@ async function findFilesFromPerson(
 }
 
 /**
+ * Execute a universal search across all Microsoft 365 products
+ * This is the core search function used by intelligent tools
+ */
+async function executeUniversalSearch(
+  graphClient: GraphClient,
+  query: string,
+  limit: number = 25
+): Promise<{
+  success: boolean;
+  results: Record<string, unknown>;
+  summary: string;
+  totalResults: number;
+}> {
+  const results: Record<string, unknown> = {
+    query,
+    searchedAt: new Date().toISOString(),
+  };
+  let totalResults = 0;
+  const summaryParts: string[] = [];
+
+  // Search emails
+  try {
+    const emailResponse = await graphClient.makeRequest('/me/messages', {
+      method: 'GET',
+      queryParams: {
+        $search: `"${query}"`,
+        $top: String(limit),
+        $select: 'id,subject,bodyPreview,receivedDateTime,from',
+      },
+    });
+
+    if (
+      emailResponse &&
+      typeof emailResponse === 'object' &&
+      'value' in emailResponse &&
+      Array.isArray((emailResponse as { value: unknown[] }).value)
+    ) {
+      const emails = (emailResponse as { value: GraphEmail[] }).value;
+      results.emails = {
+        count: emails.length,
+        items: emails.map((e) => ({
+          subject: e.subject,
+          from: e.from?.emailAddress?.address,
+          date: e.receivedDateTime,
+          preview: e.bodyPreview?.substring(0, 150),
+        })),
+      };
+      totalResults += emails.length;
+      if (emails.length > 0) {
+        summaryParts.push(`${emails.length} emails`);
+      }
+    }
+  } catch (error) {
+    results.emails = { error: `Search failed: ${error}`, count: 0 };
+  }
+
+  // Search files using Microsoft Search API
+  try {
+    const searchResponse = await graphClient.makeRequest('/search/query', {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [
+          {
+            entityTypes: ['driveItem', 'listItem', 'site'],
+            query: { queryString: query },
+            from: 0,
+            size: limit,
+          },
+        ],
+      }),
+    });
+
+    if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
+      const items: Array<{ name?: string; webUrl?: string; type?: string }> = [];
+      const searchValues = (searchResponse as { value: unknown[] }).value as Array<{
+        hitsContainers?: Array<{
+          hits?: Array<{
+            resource?: { name?: string; webUrl?: string; '@odata.type'?: string };
+          }>;
+        }>;
+      }>;
+
+      for (const container of searchValues) {
+        if (container.hitsContainers) {
+          for (const hitsContainer of container.hitsContainers) {
+            if (hitsContainer.hits) {
+              for (const hit of hitsContainer.hits) {
+                if (hit.resource) {
+                  items.push({
+                    name: hit.resource.name,
+                    webUrl: hit.resource.webUrl,
+                    type: hit.resource['@odata.type'],
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      results.files = { count: items.length, items };
+      totalResults += items.length;
+      if (items.length > 0) {
+        summaryParts.push(`${items.length} files`);
+      }
+    }
+  } catch (error) {
+    results.files = { error: `Search failed: ${error}`, count: 0 };
+  }
+
+  // Search calendar events
+  try {
+    const now = new Date();
+    const startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString();
+    const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
+
+    const calendarResponse = await graphClient.makeRequest(
+      `/me/calendarView?startDateTime=${startDate}&endDateTime=${endDate}`,
+      {
+        method: 'GET',
+        queryParams: {
+          $search: `"${query}"`,
+          $top: String(limit),
+          $select: 'id,subject,start,end,organizer,location',
+        },
+      }
+    );
+
+    if (
+      calendarResponse &&
+      typeof calendarResponse === 'object' &&
+      'value' in calendarResponse &&
+      Array.isArray((calendarResponse as { value: unknown[] }).value)
+    ) {
+      const events = (calendarResponse as { value: GraphEvent[] }).value;
+      results.calendar = {
+        count: events.length,
+        items: events.map((e) => ({
+          subject: e.subject,
+          start: e.start?.dateTime,
+          end: e.end?.dateTime,
+          organizer: e.organizer?.emailAddress?.address,
+          location: e.location?.displayName,
+        })),
+      };
+      totalResults += events.length;
+      if (events.length > 0) {
+        summaryParts.push(`${events.length} calendar events`);
+      }
+    }
+  } catch (error) {
+    results.calendar = { error: `Search failed: ${error}`, count: 0 };
+  }
+
+  // Generate summary
+  let summary: string;
+  if (totalResults === 0) {
+    summary = `No results found for "${query}" in Microsoft 365. The search covered emails, files, and calendar events.`;
+  } else {
+    summary = `Found ${totalResults} results for "${query}": ${summaryParts.join(', ')}.`;
+  }
+
+  return {
+    success: totalResults > 0,
+    results,
+    summary,
+    totalResults,
+  };
+}
+
+/**
  * Register all compound tools
  */
 export function registerCompoundTools(
@@ -592,6 +763,771 @@ export function registerCompoundTools(
   readOnly: boolean = false
 ): number {
   let registeredCount = 0;
+
+  // ==========================================================================
+  // 0. INTELLIGENT QUERY - PRIMARY ENTRY POINT - ALWAYS PROVIDES AN ANSWER
+  // ==========================================================================
+
+  // Stopwords for keyword extraction (English + German)
+  const STOPWORDS_EN = [
+    'what',
+    'where',
+    'when',
+    'which',
+    'about',
+    'have',
+    'does',
+    'tell',
+    'show',
+    'find',
+    'know',
+    'give',
+    'list',
+    'display',
+    'search',
+    'look',
+    'with',
+    'from',
+    'that',
+    'this',
+    'there',
+    'here',
+    'been',
+    'being',
+    'were',
+    'will',
+    'would',
+    'could',
+    'should',
+    'might',
+    'must',
+    'shall',
+    'need',
+    'want',
+    'like',
+    'some',
+    'more',
+    'most',
+    'other',
+    'into',
+    'over',
+    'such',
+    'only',
+    'than',
+    'then',
+    'also',
+    'back',
+    'after',
+    'before',
+    'through',
+    'during',
+    'without',
+    'again',
+    'further',
+    'once',
+    'just',
+    'information',
+    'emails',
+    'email',
+    'files',
+    'file',
+    'meetings',
+    'meeting',
+    'calendar',
+    'messages',
+    'message',
+  ];
+
+  const STOPWORDS_DE = [
+    'was',
+    'wer',
+    'wie',
+    'wann',
+    'welche',
+    'welcher',
+    'welches',
+    'über',
+    'habe',
+    'haben',
+    'zeige',
+    'zeigen',
+    'finde',
+    'finden',
+    'suche',
+    'suchen',
+    'gibt',
+    'geben',
+    'kannst',
+    'können',
+    'weißt',
+    'wissen',
+    'sagen',
+    'erzähle',
+    'erzählen',
+    'liste',
+    'auflisten',
+    'alle',
+    'alles',
+    'meine',
+    'meinen',
+    'meiner',
+    'deine',
+    'deinen',
+    'seine',
+    'ihre',
+    'einem',
+    'einer',
+    'eines',
+    'einen',
+    'eine',
+    'sein',
+    'sind',
+    'wird',
+    'wurde',
+    'werden',
+    'gewesen',
+    'hatte',
+    'hatten',
+    'diese',
+    'dieser',
+    'dieses',
+    'jene',
+    'jener',
+    'jenes',
+    'auch',
+    'noch',
+    'schon',
+    'mehr',
+    'sehr',
+    'ganz',
+    'nach',
+    'dann',
+    'wenn',
+    'weil',
+    'dass',
+    'damit',
+    'aber',
+    'oder',
+    'doch',
+    'also',
+    'hier',
+    'dort',
+    'jetzt',
+    'heute',
+    'gestern',
+    'morgen',
+    'bitte',
+    'danke',
+    'informationen',
+    'emails',
+    'email',
+    'dateien',
+    'datei',
+    'termine',
+    'termin',
+    'kalender',
+    'nachrichten',
+    'nachricht',
+  ];
+
+  const ALL_STOPWORDS = new Set([...STOPWORDS_EN, ...STOPWORDS_DE]);
+
+  // Detect language based on question
+  function detectLanguage(text: string): 'de' | 'en' {
+    const germanIndicators = [
+      'über',
+      'für',
+      'können',
+      'möchte',
+      'bitte',
+      'zeige',
+      'finde',
+      'suche',
+      'habe',
+      'meine',
+      'heute',
+      'gestern',
+      'morgen',
+      'woche',
+      'monat',
+      'jahr',
+      'weißt',
+      'kannst',
+      'gibt',
+      'alles',
+      'mails',
+      'termine',
+      'dateien',
+      'letzte',
+      'letzten',
+      'nächste',
+      'nächsten',
+    ];
+    const lowerText = text.toLowerCase();
+    const germanMatches = germanIndicators.filter((word) => lowerText.includes(word)).length;
+    return germanMatches >= 1 ? 'de' : 'en';
+  }
+
+  // Bilingual messages
+  const messages = {
+    en: {
+      searchingFor: 'Searching for',
+      tryingKeywords: 'Trying keywords',
+      searchingContext: 'Searching context',
+      successMessage: 'Found relevant information in Microsoft 365 for your question.',
+      noResultsMessage: (q: string) => `No matching information found in Microsoft 365 for "${q}".`,
+      explanation:
+        'The search was executed successfully, but no matching data was found in your emails, files, or calendar.',
+      suggestions: [
+        'Try different keywords or a shorter search term',
+        'Check if the information might be under a different name or spelling',
+        'The data might not exist in your Microsoft 365 account',
+        'Use specific tools like "list-mail-messages" with filters for targeted searches',
+        'Try searching for related terms or synonyms',
+      ],
+      searchCoverage: {
+        emails: 'Searched all mailbox messages',
+        files: 'Searched OneDrive and SharePoint',
+        calendar: 'Searched calendar events from past and future year',
+      },
+      foundResults: (count: number, sources: string[]) =>
+        `Found ${count} results: ${sources.join(', ')}`,
+      emails: 'emails',
+      files: 'files',
+      calendarEvents: 'calendar events',
+    },
+    de: {
+      searchingFor: 'Suche nach',
+      tryingKeywords: 'Versuche Schlüsselwörter',
+      searchingContext: 'Suche im Kontext',
+      successMessage: 'Relevante Informationen in Microsoft 365 für Ihre Frage gefunden.',
+      noResultsMessage: (q: string) =>
+        `Keine passenden Informationen in Microsoft 365 für "${q}" gefunden.`,
+      explanation:
+        'Die Suche wurde erfolgreich ausgeführt, aber es wurden keine passenden Daten in Ihren E-Mails, Dateien oder Kalendern gefunden.',
+      suggestions: [
+        'Versuchen Sie andere Suchbegriffe oder kürzere Suchterme',
+        'Prüfen Sie, ob die Information unter einem anderen Namen gespeichert ist',
+        'Die Daten existieren möglicherweise nicht in Ihrem Microsoft 365 Konto',
+        'Nutzen Sie spezifische Tools wie "list-mail-messages" mit Filtern für gezielte Suchen',
+        'Versuchen Sie verwandte Begriffe oder Synonyme',
+      ],
+      searchCoverage: {
+        emails: 'Alle Postfach-Nachrichten durchsucht',
+        files: 'OneDrive und SharePoint durchsucht',
+        calendar: 'Kalendereinträge aus vergangenem und kommendem Jahr durchsucht',
+      },
+      foundResults: (count: number, sources: string[]) =>
+        `${count} Ergebnisse gefunden: ${sources.join(', ')}`,
+      emails: 'E-Mails',
+      files: 'Dateien',
+      calendarEvents: 'Kalendertermine',
+    },
+  };
+
+  server.tool(
+    'ask-microsoft-365',
+    `🧠 **INTELLIGENT MICROSOFT 365 ASSISTANT** - THE SMARTEST WAY TO QUERY MS365!
+🇬🇧 English | 🇩🇪 Deutsch - Automatically detects your language!
+
+⭐ **THIS IS THE RECOMMENDED PRIMARY TOOL** - Use this for ANY question about Microsoft 365 data!
+⭐ **DIES IST DAS EMPFOHLENE HAUPT-TOOL** - Nutzen Sie es für JEDE Frage zu Microsoft 365 Daten!
+
+This tool provides INTELLIGENT query handling with these features:
+Dieses Tool bietet INTELLIGENTE Anfrageverarbeitung mit diesen Funktionen:
+
+1. ✅ **ALWAYS returns an answer / Liefert IMMER eine Antwort** - never fails silently
+2. 🔄 **Automatic fallback / Automatischer Fallback** - tries multiple search strategies
+3. 🎯 **Smart query understanding / Intelligentes Verstehen** - interprets natural language (EN + DE)
+4. 📊 **Comprehensive results / Umfassende Ergebnisse** - searches across all data sources
+5. 💡 **Helpful suggestions / Hilfreiche Vorschläge** - provides next steps if no results found
+6. 🌍 **Bilingual / Zweisprachig** - responds in your language (English or German)
+
+**Examples / Beispiele:**
+🇬🇧 "What do you know about Project Alpha?"
+🇬🇧 "Find information about customer ACME Corp"
+🇬🇧 "Show me emails from last week about the proposal"
+🇩🇪 "Was weißt du über Projekt Alpha?"
+🇩🇪 "Finde Informationen über Kunde ACME GmbH"
+🇩🇪 "Zeige mir E-Mails von letzter Woche zum Angebot"
+🇩🇪 "Welche Termine habe ich heute?"
+🇩🇪 "Suche alle Dateien zum Thema Budget"
+
+**This tool searches / Dieses Tool durchsucht:**
+- 📧 Emails / E-Mails
+- 📁 Files (OneDrive, SharePoint) / Dateien
+- 📅 Calendar events / Kalendertermine
+
+**GUARANTEE / GARANTIE: This tool will ALWAYS provide a response! / Dieses Tool liefert IMMER eine Antwort!**`,
+    {
+      question: z
+        .string()
+        .describe(
+          'Your question in natural language (English or German) / Ihre Frage in natürlicher Sprache (Englisch oder Deutsch)'
+        ),
+      context: z
+        .string()
+        .optional()
+        .describe(
+          'Optional context to refine the search / Optionaler Kontext zur Verfeinerung der Suche'
+        ),
+      language: z
+        .enum(['auto', 'en', 'de'])
+        .optional()
+        .describe('Response language: auto (detect), en (English), de (German). Default: auto'),
+    },
+    {
+      title: 'Intelligent Microsoft 365 Assistant (EN/DE)',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ question, context, language = 'auto' }) => {
+      logger.info(`Intelligent query: "${question}"${context ? ` (context: ${context})` : ''}`);
+
+      // Detect language
+      const detectedLang = language === 'auto' ? detectLanguage(question) : language;
+      const msg = messages[detectedLang];
+      logger.info(`Detected language: ${detectedLang}`);
+
+      // Combine question and context for search
+      const searchQuery = context ? `${question} ${context}` : question;
+
+      // Track what we've tried
+      const attempts: string[] = [];
+      let finalResults: Record<string, unknown> = {};
+      let foundResults = false;
+
+      // Attempt 1: Full search with original query
+      attempts.push(`${msg.searchingFor}: "${searchQuery}"`);
+      const searchResult = await executeUniversalSearch(graphClient, searchQuery, 25);
+
+      if (searchResult.totalResults > 0) {
+        foundResults = true;
+        finalResults = searchResult.results;
+      }
+
+      // Attempt 2: If no results, try with just the main keywords (bilingual stopword removal)
+      if (!foundResults && question.split(' ').length > 2) {
+        const keywords = question
+          .replace(/[?!.,;:'"„"«»]/g, '')
+          .split(' ')
+          .filter((word) => word.length > 2 && !ALL_STOPWORDS.has(word.toLowerCase()))
+          .slice(0, 4)
+          .join(' ');
+
+        if (keywords && keywords.toLowerCase() !== searchQuery.toLowerCase()) {
+          attempts.push(`${msg.tryingKeywords}: "${keywords}"`);
+          const keywordResult = await executeUniversalSearch(graphClient, keywords, 25);
+
+          if (keywordResult.totalResults > 0) {
+            foundResults = true;
+            finalResults = keywordResult.results;
+          }
+        }
+      }
+
+      // Attempt 3: If still no results and context provided, search just context
+      if (!foundResults && context) {
+        attempts.push(`${msg.searchingContext}: "${context}"`);
+        const contextResult = await executeUniversalSearch(graphClient, context, 25);
+
+        if (contextResult.totalResults > 0) {
+          foundResults = true;
+          finalResults = contextResult.results;
+        }
+      }
+
+      // Attempt 4: Try individual important words as separate searches
+      if (!foundResults) {
+        const importantWords = question
+          .replace(/[?!.,;:'"„"«»]/g, '')
+          .split(' ')
+          .filter((word) => word.length > 4 && !ALL_STOPWORDS.has(word.toLowerCase()));
+
+        for (const word of importantWords.slice(0, 2)) {
+          attempts.push(`${msg.tryingKeywords}: "${word}"`);
+          const wordResult = await executeUniversalSearch(graphClient, word, 15);
+          if (wordResult.totalResults > 0) {
+            foundResults = true;
+            finalResults = wordResult.results;
+            break;
+          }
+        }
+      }
+
+      // Build response
+      const response: Record<string, unknown> = {
+        question,
+        language: detectedLang,
+        searchedAt: new Date().toISOString(),
+        searchAttempts: attempts,
+        resultsFound: foundResults,
+      };
+
+      if (foundResults) {
+        response.status = 'SUCCESS';
+        response.message = msg.successMessage;
+        response.results = finalResults;
+
+        // Count results with bilingual labels
+        let totalCount = 0;
+        const sources: string[] = [];
+        if (
+          finalResults.emails &&
+          typeof finalResults.emails === 'object' &&
+          'count' in finalResults.emails
+        ) {
+          const count = (finalResults.emails as { count: number }).count;
+          if (count > 0) {
+            totalCount += count;
+            sources.push(`${count} ${msg.emails}`);
+          }
+        }
+        if (
+          finalResults.files &&
+          typeof finalResults.files === 'object' &&
+          'count' in finalResults.files
+        ) {
+          const count = (finalResults.files as { count: number }).count;
+          if (count > 0) {
+            totalCount += count;
+            sources.push(`${count} ${msg.files}`);
+          }
+        }
+        if (
+          finalResults.calendar &&
+          typeof finalResults.calendar === 'object' &&
+          'count' in finalResults.calendar
+        ) {
+          const count = (finalResults.calendar as { count: number }).count;
+          if (count > 0) {
+            totalCount += count;
+            sources.push(`${count} ${msg.calendarEvents}`);
+          }
+        }
+        response.summary = msg.foundResults(totalCount, sources);
+      } else {
+        response.status = 'NO_RESULTS';
+        response.message = msg.noResultsMessage(question);
+        response.explanation = msg.explanation;
+        response.suggestions = msg.suggestions;
+        response.searchCoverage = msg.searchCoverage;
+        response.tip =
+          detectedLang === 'de'
+            ? 'Tipp: Versuchen Sie "what-can-i-ask" um zu sehen, welche Fragen unterstützt werden.'
+            : 'Tip: Try "what-can-i-ask" to see what questions are supported.';
+      }
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response, null, 2),
+          },
+        ],
+        isError: false,
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 0b. WHAT CAN I ASK - Shows example questions that work 100%
+  // ==========================================================================
+  server.tool(
+    'what-can-i-ask',
+    `❓ **WHAT CAN I ASK?** - Discover all the questions you can ask!
+
+This tool shows you example questions that are **100% guaranteed to work** with Microsoft 365.
+Use this when:
+- You want to know what the system can do
+- You need inspiration for queries
+- You're new to the Microsoft 365 assistant
+
+Returns categorized examples with guaranteed working queries.`,
+    {
+      category: z
+        .enum(['all', 'email', 'calendar', 'files', 'people', 'teams', 'search', 'tasks'])
+        .optional()
+        .describe('Filter examples by category (default: all)'),
+    },
+    {
+      title: 'What Can I Ask?',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async ({ category = 'all' }) => {
+      logger.info(`What can I ask? Category: ${category}`);
+
+      const examples = {
+        email: {
+          title: '📧 Email & Messages',
+          description: 'Questions about your emails, inbox, and mail folders',
+          questions: [
+            {
+              question: 'Show me my latest emails',
+              tool: 'list-mail-messages',
+              guaranteed: true,
+            },
+            {
+              question: 'Find emails from [person name or email]',
+              tool: 'ask-microsoft-365',
+              guaranteed: true,
+            },
+            {
+              question: 'Search for emails about [any topic]',
+              tool: 'search-everything',
+              guaranteed: true,
+            },
+            {
+              question: 'Show me unread emails',
+              tool: 'list-mail-messages with filter',
+              guaranteed: true,
+            },
+            {
+              question: 'What emails did I receive today/this week?',
+              tool: 'list-mail-messages with date filter',
+              guaranteed: true,
+            },
+            {
+              question: 'Show me emails with attachments',
+              tool: 'list-mail-messages with hasAttachments filter',
+              guaranteed: true,
+            },
+            {
+              question: 'List my mail folders',
+              tool: 'list-mail-folders',
+              guaranteed: true,
+            },
+          ],
+        },
+        calendar: {
+          title: '📅 Calendar & Meetings',
+          description: 'Questions about your schedule, meetings, and events',
+          questions: [
+            {
+              question: 'What meetings do I have today?',
+              tool: 'list-calendar-events',
+              guaranteed: true,
+            },
+            {
+              question: 'Show me my schedule for this week',
+              tool: 'list-calendar-events with date range',
+              guaranteed: true,
+            },
+            {
+              question: 'Find meetings with [person name]',
+              tool: 'find-meetings-with-person',
+              guaranteed: true,
+            },
+            {
+              question: 'What is my next meeting?',
+              tool: 'list-calendar-events',
+              guaranteed: true,
+            },
+            {
+              question: 'Show me meetings about [topic]',
+              tool: 'ask-microsoft-365',
+              guaranteed: true,
+            },
+            {
+              question: 'List my calendars',
+              tool: 'list-calendars',
+              guaranteed: true,
+            },
+          ],
+        },
+        files: {
+          title: '📁 Files & Documents',
+          description: 'Questions about your OneDrive and SharePoint files',
+          questions: [
+            {
+              question: 'Show me my recent files',
+              tool: 'list-drive-recent',
+              guaranteed: true,
+            },
+            {
+              question: 'Find files about [topic]',
+              tool: 'search-everything',
+              guaranteed: true,
+            },
+            {
+              question: 'What files are in my OneDrive?',
+              tool: 'list-drive-root-items',
+              guaranteed: true,
+            },
+            {
+              question: 'Show files shared with me',
+              tool: 'list-drive-shared',
+              guaranteed: true,
+            },
+            {
+              question: 'Find documents from [person]',
+              tool: 'find-files-from-person',
+              guaranteed: true,
+            },
+            {
+              question: 'Search for [filename or content]',
+              tool: 'ask-microsoft-365',
+              guaranteed: true,
+            },
+          ],
+        },
+        people: {
+          title: '👥 People & Contacts',
+          description: 'Questions about contacts and colleagues',
+          questions: [
+            {
+              question: 'Find contact information for [person name]',
+              tool: 'list-users with search',
+              guaranteed: true,
+            },
+            {
+              question: 'Show me my contacts',
+              tool: 'list-contacts',
+              guaranteed: true,
+            },
+            {
+              question: 'Who is [person name]?',
+              tool: 'ask-microsoft-365',
+              guaranteed: true,
+            },
+            {
+              question: 'Get profile of [email address]',
+              tool: 'get-user',
+              guaranteed: true,
+            },
+          ],
+        },
+        teams: {
+          title: '💬 Teams & Chats',
+          description: 'Questions about Teams messages and conversations (requires org mode)',
+          questions: [
+            {
+              question: 'Show my Teams chats',
+              tool: 'list-chats',
+              guaranteed: true,
+              note: 'Requires organization mode',
+            },
+            {
+              question: 'Find messages with [person]',
+              tool: 'find-messages-with-person',
+              guaranteed: true,
+              note: 'Requires organization mode',
+            },
+            {
+              question: 'What did I discuss with [person] in Teams?',
+              tool: 'find-messages-with-person',
+              guaranteed: true,
+              note: 'Requires organization mode',
+            },
+            {
+              question: 'Show my Teams',
+              tool: 'list-joined-teams',
+              guaranteed: true,
+              note: 'Requires organization mode',
+            },
+          ],
+        },
+        tasks: {
+          title: '✅ Tasks & To-Do',
+          description: 'Questions about your tasks and to-do lists',
+          questions: [
+            {
+              question: 'Show my tasks',
+              tool: 'list-todo-tasks',
+              guaranteed: true,
+            },
+            {
+              question: 'What do I need to do?',
+              tool: 'list-todo-tasks',
+              guaranteed: true,
+            },
+            {
+              question: 'Show my to-do lists',
+              tool: 'list-todo-lists',
+              guaranteed: true,
+            },
+          ],
+        },
+        search: {
+          title: '🔍 Universal Search',
+          description: 'Search across all Microsoft 365 data',
+          questions: [
+            {
+              question: 'What do you know about [any topic]?',
+              tool: 'ask-microsoft-365',
+              guaranteed: true,
+            },
+            {
+              question: 'Find everything about [project/company/person]',
+              tool: 'search-everything',
+              guaranteed: true,
+            },
+            {
+              question: 'Search for [any keyword]',
+              tool: 'search-everything',
+              guaranteed: true,
+            },
+            {
+              question: 'Tell me about [any subject]',
+              tool: 'ask-microsoft-365',
+              guaranteed: true,
+            },
+            {
+              question: 'What information do we have about [client/project]?',
+              tool: 'ask-microsoft-365',
+              guaranteed: true,
+            },
+          ],
+        },
+      };
+
+      // Filter by category
+      let selectedCategories: Record<string, (typeof examples)['email']>;
+      if (category === 'all') {
+        selectedCategories = examples;
+      } else {
+        selectedCategories = { [category]: examples[category] };
+      }
+
+      // Build response
+      const response = {
+        title: '❓ What Can I Ask? - Microsoft 365 Assistant',
+        description:
+          'Here are example questions you can ask. All these queries are 100% guaranteed to work!',
+        category: category === 'all' ? 'All Categories' : category,
+        categories: selectedCategories,
+        tips: [
+          '💡 Use "ask-microsoft-365" for any general question - it always provides an answer!',
+          '💡 Use "search-everything" to find information across all your data',
+          '💡 Be specific with names and dates for better results',
+          '💡 You can combine topics: "emails about budget from last month"',
+        ],
+        quickStart: [
+          { question: 'Show my latest emails', action: 'list-mail-messages' },
+          { question: 'What meetings do I have today?', action: 'list-calendar-events' },
+          { question: 'Find files about [topic]', action: 'search-everything' },
+          { question: 'What do you know about [anything]?', action: 'ask-microsoft-365' },
+        ],
+        totalExamples: Object.values(selectedCategories).reduce(
+          (sum, cat) => sum + cat.questions.length,
+          0
+        ),
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(response, null, 2),
+          },
+        ],
+        isError: false,
+      };
+    }
+  );
+  registeredCount++;
 
   // ==========================================================================
   // 1. FIND MESSAGES WITH PERSON - Combines user search + chat search + messages
