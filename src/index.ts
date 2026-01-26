@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 
-// Load environment variables from .env file
+// Load environment variables from .env file (optional)
+// Environment variables can come from .env file, system environment, Azure Key Vault, Docker, etc.
 import { config } from 'dotenv';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
 
-// Try to load .env file from project root
+// Try to load .env file from project root if it exists
 const envPath = resolve(process.cwd(), '.env');
 if (existsSync(envPath)) {
   const result = config({ path: envPath });
@@ -13,11 +14,10 @@ if (existsSync(envPath)) {
     console.warn(`Warning: Error loading .env file: ${result.error.message}`);
   }
 } else {
-  // Fallback: try to load from default location
-  const result = config();
-  if (result.error && !existsSync(resolve(process.cwd(), '.env'))) {
-    console.warn('Warning: .env file not found. Environment variables may not be loaded.');
-  }
+  // Fallback: try to load from default location (silently, no warning if not found)
+  config();
+  // Note: Environment variables may be set from other sources (system env, Docker, Key Vault, etc.)
+  // No warning needed if .env file doesn't exist
 }
 
 import { parseArgs } from './cli.js';
@@ -26,6 +26,124 @@ import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import MicrosoftGraphServer from './server.js';
 import { version } from './version.js';
 import { initializeLicenseCheck } from './license-check.js';
+
+/**
+ * Masks sensitive values for display purposes
+ * Shows first 4 and last 4 characters, masks the rest
+ */
+function maskSensitiveValue(value: string | undefined): string {
+  if (!value) {
+    return '(not set)';
+  }
+
+  // For short values, mask completely
+  if (value.length <= 12) {
+    return '***';
+  }
+
+  // Show first 4 and last 4 characters
+  const prefix = value.substring(0, 4);
+  const suffix = value.substring(value.length - 4);
+  const maskedLength = value.length - 8;
+  const masked = '*'.repeat(Math.min(maskedLength, 20)); // Max 20 asterisks
+
+  return `${prefix}${masked}${suffix}`;
+}
+
+/**
+ * Lists all relevant environment variables with masked sensitive values
+ */
+function displayEnvironmentVariables(): void {
+  // List of all relevant environment variables
+  const relevantVars = [
+    // Authentication & Azure Configuration
+    'MS365_MCP_CLIENT_ID',
+    'MS365_MCP_TENANT_ID',
+    'MS365_MCP_CLIENT_SECRET', // Sensitive
+    'MS365_MCP_CLOUD_TYPE',
+    'MS365_MCP_OAUTH_TOKEN', // Sensitive
+    'MS365_MCP_KEYVAULT_URL',
+    // Server Mode & Behavior
+    'READ_ONLY',
+    'MS365_MCP_ORG_MODE',
+    'ENABLED_TOOLS',
+    'MS365_MCP_OUTPUT_FORMAT',
+    'MS365_MCP_ENABLE_DISCOVERY_TOOLS',
+    'MS365_MCP_FORCE_WORK_SCOPES',
+    // Performance & Limits
+    'MS365_MCP_MAX_RESULTS',
+    'MS365_MCP_MAX_PAGES',
+    'MS365_MCP_MAX_AGGREGATE_ITEMS',
+    'MS365_MCP_MAX_CONCURRENT_TOOLS',
+    'MS365_MCP_MAX_REPAIR_ATTEMPTS',
+    // Learning & AI Features
+    'MS365_MCP_LEARNING_ENABLED',
+    'MS365_MCP_LEARNING_DECAY_DAYS',
+    'MS365_MCP_LEARNING_DECAY_FACTOR',
+    'MS365_MCP_LEARNING_CLUSTER_ENABLED',
+    'MS365_MCP_LEARNING_NLP_ENABLED',
+    'MS365_MCP_KNOWLEDGE_BASE_PATH',
+    // Deep Research
+    'MS365_MCP_DEEP_RESEARCH_MAX_DEPTH',
+    'MS365_MCP_MAX_RESEARCH_ITERATIONS',
+    'MS365_MCP_DEEP_RESEARCH_ITEMS_PER_ITERATION',
+    // CORS & Security
+    'MS365_MCP_CORS_ORIGINS',
+    'MS365_MCP_CORS_ORIGIN',
+    'MS365_MCP_CORS_METHODS',
+    'MS365_MCP_CORS_HEADERS',
+    'MS365_MCP_X_FRAME_OPTIONS',
+    'MS365_MCP_REFERRER_POLICY',
+    'MS365_MCP_CSP',
+    'MS365_MCP_HSTS_MAX_AGE',
+    // Rate Limiting
+    'MS365_MCP_RATE_LIMIT_WINDOW_MS',
+    'MS365_MCP_RATE_LIMIT_MAX_REQUESTS',
+    // Self-Repair
+    'MS365_MCP_ENABLE_SELF_REPAIR',
+    'MS365_MCP_REPAIR_STRATEGIES',
+    'MS365_MCP_STOP_ON_ERROR',
+    // Query & Search
+    'MS365_MCP_MAX_QUERY_VARIANTS',
+    // Logging
+    'LOG_LEVEL',
+    'LOG_FORMAT',
+    'SILENT',
+    'DEBUG_REQUESTS',
+    // General
+    'NODE_ENV',
+    'TRUST_PROXY_COUNT',
+    // License (Sensitive)
+    'CGPT_JOIN_LICENSE', // Sensitive
+  ];
+
+  // Sensitive variables that should be masked
+  const sensitiveVars = new Set([
+    'MS365_MCP_CLIENT_SECRET',
+    'MS365_MCP_OAUTH_TOKEN',
+    'CGPT_JOIN_LICENSE',
+  ]);
+
+  console.log('\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m');
+  console.log('\x1b[33m  Environment Variables (Masked)\x1b[0m');
+  console.log('\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n');
+
+  let hasVariables = false;
+  for (const varName of relevantVars) {
+    const value = process.env[varName];
+    if (value !== undefined) {
+      hasVariables = true;
+      const displayValue = sensitiveVars.has(varName) ? maskSensitiveValue(value) : value;
+      console.log(`  \x1b[36m${varName.padEnd(40)}\x1b[0m = ${displayValue}`);
+    }
+  }
+
+  if (!hasVariables) {
+    console.log('  \x1b[90m(No relevant environment variables set)\x1b[0m');
+  }
+
+  console.log('\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n');
+}
 
 /**
  * Display ASCII art banner for ki.join.de
@@ -59,6 +177,9 @@ async function main(): Promise<void> {
 
     // Display banner on startup
     displayBanner();
+
+    // Display environment variables (masked)
+    displayEnvironmentVariables();
 
     const args = parseArgs();
 

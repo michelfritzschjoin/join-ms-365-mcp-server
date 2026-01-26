@@ -1,4 +1,4 @@
- /**
+/**
  * License validation module for CompanyGPT integration
  * @internal This module is not documented and should not be modified
  */
