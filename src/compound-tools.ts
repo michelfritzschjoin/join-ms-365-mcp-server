@@ -3906,19 +3906,20 @@ This is the go-to tool for any general query or when no specific tool matches th
       }
 
       // Search calendar events
+      // Note: $filter with contains() on calendarView often causes 500 errors
+      // Use client-side filtering instead for reliability
       try {
         const now = new Date();
         const pastDate = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
         const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
-        // Build query string with all parameters (startDateTime and endDateTime are REQUIRED for calendarView)
         // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
         const queryParams: Record<string, string> = {
           startDateTime: pastDate.toISOString(),
           endDateTime: futureDate.toISOString(),
-          $filter: `contains(subject, '${query.replace(/'/g, "''")}')`, // Escape single quotes for OData
-          $top: String(limit),
+          $top: '100', // Fetch more to filter client-side
           $select: 'id,subject,start,end,location',
+          $orderby: 'start/dateTime desc',
         };
 
         const calendarResponse = await graphClient.makeRequest(
@@ -3934,9 +3935,14 @@ This is the go-to tool for any general query or when no specific tool matches th
           'value' in calendarResponse &&
           Array.isArray(calendarResponse.value)
         ) {
+          // Client-side filtering for reliability (avoids 500 errors from OData contains)
+          const queryLower = query.toLowerCase();
+          const filteredEvents = (calendarResponse.value as GraphEvent[]).filter((e) =>
+            e.subject?.toLowerCase().includes(queryLower)
+          );
           results.events = {
-            count: calendarResponse.value.length,
-            items: (calendarResponse.value as GraphEvent[]).map((e) => ({
+            count: filteredEvents.length,
+            items: filteredEvents.slice(0, limit).map((e) => ({
               subject: e.subject,
               start: e.start?.dateTime,
               location: e.location?.displayName,
@@ -3944,6 +3950,7 @@ This is the go-to tool for any general query or when no specific tool matches th
           };
         }
       } catch (error) {
+        logger.warn(`Calendar search failed: ${error}`);
         results.events = { error: `Search failed: ${error}` };
       }
 
@@ -4741,11 +4748,11 @@ Use this for "What's the status of Project Apollo?", "Give me an overview of the
               const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
               // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+              // Note: $filter with contains() causes 500 errors, use client-side filtering
               const projectQueryParams: Record<string, string> = {
                 startDateTime: pastDate.toISOString(),
                 endDateTime: futureDate.toISOString(),
-                $filter: `contains(subject, '${projectName.replace(/'/g, "''")}')`, // Escape single quotes
-                $top: '20',
+                $top: '100',
                 $select: 'id,subject,start,end,organizer,attendees',
                 $orderby: 'start/dateTime desc',
               };
@@ -4763,7 +4770,11 @@ Use this for "What's the status of Project Apollo?", "Give me an overview of the
                 'value' in meetingsResponse &&
                 Array.isArray(meetingsResponse.value)
               ) {
-                const events = meetingsResponse.value as GraphEvent[];
+                // Client-side filtering for reliability
+                const projectLower = projectName.toLowerCase();
+                const events = (meetingsResponse.value as GraphEvent[]).filter((e) =>
+                  e.subject?.toLowerCase().includes(projectLower)
+                );
                 const upcoming = events.filter((e) => new Date(e.start.dateTime) >= now);
                 const past = events.filter((e) => new Date(e.start.dateTime) < now);
 
@@ -4782,6 +4793,7 @@ Use this for "What's the status of Project Apollo?", "Give me an overview of the
                 };
               }
             } catch (error) {
+              logger.warn(`Project meetings search failed: ${error}`);
               result.meetings = { error: `Could not fetch: ${error}` };
             }
           })()
@@ -7471,11 +7483,11 @@ Use this for "When did we decide on X?", "What was the context for decision Y?",
         (async () => {
           try {
             // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            // Note: $filter with contains() causes 500 errors, use client-side filtering
             const topicQueryParams: Record<string, string> = {
               startDateTime: startDate.toISOString(),
               endDateTime: new Date().toISOString(),
-              $filter: `contains(subject, '${topic.replace(/'/g, "''")}')`, // Escape single quotes
-              $top: '30',
+              $top: '100',
               $select: 'subject,start,end,attendees,organizer,bodyPreview,webLink',
               $orderby: 'start/dateTime desc',
             };
@@ -7492,7 +7504,11 @@ Use this for "When did we decide on X?", "What was the context for decision Y?",
               typeof meetingsResponse === 'object' &&
               'value' in meetingsResponse
             ) {
-              const meetings = meetingsResponse.value as GraphEvent[];
+              // Client-side filtering for reliability
+              const topicLower = topic.toLowerCase();
+              const meetings = (meetingsResponse.value as GraphEvent[]).filter((m) =>
+                m.subject?.toLowerCase().includes(topicLower)
+              );
 
               result.relatedMeetings = {
                 count: meetings.length,
@@ -7507,6 +7523,7 @@ Use this for "When did we decide on X?", "What was the context for decision Y?",
               };
             }
           } catch (error) {
+            logger.warn(`Topic meetings search failed: ${error}`);
             result.relatedMeetings = { error: `${error}` };
           }
         })()
@@ -7688,10 +7705,10 @@ Use this for "Who is involved in Project X?", "List stakeholders for [project]",
         (async () => {
           try {
             // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            // Note: $filter with contains() causes 500 errors, use client-side filtering
             const projectFilterQueryParams: Record<string, string> = {
               startDateTime: startDate.toISOString(),
               endDateTime: new Date().toISOString(),
-              $filter: `contains(subject, '${projectName.replace(/'/g, "''")}')`, // Escape single quotes
               $top: '100',
               $select: 'subject,attendees,organizer',
             };
@@ -7708,7 +7725,12 @@ Use this for "Who is involved in Project X?", "List stakeholders for [project]",
               typeof meetingsResponse === 'object' &&
               'value' in meetingsResponse
             ) {
-              for (const event of meetingsResponse.value as GraphEvent[]) {
+              // Client-side filtering for reliability
+              const projectLower = projectName.toLowerCase();
+              const filteredEvents = (meetingsResponse.value as GraphEvent[]).filter((e) =>
+                e.subject?.toLowerCase().includes(projectLower)
+              );
+              for (const event of filteredEvents) {
                 // Add organizer
                 const orgEmail = event.organizer?.emailAddress?.address?.toLowerCase();
                 if (orgEmail) {
