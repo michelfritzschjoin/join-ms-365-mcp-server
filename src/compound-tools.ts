@@ -1167,23 +1167,44 @@ This is the ultimate tool for "Tell me everything about my interactions with [pe
   registeredCount++;
 
   // ==========================================================================
-  // 6. SEARCH EVERYTHING ABOUT TOPIC - Cross-product search
+  // 6. SEARCH EVERYTHING ABOUT TOPIC - Cross-product search (FALLBACK TOOL)
   // ==========================================================================
   server.tool(
     'search-everything',
-    `Search across ALL Microsoft 365 products for a topic. Combines results from:
-- Emails (subject, body)
-- Teams messages
-- Files (OneDrive, SharePoint)
-- Calendar events
+    `🔍 **UNIVERSAL FALLBACK SEARCH TOOL** - USE THIS WHEN NO OTHER TOOL FITS!
 
-Use this for broad searches like "Find everything about Project X" or "What do we have about the budget meeting?".`,
+⚠️ **CRITICAL: ALWAYS use this tool as a FALLBACK when:**
+- The user's question doesn't match any specific tool
+- You're unsure which tool to use
+- The user asks a general question about any topic, person, project, or company
+- No other tool seems appropriate for the request
+
+This tool searches across ALL Microsoft 365 products simultaneously:
+- 📧 Emails (subject, body, attachments)
+- 💬 Teams messages and chats
+- 📁 Files (OneDrive, SharePoint)
+- 📅 Calendar events and meetings
+
+**Examples of when to use this tool:**
+- "What do you know about [any topic]?" → Use search-everything
+- "Tell me about [company/project/person]" → Use search-everything
+- "Find information about [anything]" → Use search-everything
+- "What did we discuss about [topic]?" → Use search-everything
+- Any question where you're not sure which specific tool to use → Use search-everything
+
+**RULE: When in doubt, use search-everything!**
+
+This is the go-to tool for any general query or when no specific tool matches the user's intent.`,
     {
-      query: z.string().describe('Search query to find across all Microsoft 365'),
+      query: z
+        .string()
+        .describe(
+          'The search query - can be any topic, person, company, project, keyword, or phrase the user is asking about'
+        ),
       limit: z.number().optional().describe('Maximum results per category (default: 10)'),
     },
     {
-      title: 'Search Everything',
+      title: 'Universal Search (Fallback)',
       readOnlyHint: true,
       openWorldHint: true,
     },
