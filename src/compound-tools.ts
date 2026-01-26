@@ -14,6 +14,20 @@ import { z } from 'zod';
 import GraphClient from './graph-client.js';
 import logger from './logger.js';
 
+/**
+ * Build query string for Microsoft Graph API requests
+ * Handles $ prefixed parameters correctly (doesn't encode $)
+ */
+function buildGraphQueryString(params: Record<string, string>): string {
+  return Object.entries(params)
+    .map(([key, value]) => {
+      // Don't encode $ in parameter names (Microsoft Graph API expects $top, $filter, etc.)
+      const encodedKey = key.startsWith('$') ? key : encodeURIComponent(key);
+      return `${encodedKey}=${encodeURIComponent(value)}`;
+    })
+    .join('&');
+}
+
 // Type definitions for Graph API responses
 interface GraphUser {
   id: string;
@@ -473,16 +487,21 @@ async function findMeetingsWithPerson(
     const pastDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000); // 90 days ago
     const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000); // 90 days future
 
-    const response = await graphClient.makeRequest('/me/calendarView', {
-      method: 'GET',
-      queryParams: {
-        startDateTime: pastDate.toISOString(),
-        endDateTime: futureDate.toISOString(),
-        $top: '100',
-        $select: 'id,subject,bodyPreview,start,end,attendees,organizer,location,webLink',
-        $orderby: 'start/dateTime desc',
-      },
-    });
+    // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+    const queryParams: Record<string, string> = {
+      startDateTime: pastDate.toISOString(),
+      endDateTime: futureDate.toISOString(),
+      $top: '100',
+      $select: 'id,subject,bodyPreview,start,end,attendees,organizer,location,webLink',
+      $orderby: 'start/dateTime desc',
+    };
+
+    const response = await graphClient.makeRequest(
+      `/me/calendarView?${buildGraphQueryString(queryParams)}`,
+      {
+        method: 'GET',
+      }
+    );
 
     if (
       !response ||
@@ -877,13 +896,25 @@ async function executeSearchApiFirst(
                     webUrl: hit.resource.webUrl,
                   };
 
+                  // Check for person by type or by properties (more robust detection)
+                  const isPerson =
+                    type.includes('person') ||
+                    type.includes('microsoft.graph.person') ||
+                    (hit.resource.displayName &&
+                      (hit.resource.emailAddresses ||
+                        hit.resource.userPrincipalName ||
+                        hit.resource.mail) &&
+                      !type.includes('message') &&
+                      !type.includes('event') &&
+                      !type.includes('driveItem'));
+
                   if (type.includes('message')) results.emails.push(hitData);
                   else if (type.includes('event')) results.events.push(hitData);
                   else if (type.includes('driveItem')) results.files.push(hitData);
                   else if (type.includes('site')) results.sites.push(hitData);
                   else if (type.includes('listItem')) results.listItems.push(hitData);
                   else if (type.includes('chatMessage')) results.chats.push(hitData);
-                  else if (type.includes('person')) results.people.push(hitData);
+                  else if (isPerson) results.people.push(hitData);
                 }
               }
             }
@@ -1043,15 +1074,19 @@ async function executeUniversalSearch(
     const startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString();
     const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
 
+    // Build query string with all parameters (startDateTime and endDateTime are REQUIRED for calendarView)
+    const queryParams: Record<string, string> = {
+      startDateTime: startDate,
+      endDateTime: endDate,
+      $search: `"${query}"`,
+      $top: String(limit),
+      $select: 'id,subject,start,end,organizer,location',
+    };
+
     const calendarResponse = await graphClient.makeRequest(
-      `/me/calendarView?startDateTime=${startDate}&endDateTime=${endDate}`,
+      `/me/calendarView?${buildGraphQueryString(queryParams)}`,
       {
         method: 'GET',
-        queryParams: {
-          $search: `"${query}"`,
-          $top: String(limit),
-          $select: 'id,subject,start,end,organizer,location',
-        },
       }
     );
 
@@ -2061,17 +2096,58 @@ export function registerCompoundTools(
         case 'people': {
           const searchQuery = entities.person || entities.topic;
           if (searchQuery) {
-            const response = await graphClient.makeRequest('/me/people', {
-              method: 'GET',
-              queryParams: {
-                $search: `"${searchQuery}"`,
-                $top: '10',
-              },
-            });
+            // Try multiple search strategies for better results
+            const searchStrategies = [
+              { $search: `"${searchQuery}"` }, // Exact phrase
+              { $search: searchQuery }, // Without quotes for partial matches
+              { $filter: `startswith(displayName,'${searchQuery}')` }, // Starts with
+            ];
 
-            if (response && typeof response === 'object' && 'value' in response) {
-              const people = (response as { value: unknown[] }).value || [];
-              results.data = people.map((p: unknown) => {
+            let allPeople: unknown[] = [];
+            const seenEmails = new Set<string>();
+
+            for (const strategy of searchStrategies) {
+              try {
+                const response = await graphClient.makeRequest('/me/people', {
+                  method: 'GET',
+                  queryParams: {
+                    ...strategy,
+                    $top: '10',
+                  },
+                });
+
+                if (response && typeof response === 'object' && 'value' in response) {
+                  const people = (response as { value: unknown[] }).value || [];
+                  for (const person of people) {
+                    const p = person as {
+                      displayName?: string;
+                      emailAddresses?: Array<{ address?: string }>;
+                    };
+                    const email = p.emailAddresses?.[0]?.address;
+                    // Deduplicate by email
+                    if (email && !seenEmails.has(email)) {
+                      seenEmails.add(email);
+                      allPeople.push(person);
+                    } else if (!email) {
+                      // If no email, check by name
+                      const exists = allPeople.some(
+                        (existing) =>
+                          (existing as { displayName?: string }).displayName === p.displayName
+                      );
+                      if (!exists) {
+                        allPeople.push(person);
+                      }
+                    }
+                  }
+                }
+              } catch (err) {
+                // Continue with next strategy if one fails
+                logger.debug(`People search strategy failed: ${err}`);
+              }
+            }
+
+            if (allPeople.length > 0) {
+              results.data = allPeople.map((p: unknown) => {
                 const person = p as {
                   displayName?: string;
                   emailAddresses?: Array<{ address?: string }>;
@@ -2087,7 +2163,7 @@ export function registerCompoundTools(
                   jobTitle: person.jobTitle,
                 };
               });
-              results.count = people.length;
+              results.count = allPeople.length;
             }
           }
           break;
@@ -2410,6 +2486,34 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
         );
         if (primaryResult.count > 0) {
           primaryIntentData = primaryResult.data;
+
+          // Merge people results from intent query into searchResults.people
+          if (intentResult.primary === 'people' && Array.isArray(primaryResult.data)) {
+            for (const person of primaryResult.data) {
+              // person format: { name, email, phone, department, jobTitle }
+              const personHit: SearchHit = {
+                resource: {
+                  displayName: person.name,
+                  emailAddresses: person.email ? [{ address: person.email }] : undefined,
+                  phones: person.phone ? [{ number: person.phone }] : undefined,
+                  department: person.department,
+                  jobTitle: person.jobTitle,
+                },
+                summary: undefined,
+                name: person.name,
+                webUrl: undefined,
+              };
+              // Avoid duplicates by name or email
+              const exists = searchResults.people.some(
+                (p) =>
+                  p.name === personHit.name ||
+                  (person.email && p.resource?.emailAddresses?.[0]?.address === person.email)
+              );
+              if (!exists) {
+                searchResults.people.push(personHit);
+              }
+            }
+          }
         }
       }
 
@@ -3807,16 +3911,22 @@ This is the go-to tool for any general query or when no specific tool matches th
         const pastDate = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
         const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
-        const calendarResponse = await graphClient.makeRequest('/me/calendarView', {
-          method: 'GET',
-          queryParams: {
-            startDateTime: pastDate.toISOString(),
-            endDateTime: futureDate.toISOString(),
-            $filter: `contains(subject, '${query}')`,
-            $top: String(limit),
-            $select: 'id,subject,start,end,location',
-          },
-        });
+        // Build query string with all parameters (startDateTime and endDateTime are REQUIRED for calendarView)
+        // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+        const queryParams: Record<string, string> = {
+          startDateTime: pastDate.toISOString(),
+          endDateTime: futureDate.toISOString(),
+          $filter: `contains(subject, '${query.replace(/'/g, "''")}')`, // Escape single quotes for OData
+          $top: String(limit),
+          $select: 'id,subject,start,end,location',
+        };
+
+        const calendarResponse = await graphClient.makeRequest(
+          `/me/calendarView?${buildGraphQueryString(queryParams)}`,
+          {
+            method: 'GET',
+          }
+        );
 
         if (
           calendarResponse &&
@@ -3882,16 +3992,21 @@ Use this when someone asks "Prepare me for my meeting with [person/topic]" or "W
       let targetMeeting: GraphEvent | null = null;
 
       try {
-        const calendarResponse = await graphClient.makeRequest('/me/calendarView', {
-          method: 'GET',
-          queryParams: {
-            startDateTime: now.toISOString(),
-            endDateTime: futureDate.toISOString(),
-            $top: '20',
-            $select: 'id,subject,start,end,attendees,organizer,location,bodyPreview,webLink',
-            $orderby: 'start/dateTime',
-          },
-        });
+        // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+        const queryParams: Record<string, string> = {
+          startDateTime: now.toISOString(),
+          endDateTime: futureDate.toISOString(),
+          $top: '20',
+          $select: 'id,subject,start,end,attendees,organizer,location,bodyPreview,webLink',
+          $orderby: 'start/dateTime',
+        };
+
+        const calendarResponse = await graphClient.makeRequest(
+          `/me/calendarView?${buildGraphQueryString(queryParams)}`,
+          {
+            method: 'GET',
+          }
+        );
 
         if (
           calendarResponse &&
@@ -3975,16 +4090,21 @@ Use this when someone asks "Prepare me for my meeting with [person/topic]" or "W
         (async () => {
           try {
             const pastDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
-            const pastMeetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: pastDate.toISOString(),
-                endDateTime: now.toISOString(),
-                $top: '50',
-                $select: 'id,subject,start,attendees',
-                $orderby: 'start/dateTime desc',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const pastQueryParams: Record<string, string> = {
+              startDateTime: pastDate.toISOString(),
+              endDateTime: now.toISOString(),
+              $top: '50',
+              $select: 'id,subject,start,attendees',
+              $orderby: 'start/dateTime desc',
+            };
+
+            const pastMeetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(pastQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               pastMeetingsResponse &&
@@ -4123,15 +4243,20 @@ Use this for "What did I do this week?", "Give me my weekly summary", or "Summar
       promises.push(
         (async () => {
           try {
-            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: weekStart.toISOString(),
-                endDateTime: weekEnd.toISOString(),
-                $top: '100',
-                $select: 'id,subject,start,end,attendees,isOnlineMeeting',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const weekQueryParams: Record<string, string> = {
+              startDateTime: weekStart.toISOString(),
+              endDateTime: weekEnd.toISOString(),
+              $top: '100',
+              $select: 'id,subject,start,end,attendees,isOnlineMeeting',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(weekQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               meetingsResponse &&
@@ -4615,17 +4740,22 @@ Use this for "What's the status of Project Apollo?", "Give me an overview of the
               const pastDate = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
               const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
-              const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-                method: 'GET',
-                queryParams: {
-                  startDateTime: pastDate.toISOString(),
-                  endDateTime: futureDate.toISOString(),
-                  $filter: `contains(subject, '${projectName}')`,
-                  $top: '20',
-                  $select: 'id,subject,start,end,organizer,attendees',
-                  $orderby: 'start/dateTime desc',
-                },
-              });
+              // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+              const projectQueryParams: Record<string, string> = {
+                startDateTime: pastDate.toISOString(),
+                endDateTime: futureDate.toISOString(),
+                $filter: `contains(subject, '${projectName.replace(/'/g, "''")}')`, // Escape single quotes
+                $top: '20',
+                $select: 'id,subject,start,end,organizer,attendees',
+                $orderby: 'start/dateTime desc',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(projectQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
 
               if (
                 meetingsResponse &&
@@ -5282,15 +5412,20 @@ Use this for "What needs my attention?", "Show me items I need to follow up on",
               const now = new Date();
               const futureDate = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
 
-              const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-                method: 'GET',
-                queryParams: {
-                  startDateTime: now.toISOString(),
-                  endDateTime: futureDate.toISOString(),
-                  $top: '50',
-                  $select: 'id,subject,start,organizer,responseStatus,webLink',
-                },
-              });
+              // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+              const upcomingQueryParams: Record<string, string> = {
+                startDateTime: now.toISOString(),
+                endDateTime: futureDate.toISOString(),
+                $top: '50',
+                $select: 'id,subject,start,organizer,responseStatus,webLink',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(upcomingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
 
               if (
                 meetingsResponse &&
@@ -5495,17 +5630,22 @@ Note: Transcripts are only available for meetings where transcription was enable
         }
 
         // Search calendar events for online meetings
-        const calendarResponse = await graphClient.makeRequest('/me/calendarView', {
-          method: 'GET',
-          queryParams: {
-            startDateTime: startDate.toISOString(),
-            endDateTime: endDate.toISOString(),
-            $filter: 'isOnlineMeeting eq true',
-            $select: 'id,subject,start,end,attendees,isOnlineMeeting,onlineMeeting,organizer',
-            $orderby: 'start/dateTime desc',
-            $top: '50',
-          },
-        });
+        // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+        const onlineQueryParams: Record<string, string> = {
+          startDateTime: startDate.toISOString(),
+          endDateTime: endDate.toISOString(),
+          $filter: 'isOnlineMeeting eq true',
+          $select: 'id,subject,start,end,attendees,isOnlineMeeting,onlineMeeting,organizer',
+          $orderby: 'start/dateTime desc',
+          $top: '50',
+        };
+
+        const calendarResponse = await graphClient.makeRequest(
+          `/me/calendarView?${buildGraphQueryString(onlineQueryParams)}`,
+          {
+            method: 'GET',
+          }
+        );
 
         if (
           calendarResponse &&
@@ -6350,15 +6490,20 @@ Use this for "How is my team collaborating?", "Who are the most active team memb
       promises.push(
         (async () => {
           try {
-            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: startDate.toISOString(),
-                endDateTime: endDate.toISOString(),
-                $top: '200',
-                $select: 'subject,start,end,attendees,organizer',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const analysisQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: endDate.toISOString(),
+              $top: '200',
+              $select: 'subject,start,end,attendees,organizer',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(analysisQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               meetingsResponse &&
@@ -6603,15 +6748,20 @@ Use this for "Give me everything about [customer]", "Customer 360 for Acme Corp"
             const futureDate = new Date();
             futureDate.setDate(futureDate.getDate() + 30);
 
-            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: startDate.toISOString(),
-                endDateTime: futureDate.toISOString(),
-                $top: '100',
-                $select: 'subject,start,end,attendees,organizer,location',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const scheduleQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: futureDate.toISOString(),
+              $top: '100',
+              $select: 'subject,start,end,attendees,organizer,location',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(scheduleQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               meetingsResponse &&
@@ -6783,15 +6933,20 @@ Use this for "Am I in too many meetings?", "Analyze my meeting load", or "Show m
       };
 
       try {
-        const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-          method: 'GET',
-          queryParams: {
-            startDateTime: startDate.toISOString(),
-            endDateTime: endDate.toISOString(),
-            $top: '500',
-            $select: 'subject,start,end,isAllDay,recurrence,attendees,organizer,isCancelled',
-          },
-        });
+        // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+        const exportQueryParams: Record<string, string> = {
+          startDateTime: startDate.toISOString(),
+          endDateTime: endDate.toISOString(),
+          $top: '500',
+          $select: 'subject,start,end,isAllDay,recurrence,attendees,organizer,isCancelled',
+        };
+
+        const meetingsResponse = await graphClient.makeRequest(
+          `/me/calendarView?${buildGraphQueryString(exportQueryParams)}`,
+          {
+            method: 'GET',
+          }
+        );
 
         if (
           !meetingsResponse ||
@@ -7315,17 +7470,22 @@ Use this for "When did we decide on X?", "What was the context for decision Y?",
       promises.push(
         (async () => {
           try {
-            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: startDate.toISOString(),
-                endDateTime: new Date().toISOString(),
-                $filter: `contains(subject, '${topic}')`,
-                $top: '30',
-                $select: 'subject,start,end,attendees,organizer,bodyPreview,webLink',
-                $orderby: 'start/dateTime desc',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const topicQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: new Date().toISOString(),
+              $filter: `contains(subject, '${topic.replace(/'/g, "''")}')`, // Escape single quotes
+              $top: '30',
+              $select: 'subject,start,end,attendees,organizer,bodyPreview,webLink',
+              $orderby: 'start/dateTime desc',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(topicQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               meetingsResponse &&
@@ -7527,16 +7687,21 @@ Use this for "Who is involved in Project X?", "List stakeholders for [project]",
       promises.push(
         (async () => {
           try {
-            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: startDate.toISOString(),
-                endDateTime: new Date().toISOString(),
-                $filter: `contains(subject, '${projectName}')`,
-                $top: '100',
-                $select: 'subject,attendees,organizer',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const projectFilterQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: new Date().toISOString(),
+              $filter: `contains(subject, '${projectName.replace(/'/g, "''")}')`, // Escape single quotes
+              $top: '100',
+              $select: 'subject,attendees,organizer',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(projectFilterQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               meetingsResponse &&
@@ -7790,17 +7955,22 @@ Use this for "What am I forgetting to respond to?", "Find unanswered requests", 
       promises.push(
         (async () => {
           try {
-            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: new Date().toISOString(),
-                endDateTime: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-                $filter:
-                  "responseStatus/response eq 'notResponded' or responseStatus/response eq 'none'",
-                $top: '30',
-                $select: 'subject,start,organizer,responseStatus,webLink',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const responseQueryParams: Record<string, string> = {
+              startDateTime: new Date().toISOString(),
+              endDateTime: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+              $filter:
+                "responseStatus/response eq 'notResponded' or responseStatus/response eq 'none'",
+              $top: '30',
+              $select: 'subject,start,organizer,responseStatus,webLink',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(responseQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               meetingsResponse &&
@@ -8011,15 +8181,20 @@ Use this for "Who do I work with most?", "Map my professional network", or "Anal
       promises.push(
         (async () => {
           try {
-            const meetingsResponse = await graphClient.makeRequest('/me/calendarView', {
-              method: 'GET',
-              queryParams: {
-                startDateTime: startDate.toISOString(),
-                endDateTime: new Date().toISOString(),
-                $top: '200',
-                $select: 'attendees,start',
-              },
-            });
+            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+            const attendanceQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: new Date().toISOString(),
+              $top: '200',
+              $select: 'attendees,start',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(attendanceQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
 
             if (
               meetingsResponse &&

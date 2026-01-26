@@ -31,8 +31,12 @@ export function generateMcpTools(openApiSpec, outputDir) {
     const isArm64 = process.arch === 'arm64';
 
     if (isDocker && isArm64) {
-      console.warn('⚠️  Warning: Running on ARM64 in Docker - generation may fail in emulated environments');
-      console.warn('   If generation fails, ensure generated files are committed or use native ARM64 build');
+      console.warn(
+        '⚠️  Warning: Running on ARM64 in Docker - generation may fail in emulated environments'
+      );
+      console.warn(
+        '   If generation fails, ensure generated files are committed or use native ARM64 build'
+      );
     }
 
     try {
@@ -78,4 +82,3 @@ export function generateMcpTools(openApiSpec, outputDir) {
     throw new Error(`Error generating client code: ${error.message}`);
   }
 }
-

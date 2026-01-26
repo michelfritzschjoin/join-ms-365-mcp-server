@@ -53,7 +53,7 @@ async function main() {
       // Check if we're in Docker/emulated environment
       const isDocker = fs.existsSync('/.dockerenv');
       const isArm64 = process.arch === 'arm64';
-      
+
       if (isDocker && isArm64) {
         console.error('\n❌ Generation failed in Docker ARM64 emulated environment');
         console.error('   This is a known issue with qemu emulation and native dependencies');
