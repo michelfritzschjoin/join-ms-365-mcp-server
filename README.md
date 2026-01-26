@@ -1,6 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Microsoft%20365-0078D4?style=for-the-badge&logo=microsoft&logoColor=white" alt="Microsoft 365">
   <img src="https://img.shields.io/badge/MCP%20Protocol-00A9CE?style=for-the-badge&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0id2hpdGUiIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTV6Ii8+PC9zdmc+" alt="MCP">
+  <img src="https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker">
   <img src="https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript">
 </p>
 
@@ -74,30 +75,55 @@ The **Join Microsoft 365 MCP Server** transforms how AI assistants interact with
 
 ### Prerequisites
 
-- **Node.js** >= 18 (recommended: 20+)
+- **Docker** and **Docker Compose**
 - A Microsoft 365 account (personal, work, or school)
+- Azure AD App Registration (for production use)
 
-### Installation & First Run
+### 🐳 Docker Deployment
+
+#### Option 1: Docker Compose (Recommended)
 
 ```bash
-# Install and run with npx
-npx @softeria/ms-365-mcp-server
+# 1. Create configuration file
+cp stack.env.example stack.env
 
-# Or install globally
-npm install -g @softeria/ms-365-mcp-server
-ms-365-mcp-server
+# 2. Configure your Azure AD credentials in stack.env
+nano stack.env
+
+# 3. Start the server
+docker compose up -d
+
+# For standalone mode (without Traefik):
+docker compose --profile standalone up -d
 ```
 
-### Claude Desktop Integration
+#### Option 2: Docker Run
 
-Add to your Claude Desktop configuration (`Settings > Developer`):
+```bash
+# Pull the image
+docker pull aijoin/join-ms-365-mcp-server:latest
+
+# Run with environment variables
+docker run -d \
+  --name ms365-mcp \
+  -p 3000:3000 \
+  -e MS365_MCP_CLIENT_ID=your-client-id \
+  -e MS365_MCP_TENANT_ID=your-tenant-id \
+  -v ./data:/app/data \
+  aijoin/join-ms-365-mcp-server:latest \
+  --http 3000 -v
+```
+
+### MCP Client Integration
+
+Connect your AI assistant to the running server:
 
 ```json
 {
   "mcpServers": {
     "ms365": {
-      "command": "npx",
-      "args": ["-y", "@softeria/ms-365-mcp-server"]
+      "url": "https://your-server.com/mcp",
+      "transportType": "streamable-http"
     }
   }
 }
@@ -105,7 +131,7 @@ Add to your Claude Desktop configuration (`Settings > Developer`):
 
 ### First Authentication
 
-Simply ask Claude: _"Log me into Microsoft 365"_ - the server will guide you through device code authentication.
+Simply ask your AI assistant: _"Log me into Microsoft 365"_ - the server will guide you through device code authentication.
 
 ---
 
@@ -607,7 +633,7 @@ Features:
 
 ## ⚙ Configuration
 
-### CLI Options
+### Docker Command Options
 
 | Option                      | Description                                  | Example                            |
 | --------------------------- | -------------------------------------------- | ---------------------------------- |
@@ -621,14 +647,33 @@ Features:
 | `--cloud <type>`            | Cloud environment (global/china)             | `--cloud china`                    |
 | `-v`                        | Enable verbose logging                       | `-v`                               |
 
+### Docker Run Examples
+
+```bash
+# Basic HTTP server
+docker run -d -p 3000:3000 aijoin/join-ms-365-mcp-server:latest --http 3000
+
+# Organization mode with verbose logging
+docker run -d -p 3000:3000 \
+  -e MS365_MCP_CLIENT_ID=your-client-id \
+  -e MS365_MCP_TENANT_ID=your-tenant-id \
+  aijoin/join-ms-365-mcp-server:latest \
+  --http 3000 --org-mode -v
+
+# Read-only mode with specific presets
+docker run -d -p 3000:3000 \
+  aijoin/join-ms-365-mcp-server:latest \
+  --http 3000 --read-only --preset mail,calendar
+
+# China cloud environment
+docker run -d -p 3000:3000 \
+  aijoin/join-ms-365-mcp-server:latest \
+  --http 3000 --org-mode --cloud china
+```
+
 ### Tool Presets
 
 Reduce initial load by using presets:
-
-```bash
-npx @softeria/ms-365-mcp-server --preset mail,calendar
-npx @softeria/ms-365-mcp-server --list-presets  # See all presets
-```
 
 | Preset     | Description            | Tools Included                         |
 | ---------- | ---------------------- | -------------------------------------- |
@@ -649,8 +694,8 @@ npx @softeria/ms-365-mcp-server --list-presets  # See all presets
 
 | Variable                  | Description                       | Default      |
 | ------------------------- | --------------------------------- | ------------ |
-| `MS365_MCP_CLIENT_ID`     | Custom Azure app client ID        | Built-in app |
-| `MS365_MCP_TENANT_ID`     | Custom tenant ID                  | `common`     |
+| `MS365_MCP_CLIENT_ID`     | Azure AD app client ID            | **Required** |
+| `MS365_MCP_TENANT_ID`     | Azure AD tenant ID                | `common`     |
 | `MS365_MCP_CLIENT_SECRET` | Client secret (confidential apps) | -            |
 | `MS365_MCP_OAUTH_TOKEN`   | Pre-existing OAuth token (BYOT)   | -            |
 | `MS365_MCP_ORG_MODE`      | Enable organization mode          | `false`      |
@@ -668,21 +713,15 @@ npx @softeria/ms-365-mcp-server --list-presets  # See all presets
 
 ### 1. Device Code Flow (Default)
 
-Interactive authentication for desktop/CLI applications:
+Interactive authentication for users:
 
-```bash
-npx @softeria/ms-365-mcp-server --login
-```
-
-Or via MCP tool: Call `login` → Visit URL → Enter code → Call `verify-login`
+1. Call the `login` tool
+2. Visit the provided URL and enter the code
+3. Call `verify-login` to confirm
 
 ### 2. OAuth Authorization Code Flow (HTTP Mode)
 
 For web applications and remote servers:
-
-```bash
-npx @softeria/ms-365-mcp-server --http 3000
-```
 
 - Exposes OAuth endpoints at `/auth/*`
 - Requires `Authorization: Bearer <token>` for MCP requests
@@ -693,7 +732,10 @@ npx @softeria/ms-365-mcp-server --http 3000
 For integration with existing OAuth systems:
 
 ```bash
-MS365_MCP_OAUTH_TOKEN=your_token npx @softeria/ms-365-mcp-server
+docker run -d -p 3000:3000 \
+  -e MS365_MCP_OAUTH_TOKEN=your_token \
+  aijoin/join-ms-365-mcp-server:latest \
+  --http 3000
 ```
 
 ### Azure Key Vault Integration
@@ -701,7 +743,10 @@ MS365_MCP_OAUTH_TOKEN=your_token npx @softeria/ms-365-mcp-server
 For production deployments:
 
 ```bash
-MS365_MCP_KEYVAULT_URL=https://your-vault.vault.azure.net npx @softeria/ms-365-mcp-server
+docker run -d -p 3000:3000 \
+  -e MS365_MCP_KEYVAULT_URL=https://your-vault.vault.azure.net \
+  aijoin/join-ms-365-mcp-server:latest \
+  --http 3000
 ```
 
 Store secrets:
@@ -719,15 +764,12 @@ Store secrets:
 | **Global** | International Microsoft 365        | `--cloud global` (default) |
 | **China**  | Microsoft 365 operated by 21Vianet | `--cloud china`            |
 
-```json
-{
-  "mcpServers": {
-    "ms365-china": {
-      "command": "npx",
-      "args": ["-y", "@softeria/ms-365-mcp-server", "--org-mode", "--cloud", "china"]
-    }
-  }
-}
+```bash
+# China cloud deployment
+docker run -d -p 3000:3000 \
+  -e MS365_MCP_CLIENT_ID=your-client-id \
+  aijoin/join-ms-365-mcp-server:latest \
+  --http 3000 --org-mode --cloud china
 ```
 
 ---
@@ -738,10 +780,11 @@ Store secrets:
 
 - ✅ **OAuth 2.1 / PKCE** - Secure token handling
 - ✅ **Token validation** - Verified against Microsoft Graph
-- ✅ **Secure storage** - OS credential store (keytar) with file fallback
+- ✅ **Secure storage** - Persistent volume for credentials
 - ✅ **Read-only mode** - Safe exploration without modifications
 - ✅ **Input validation** - Zod schema validation on all inputs
 - ✅ **Rate limiting** - Configurable request limits
+- ✅ **HTTPS/TLS** - Traefik integration for production
 
 ### Compliance
 
@@ -771,54 +814,28 @@ Notes.ReadWrite
 
 ## 📚 API Reference
 
-### MCP Client Configuration Examples
+### MCP Client Configuration
 
-#### Claude Desktop (Personal)
-
-```json
-{
-  "mcpServers": {
-    "ms365": {
-      "command": "npx",
-      "args": ["-y", "@softeria/ms-365-mcp-server"]
-    }
-  }
-}
-```
-
-#### Claude Desktop (Organization)
-
-```json
-{
-  "mcpServers": {
-    "ms365": {
-      "command": "npx",
-      "args": ["-y", "@softeria/ms-365-mcp-server", "--org-mode"]
-    }
-  }
-}
-```
-
-#### Claude Code CLI
-
-```bash
-# Personal
-claude mcp add ms365 -- npx -y @softeria/ms-365-mcp-server
-
-# Organization (macOS/Linux)
-claude mcp add ms365 -- npx -y @softeria/ms-365-mcp-server --org-mode
-
-# Organization (Windows)
-claude mcp add ms365 -s user -- cmd /c "npx -y @softeria/ms-365-mcp-server --org-mode"
-```
-
-#### HTTP Mode (Remote/OpenWebUI)
+#### OpenWebUI / Remote Clients
 
 ```json
 {
   "mcpServers": {
     "ms365": {
       "url": "https://your-server.com/mcp",
+      "transportType": "streamable-http"
+    }
+  }
+}
+```
+
+#### Local Development
+
+```json
+{
+  "mcpServers": {
+    "ms365": {
+      "url": "http://localhost:3000/mcp",
       "transportType": "streamable-http"
     }
   }
@@ -846,15 +863,51 @@ interface McpToolResult {
 
 ## 🐳 Docker Deployment
 
-```bash
-docker-compose up -d
+### Production with Traefik
+
+```yaml
+# docker-compose.yml
+services:
+  ms365-mcp-server:
+    image: aijoin/join-ms-365-mcp-server:latest
+    container_name: ms365-mcp
+    restart: unless-stopped
+    env_file:
+      - stack.env
+    command: ['--http', '3000', '-v']
+    volumes:
+      - ./data:/app/data
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.ms365-mcp.rule=Host(`ms365-mcp.yourdomain.com`)'
+      - 'traefik.http.routers.ms365-mcp.entrypoints=websecure'
+      - 'traefik.http.routers.ms365-mcp.tls.certresolver=myresolver'
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
 ```
 
-Or build manually:
+### Standalone Development
 
 ```bash
+docker compose --profile standalone up -d
+```
+
+### Build from Source
+
+```bash
+# Clone the repository
+git clone https://github.com/michelfritzschjoin/join-ms-365-mcp-server.git
+cd join-ms-365-mcp-server
+
+# Build the image
 docker build -t ms365-mcp-server .
-docker run -p 3000:3000 -e MS365_MCP_CLIENT_ID=... ms365-mcp-server
+
+# Run
+docker run -p 3000:3000 ms365-mcp-server --http 3000
 ```
 
 ---
@@ -872,19 +925,17 @@ docker run -p 3000:3000 -e MS365_MCP_CLIENT_ID=... ms365-mcp-server
 
 ## 📄 License
 
-MIT © 2025 Softeria
+All Rights Reserved © 2025 Join GmbH
 
 ---
 
 ## 📞 Support
 
-- 📋 [Issues](https://github.com/softeria/ms-365-mcp-server/issues)
-- 💬 [Discussions](https://github.com/softeria/ms-365-mcp-server/discussions)
-- 📧 Email: eirikb@eirikb.no
-- 💬 Discord: https://discord.gg/WvGVNScrAZ
+- 📋 [Issues](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/issues)
+- 📧 Contact: support@join.de
 
 ---
 
 <p align="center">
-  <strong>Built with ❤️ for the AI community</strong>
+  <strong>Built with ❤️ by Join GmbH</strong>
 </p>
