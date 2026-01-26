@@ -1265,9 +1265,10 @@ Returns categorized examples with guaranteed working queries.`,
           description: 'Questions about your emails, inbox, and mail folders',
           questions: [
             {
-              question: 'Show me my latest emails',
-              tool: 'list-mail-messages',
+              question: 'Show me my latest emails / Zeige mir meine neuesten E-Mails',
+              tool: 'get-my-emails',
               guaranteed: true,
+              note: 'Enhanced tool with rich formatting / Verbessertes Tool mit reichhaltiger Formatierung',
             },
             {
               question: 'Find emails from [person name or email]',
@@ -1505,7 +1506,7 @@ Returns categorized examples with guaranteed working queries.`,
           '💡 You can combine topics: "emails about budget from last month"',
         ],
         quickStart: [
-          { question: 'Show my latest emails', action: 'list-mail-messages' },
+          { question: 'Show my latest emails / Zeige meine E-Mails', action: 'get-my-emails' },
           { question: 'What meetings do I have today?', action: 'list-calendar-events' },
           { question: 'Find files about [topic]', action: 'search-everything' },
           { question: 'What do you know about [anything]?', action: 'ask-microsoft-365' },
@@ -1528,6 +1529,311 @@ Returns categorized examples with guaranteed working queries.`,
     }
   );
   registeredCount++;
+
+  // ==========================================================================
+  // 0c. GET MY EMAILS - Enhanced email retrieval with better formatting
+  // ==========================================================================
+  server.tool(
+    'get-my-emails',
+    `📧 **ENHANCED EMAIL TOOL** - Get your emails with rich formatting!
+📧 **VERBESSERTES E-MAIL TOOL** - Holen Sie Ihre E-Mails mit reichhaltiger Formatierung!
+
+This tool provides a BETTER email experience than the basic list-mail-messages:
+Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-messages:
+
+✅ **Rich data** - Subject, sender, date, preview, importance, attachments
+✅ **Reichhaltige Daten** - Betreff, Absender, Datum, Vorschau, Wichtigkeit, Anhänge
+✅ **Smart formatting** - Clean, readable output structure
+✅ **Intelligente Formatierung** - Saubere, lesbare Ausgabestruktur
+✅ **Bilingual summaries** - Automatic DE/EN response
+✅ **Zweisprachige Zusammenfassungen** - Automatische DE/EN Antwort
+✅ **Helpful when empty** - Clear guidance if no emails found
+✅ **Hilfreich bei leeren Ergebnissen** - Klare Anleitung wenn keine E-Mails gefunden
+
+**Use cases / Anwendungsfälle:**
+- "Show me my latest emails" / "Zeige mir meine neuesten E-Mails"
+- "What emails did I receive today?" / "Welche E-Mails habe ich heute erhalten?"
+- "Find emails about [topic]" / "Finde E-Mails über [Thema]"
+- "Show unread emails" / "Zeige ungelesene E-Mails"`,
+    {
+      filter: z
+        .enum(['all', 'unread', 'important', 'flagged', 'today', 'thisWeek', 'withAttachments'])
+        .optional()
+        .describe(
+          'Filter emails: all, unread, important, flagged, today, thisWeek, withAttachments'
+        ),
+      search: z.string().optional().describe('Search term to filter emails / Suchbegriff'),
+      limit: z.number().optional().describe('Maximum number of emails (default: 20, max: 50)'),
+      language: z
+        .enum(['auto', 'en', 'de'])
+        .optional()
+        .describe('Response language (default: auto)'),
+    },
+    {
+      title: 'Get My Emails (Enhanced)',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ filter = 'all', search, limit = 20, language = 'auto' }) => {
+      logger.info(`Get my emails: filter=${filter}, search=${search}, limit=${limit}`);
+
+      // Detect language from search term or default to English
+      const detectedLang =
+        language === 'auto' ? (search ? detectLanguage(search) : 'en') : language;
+
+      // Build query parameters
+      const queryParams: Record<string, string> = {
+        $top: String(Math.min(limit, 50)),
+        $select:
+          'id,subject,bodyPreview,receivedDateTime,from,toRecipients,importance,isRead,hasAttachments,flag',
+        $orderby: 'receivedDateTime desc',
+      };
+
+      // Apply filters
+      const filterParts: string[] = [];
+      const now = new Date();
+
+      switch (filter) {
+        case 'unread':
+          filterParts.push('isRead eq false');
+          break;
+        case 'important':
+          filterParts.push("importance eq 'high'");
+          break;
+        case 'flagged':
+          filterParts.push("flag/flagStatus eq 'flagged'");
+          break;
+        case 'today': {
+          const todayStart = new Date(
+            now.getFullYear(),
+            now.getMonth(),
+            now.getDate()
+          ).toISOString();
+          filterParts.push(`receivedDateTime ge ${todayStart}`);
+          break;
+        }
+        case 'thisWeek': {
+          const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
+          filterParts.push(`receivedDateTime ge ${weekStart}`);
+          break;
+        }
+        case 'withAttachments':
+          filterParts.push('hasAttachments eq true');
+          break;
+      }
+
+      if (filterParts.length > 0) {
+        queryParams.$filter = filterParts.join(' and ');
+      }
+
+      if (search) {
+        queryParams.$search = `"${search}"`;
+        // Remove orderby when using search (Graph API limitation)
+        delete queryParams.$orderby;
+      }
+
+      try {
+        const response = await graphClient.makeRequest('/me/messages', {
+          method: 'GET',
+          queryParams,
+        });
+
+        interface EmailMessage {
+          id: string;
+          subject?: string;
+          bodyPreview?: string;
+          receivedDateTime?: string;
+          from?: { emailAddress?: { name?: string; address?: string } };
+          toRecipients?: Array<{ emailAddress?: { name?: string; address?: string } }>;
+          importance?: string;
+          isRead?: boolean;
+          hasAttachments?: boolean;
+          flag?: { flagStatus?: string };
+        }
+
+        const emails: EmailMessage[] =
+          response && typeof response === 'object' && 'value' in response
+            ? (response as { value: EmailMessage[] }).value || []
+            : [];
+
+        // Format emails with rich data
+        const formattedEmails = emails.map((email, index) => {
+          const receivedDate = email.receivedDateTime ? new Date(email.receivedDateTime) : null;
+
+          return {
+            number: index + 1,
+            id: email.id,
+            subject: email.subject || (detectedLang === 'de' ? '(Kein Betreff)' : '(No subject)'),
+            from: {
+              name:
+                email.from?.emailAddress?.name || (detectedLang === 'de' ? 'Unbekannt' : 'Unknown'),
+              email: email.from?.emailAddress?.address || '',
+            },
+            date: receivedDate
+              ? {
+                  iso: email.receivedDateTime,
+                  formatted:
+                    detectedLang === 'de'
+                      ? receivedDate.toLocaleDateString('de-DE', {
+                          weekday: 'short',
+                          day: '2-digit',
+                          month: '2-digit',
+                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })
+                      : receivedDate.toLocaleDateString('en-US', {
+                          weekday: 'short',
+                          month: 'short',
+                          day: 'numeric',
+                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        }),
+                  relative: getRelativeTime(receivedDate, detectedLang),
+                }
+              : null,
+            preview: email.bodyPreview?.substring(0, 200) || '',
+            status: {
+              isRead: email.isRead ?? false,
+              importance: email.importance || 'normal',
+              hasAttachments: email.hasAttachments ?? false,
+              isFlagged: email.flag?.flagStatus === 'flagged',
+            },
+            to:
+              email.toRecipients?.map((r) => ({
+                name: r.emailAddress?.name,
+                email: r.emailAddress?.address,
+              })) || [],
+          };
+        });
+
+        // Build summary
+        const unreadCount = formattedEmails.filter((e) => !e.status.isRead).length;
+        const importantCount = formattedEmails.filter((e) => e.status.importance === 'high').length;
+        const attachmentCount = formattedEmails.filter((e) => e.status.hasAttachments).length;
+
+        const summaryParts: string[] = [];
+        if (detectedLang === 'de') {
+          summaryParts.push(
+            `${formattedEmails.length} E-Mail${formattedEmails.length !== 1 ? 's' : ''}`
+          );
+          if (unreadCount > 0) summaryParts.push(`${unreadCount} ungelesen`);
+          if (importantCount > 0) summaryParts.push(`${importantCount} wichtig`);
+          if (attachmentCount > 0) summaryParts.push(`${attachmentCount} mit Anhängen`);
+        } else {
+          summaryParts.push(
+            `${formattedEmails.length} email${formattedEmails.length !== 1 ? 's' : ''}`
+          );
+          if (unreadCount > 0) summaryParts.push(`${unreadCount} unread`);
+          if (importantCount > 0) summaryParts.push(`${importantCount} important`);
+          if (attachmentCount > 0) summaryParts.push(`${attachmentCount} with attachments`);
+        }
+
+        const result = {
+          status: 'SUCCESS',
+          language: detectedLang,
+          summary: summaryParts.join(', '),
+          filter: filter,
+          search: search || null,
+          count: formattedEmails.length,
+          emails: formattedEmails,
+          message:
+            formattedEmails.length > 0
+              ? detectedLang === 'de'
+                ? `${formattedEmails.length} E-Mail(s) gefunden.`
+                : `Found ${formattedEmails.length} email(s).`
+              : detectedLang === 'de'
+                ? 'Keine E-Mails gefunden, die Ihren Kriterien entsprechen.'
+                : 'No emails found matching your criteria.',
+        };
+
+        // Add helpful tips if no results
+        if (formattedEmails.length === 0) {
+          Object.assign(result, {
+            suggestions:
+              detectedLang === 'de'
+                ? [
+                    'Versuchen Sie einen anderen Filter (z.B. "all" statt "unread")',
+                    'Erweitern Sie den Zeitraum (z.B. "thisWeek" statt "today")',
+                    'Prüfen Sie die Schreibweise des Suchbegriffs',
+                    'Ihr Postfach könnte leer sein oder die E-Mails wurden archiviert',
+                  ]
+                : [
+                    'Try a different filter (e.g., "all" instead of "unread")',
+                    'Expand the time range (e.g., "thisWeek" instead of "today")',
+                    'Check the spelling of your search term',
+                    'Your mailbox might be empty or emails may have been archived',
+                  ],
+          });
+        }
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          isError: false,
+        };
+      } catch (error) {
+        const errorMessage = (error as Error).message;
+        logger.error(`Get my emails failed: ${errorMessage}`);
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                status: 'ERROR',
+                language: detectedLang,
+                message:
+                  detectedLang === 'de'
+                    ? `Fehler beim Abrufen der E-Mails: ${errorMessage}`
+                    : `Error retrieving emails: ${errorMessage}`,
+                suggestions:
+                  detectedLang === 'de'
+                    ? [
+                        'Stellen Sie sicher, dass Sie angemeldet sind (verwenden Sie das "login" Tool)',
+                        'Prüfen Sie Ihre Berechtigungen für den E-Mail-Zugriff',
+                      ]
+                    : [
+                        'Make sure you are logged in (use the "login" tool)',
+                        'Check your permissions for email access',
+                      ],
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+  registeredCount++;
+
+  // Helper function for relative time
+  function getRelativeTime(date: Date, lang: 'de' | 'en'): string {
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMs / 3600000);
+    const diffDays = Math.floor(diffMs / 86400000);
+
+    if (lang === 'de') {
+      if (diffMins < 1) return 'gerade eben';
+      if (diffMins < 60) return `vor ${diffMins} Minute${diffMins !== 1 ? 'n' : ''}`;
+      if (diffHours < 24) return `vor ${diffHours} Stunde${diffHours !== 1 ? 'n' : ''}`;
+      if (diffDays < 7) return `vor ${diffDays} Tag${diffDays !== 1 ? 'en' : ''}`;
+      return `vor ${Math.floor(diffDays / 7)} Woche${Math.floor(diffDays / 7) !== 1 ? 'n' : ''}`;
+    } else {
+      if (diffMins < 1) return 'just now';
+      if (diffMins < 60) return `${diffMins} minute${diffMins !== 1 ? 's' : ''} ago`;
+      if (diffHours < 24) return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`;
+      if (diffDays < 7) return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`;
+      return `${Math.floor(diffDays / 7)} week${Math.floor(diffDays / 7) !== 1 ? 's' : ''} ago`;
+    }
+  }
 
   // ==========================================================================
   // 1. FIND MESSAGES WITH PERSON - Combines user search + chat search + messages
