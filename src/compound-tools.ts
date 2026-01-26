@@ -3156,11 +3156,11 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
       const detectedLang =
         language === 'auto' ? (search ? detectLanguage(search) : 'en') : language;
 
-      // Build query parameters
+      // Build query parameters - include body for better summaries
       const queryParams: Record<string, string> = {
         $top: String(Math.min(limit, 50)),
         $select:
-          'id,subject,bodyPreview,receivedDateTime,from,toRecipients,importance,isRead,hasAttachments,flag',
+          'id,subject,bodyPreview,body,receivedDateTime,from,toRecipients,ccRecipients,importance,isRead,hasAttachments,flag,categories',
         $orderby: 'receivedDateTime desc',
       };
 
@@ -3217,27 +3217,81 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
           id: string;
           subject?: string;
           bodyPreview?: string;
+          body?: { content?: string; contentType?: string };
           receivedDateTime?: string;
           from?: { emailAddress?: { name?: string; address?: string } };
           toRecipients?: Array<{ emailAddress?: { name?: string; address?: string } }>;
+          ccRecipients?: Array<{ emailAddress?: { name?: string; address?: string } }>;
           importance?: string;
           isRead?: boolean;
           hasAttachments?: boolean;
           flag?: { flagStatus?: string };
+          categories?: string[];
         }
+
+        // Helper to extract clean text from HTML
+        const extractTextFromHtml = (html: string): string => {
+          return html
+            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/\s+/g, ' ')
+            .trim();
+        };
+
+        // Helper to create a summary from email content
+        const createContentSummary = (email: EmailMessage, maxLength: number = 500): string => {
+          let content = '';
+
+          // Try to get content from body first (more complete)
+          if (email.body?.content) {
+            if (email.body.contentType === 'html') {
+              content = extractTextFromHtml(email.body.content);
+            } else {
+              content = email.body.content;
+            }
+          }
+
+          // Fall back to bodyPreview if body is empty
+          if (!content && email.bodyPreview) {
+            content = email.bodyPreview;
+          }
+
+          // Truncate and add ellipsis if needed
+          if (content.length > maxLength) {
+            content = content.substring(0, maxLength).trim() + '...';
+          }
+
+          return content;
+        };
 
         const emails: EmailMessage[] =
           response && typeof response === 'object' && 'value' in response
             ? (response as { value: EmailMessage[] }).value || []
             : [];
 
-        // Format emails with rich data
+        // Format emails with rich data and content summaries
         const formattedEmails = emails.map((email, index) => {
           const receivedDate = email.receivedDateTime ? new Date(email.receivedDateTime) : null;
+          const contentSummary = createContentSummary(email, 500);
+
+          // Create status indicators
+          const statusIcons: string[] = [];
+          if (!email.isRead) statusIcons.push('📩'); // Unread
+          if (email.importance === 'high') statusIcons.push('❗'); // Important
+          if (email.hasAttachments) statusIcons.push('📎'); // Attachment
+          if (email.flag?.flagStatus === 'flagged') statusIcons.push('🚩'); // Flagged
 
           return {
             number: index + 1,
             id: email.id,
+            statusIcons: statusIcons.join(' ') || '✉️',
             subject: email.subject || (detectedLang === 'de' ? '(Kein Betreff)' : '(No subject)'),
             from: {
               name:
@@ -3268,47 +3322,85 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
                   relative: getRelativeTime(receivedDate, detectedLang),
                 }
               : null,
-            preview: email.bodyPreview?.substring(0, 200) || '',
+            contentSummary: contentSummary,
             status: {
               isRead: email.isRead ?? false,
               importance: email.importance || 'normal',
               hasAttachments: email.hasAttachments ?? false,
               isFlagged: email.flag?.flagStatus === 'flagged',
             },
+            categories: email.categories || [],
             to:
               email.toRecipients?.map((r) => ({
+                name: r.emailAddress?.name,
+                email: r.emailAddress?.address,
+              })) || [],
+            cc:
+              email.ccRecipients?.map((r) => ({
                 name: r.emailAddress?.name,
                 email: r.emailAddress?.address,
               })) || [],
           };
         });
 
-        // Build summary
+        // Build comprehensive summary
         const unreadCount = formattedEmails.filter((e) => !e.status.isRead).length;
         const importantCount = formattedEmails.filter((e) => e.status.importance === 'high').length;
         const attachmentCount = formattedEmails.filter((e) => e.status.hasAttachments).length;
+        const flaggedCount = formattedEmails.filter((e) => e.status.isFlagged).length;
+
+        // Group emails by sender for overview
+        const senderGroups: Record<string, number> = {};
+        for (const email of formattedEmails) {
+          const senderName = email.from.name || email.from.email || 'Unknown';
+          senderGroups[senderName] = (senderGroups[senderName] || 0) + 1;
+        }
+        const topSenders = Object.entries(senderGroups)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([name, count]) => ({ name, count }));
 
         const summaryParts: string[] = [];
         if (detectedLang === 'de') {
           summaryParts.push(
             `${formattedEmails.length} E-Mail${formattedEmails.length !== 1 ? 's' : ''}`
           );
-          if (unreadCount > 0) summaryParts.push(`${unreadCount} ungelesen`);
-          if (importantCount > 0) summaryParts.push(`${importantCount} wichtig`);
-          if (attachmentCount > 0) summaryParts.push(`${attachmentCount} mit Anhängen`);
+          if (unreadCount > 0) summaryParts.push(`📩 ${unreadCount} ungelesen`);
+          if (importantCount > 0) summaryParts.push(`❗ ${importantCount} wichtig`);
+          if (attachmentCount > 0) summaryParts.push(`📎 ${attachmentCount} mit Anhängen`);
+          if (flaggedCount > 0) summaryParts.push(`🚩 ${flaggedCount} markiert`);
         } else {
           summaryParts.push(
             `${formattedEmails.length} email${formattedEmails.length !== 1 ? 's' : ''}`
           );
-          if (unreadCount > 0) summaryParts.push(`${unreadCount} unread`);
-          if (importantCount > 0) summaryParts.push(`${importantCount} important`);
-          if (attachmentCount > 0) summaryParts.push(`${attachmentCount} with attachments`);
+          if (unreadCount > 0) summaryParts.push(`📩 ${unreadCount} unread`);
+          if (importantCount > 0) summaryParts.push(`❗ ${importantCount} important`);
+          if (attachmentCount > 0) summaryParts.push(`📎 ${attachmentCount} with attachments`);
+          if (flaggedCount > 0) summaryParts.push(`🚩 ${flaggedCount} flagged`);
         }
 
         const result = {
           status: 'SUCCESS',
           language: detectedLang,
-          summary: summaryParts.join(', '),
+          title:
+            detectedLang === 'de'
+              ? `📧 Ihre E-Mails (${filter === 'all' ? 'Alle' : filter})`
+              : `📧 Your Emails (${filter === 'all' ? 'All' : filter})`,
+          summary: summaryParts.join(' | '),
+          statistics: {
+            total: formattedEmails.length,
+            unread: unreadCount,
+            important: importantCount,
+            withAttachments: attachmentCount,
+            flagged: flaggedCount,
+          },
+          topSenders:
+            topSenders.length > 0
+              ? {
+                  label: detectedLang === 'de' ? 'Häufigste Absender' : 'Top Senders',
+                  senders: topSenders,
+                }
+              : undefined,
           filter: filter,
           search: search || null,
           count: formattedEmails.length,
@@ -3316,11 +3408,11 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
           message:
             formattedEmails.length > 0
               ? detectedLang === 'de'
-                ? `${formattedEmails.length} E-Mail(s) gefunden.`
-                : `Found ${formattedEmails.length} email(s).`
+                ? `✅ ${formattedEmails.length} E-Mail(s) gefunden. Jede E-Mail enthält eine Inhaltszusammenfassung.`
+                : `✅ Found ${formattedEmails.length} email(s). Each email includes a content summary.`
               : detectedLang === 'de'
-                ? 'Keine E-Mails gefunden, die Ihren Kriterien entsprechen.'
-                : 'No emails found matching your criteria.',
+                ? '❌ Keine E-Mails gefunden, die Ihren Kriterien entsprechen.'
+                : '❌ No emails found matching your criteria.',
         };
 
         // Add helpful tips if no results
