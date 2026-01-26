@@ -15,6 +15,7 @@ import GraphClient from './graph-client.js';
 import logger from './logger.js';
 import { getChatMemoryStore, isChatMemoryEnabled, type EntityType } from './chat-memory.js';
 import { getChatId, getUserId } from './request-context.js';
+import NLPEnhancer, { type DecomposedQuery } from './nlp-enhancer.js';
 
 /**
  * Build query string for Microsoft Graph API requests
@@ -244,6 +245,10 @@ interface EnhancedAskM365Response {
   status: string;
   message: string;
   summary?: string;
+  /** Structured query analysis from NLP processing */
+  queryAnalysis?: DecomposedQuery;
+  /** Structured Markdown summary of the query analysis */
+  queryAnalysisMarkdown?: string;
   searchResults: SearchApiResults;
   followUpResults: FollowUpResults;
   permissionWarnings?: string[];
@@ -252,6 +257,83 @@ interface EnhancedAskM365Response {
     queryTime: number;
     productsSearched: string[];
   };
+}
+
+/**
+ * Teams Channel type definition
+ */
+interface GraphTeam {
+  id: string;
+  displayName: string;
+  description?: string;
+  webUrl?: string;
+  createdDateTime?: string;
+}
+
+/**
+ * Teams Channel type definition
+ */
+interface GraphChannel {
+  id: string;
+  displayName: string;
+  description?: string;
+  webUrl?: string;
+  membershipType?: 'standard' | 'private' | 'unknownFutureValue' | 'shared';
+  createdDateTime?: string;
+}
+
+/**
+ * Teams Channel Message type definition
+ */
+interface GraphChannelMessage {
+  id: string;
+  replyToId?: string;
+  etag?: string;
+  messageType: 'message' | 'chatEvent' | 'typing' | 'unknownFutureValue';
+  createdDateTime: string;
+  lastModifiedDateTime?: string;
+  deletedDateTime?: string;
+  subject?: string;
+  body: {
+    content: string;
+    contentType: 'text' | 'html';
+  };
+  from?: {
+    user?: {
+      id?: string;
+      displayName?: string;
+      userIdentityType?: string;
+    };
+    application?: {
+      id?: string;
+      displayName?: string;
+    };
+  };
+  importance?: 'normal' | 'high' | 'urgent';
+  webUrl?: string;
+  reactions?: Array<{
+    reactionType: string;
+    createdDateTime: string;
+    user: {
+      displayName?: string;
+    };
+  }>;
+  attachments?: Array<{
+    id: string;
+    contentType: string;
+    contentUrl?: string;
+    name?: string;
+  }>;
+  mentions?: Array<{
+    id: number;
+    mentionText: string;
+    mentioned: {
+      user?: {
+        displayName?: string;
+        id?: string;
+      };
+    };
+  }>;
 }
 
 /**
@@ -444,6 +526,175 @@ async function getMessagesFromChats(
   }
 
   return allMessages.slice(0, limit);
+}
+
+/**
+ * Find a Teams channel by name across all joined teams
+ * Searches through all teams the user is a member of to find a channel by name
+ * @param graphClient - The Graph API client
+ * @param channelName - The name of the channel to search for (partial match, case-insensitive)
+ * @param teamName - Optional team name to narrow down the search
+ * @returns Object containing the team and channel information, or null if not found
+ */
+async function findTeamsChannel(
+  graphClient: GraphClient,
+  channelName: string,
+  teamName?: string
+): Promise<{ team: GraphTeam; channel: GraphChannel } | null> {
+  try {
+    // Step 1: Get all joined teams
+    const teamsResponse = await graphClient.makeRequest('/me/joinedTeams', {
+      method: 'GET',
+      queryParams: {
+        $select: 'id,displayName,description,webUrl',
+      },
+    });
+
+    if (
+      !teamsResponse ||
+      typeof teamsResponse !== 'object' ||
+      !('value' in teamsResponse) ||
+      !Array.isArray(teamsResponse.value)
+    ) {
+      logger.warn('No teams found for user');
+      return null;
+    }
+
+    const teams = teamsResponse.value as GraphTeam[];
+    const channelNameLower = channelName.toLowerCase();
+    const teamNameLower = teamName?.toLowerCase();
+
+    // Optionally filter teams by name
+    const teamsToSearch = teamNameLower
+      ? teams.filter((t) => t.displayName.toLowerCase().includes(teamNameLower))
+      : teams;
+
+    if (teamsToSearch.length === 0) {
+      logger.warn(`No teams matching "${teamName}" found`);
+      return null;
+    }
+
+    // Step 2: Search for channel in each team
+    for (const team of teamsToSearch) {
+      try {
+        const channelsResponse = await graphClient.makeRequest(`/teams/${team.id}/channels`, {
+          method: 'GET',
+          queryParams: {
+            $select: 'id,displayName,description,webUrl,membershipType',
+          },
+        });
+
+        if (
+          channelsResponse &&
+          typeof channelsResponse === 'object' &&
+          'value' in channelsResponse &&
+          Array.isArray(channelsResponse.value)
+        ) {
+          const channels = channelsResponse.value as GraphChannel[];
+          const matchingChannel = channels.find((c) =>
+            c.displayName.toLowerCase().includes(channelNameLower)
+          );
+
+          if (matchingChannel) {
+            logger.info(
+              `Found channel "${matchingChannel.displayName}" in team "${team.displayName}"`
+            );
+            return { team, channel: matchingChannel };
+          }
+        }
+      } catch (channelError) {
+        logger.warn(`Could not access channels for team ${team.displayName}: ${channelError}`);
+        // Continue to next team
+      }
+    }
+
+    logger.warn(`Channel "${channelName}" not found in any team`);
+    return null;
+  } catch (error) {
+    logger.error(`Error finding Teams channel: ${error}`);
+    return null;
+  }
+}
+
+/**
+ * Get messages from a Teams channel
+ * @param graphClient - The Graph API client
+ * @param teamId - The team ID
+ * @param channelId - The channel ID
+ * @param limit - Maximum number of messages to return (default: 50)
+ * @param includeReplies - Whether to include replies to messages (default: false)
+ * @returns Array of channel messages
+ */
+async function getChannelMessages(
+  graphClient: GraphClient,
+  teamId: string,
+  channelId: string,
+  limit: number = 50,
+  includeReplies: boolean = false
+): Promise<GraphChannelMessage[]> {
+  try {
+    const queryParams: Record<string, string> = {
+      $top: String(Math.min(limit, 50)),
+      $orderby: 'createdDateTime desc',
+    };
+
+    const response = await graphClient.makeRequest(
+      `/teams/${teamId}/channels/${channelId}/messages`,
+      {
+        method: 'GET',
+        queryParams,
+      }
+    );
+
+    if (
+      !response ||
+      typeof response !== 'object' ||
+      !('value' in response) ||
+      !Array.isArray(response.value)
+    ) {
+      return [];
+    }
+
+    const messages = response.value as GraphChannelMessage[];
+
+    // Optionally fetch replies for each message
+    if (includeReplies) {
+      for (const message of messages.slice(0, 10)) {
+        // Limit reply fetching to first 10 messages
+        try {
+          const repliesResponse = await graphClient.makeRequest(
+            `/teams/${teamId}/channels/${channelId}/messages/${message.id}/replies`,
+            {
+              method: 'GET',
+              queryParams: {
+                $top: '5',
+                $orderby: 'createdDateTime asc',
+              },
+            }
+          );
+
+          if (
+            repliesResponse &&
+            typeof repliesResponse === 'object' &&
+            'value' in repliesResponse &&
+            Array.isArray(repliesResponse.value)
+          ) {
+            // Add replies as nested property (type assertion needed)
+            (message as GraphChannelMessage & { replies?: GraphChannelMessage[] }).replies =
+              repliesResponse.value as GraphChannelMessage[];
+          }
+        } catch (replyError) {
+          logger.debug(`Could not fetch replies for message ${message.id}: ${replyError}`);
+        }
+      }
+    }
+
+    logger.info(`Retrieved ${messages.length} messages from channel`);
+    return messages;
+  } catch (error) {
+    logger.error(`Error getting channel messages: ${error}`);
+    return [];
+  }
 }
 
 /**
@@ -833,6 +1084,216 @@ async function queryInsights(graphClient: GraphClient): Promise<any[]> {
     logger.warn(`Insights search failed: ${error}`);
     return [];
   }
+}
+
+/**
+ * Customer type detection result
+ */
+interface CustomerTypeResult {
+  type: 'person' | 'company' | 'unknown';
+  identifier: string;
+  displayName: string;
+  emailDomain?: string;
+  userEmail?: string;
+  userId?: string;
+  companyContacts?: Array<{
+    name: string;
+    email?: string;
+    title?: string;
+    department?: string;
+  }>;
+}
+
+/**
+ * Extract email domain from an email address
+ */
+function extractEmailDomain(email: string | undefined): string | undefined {
+  if (!email) return undefined;
+  const parts = email.split('@');
+  return parts.length === 2 ? parts[1].toLowerCase() : undefined;
+}
+
+/**
+ * Generate a likely email domain from a company name
+ */
+function generateEmailDomain(companyName: string): string {
+  return (
+    companyName
+      .toLowerCase()
+      .replace(/\s+/g, '')
+      .replace(/[^a-z0-9]/g, '') + '.com'
+  );
+}
+
+/**
+ * Detect if the input is a person name or company name
+ * Uses multiple strategies to identify the customer type
+ */
+async function detectCustomerType(
+  graphClient: GraphClient,
+  searchQuery: string
+): Promise<CustomerTypeResult> {
+  logger.info(`Detecting customer type for: "${searchQuery}"`);
+
+  // Strategy 1: Try to find as a person/user first
+  const user = await findUser(graphClient, searchQuery);
+  if (user && user.displayName) {
+    logger.info(`Detected as person: ${user.displayName}`);
+    return {
+      type: 'person',
+      identifier: searchQuery,
+      displayName: user.displayName,
+      emailDomain: extractEmailDomain(user.mail),
+      userEmail: user.mail,
+      userId: user.id,
+    };
+  }
+
+  // Strategy 2: Search contacts for company name
+  try {
+    const contactsResponse = await graphClient.makeRequest('/me/contacts', {
+      method: 'GET',
+      queryParams: {
+        $filter: `contains(companyName, '${searchQuery.replace(/'/g, "''")}')`,
+        $top: '20',
+        $select: 'displayName,emailAddresses,companyName,jobTitle,department',
+      },
+    });
+
+    if (
+      contactsResponse &&
+      typeof contactsResponse === 'object' &&
+      'value' in contactsResponse &&
+      Array.isArray(contactsResponse.value) &&
+      contactsResponse.value.length > 0
+    ) {
+      const contacts = contactsResponse.value as Array<{
+        displayName: string;
+        emailAddresses?: Array<{ address: string }>;
+        companyName?: string;
+        jobTitle?: string;
+        department?: string;
+      }>;
+
+      // Extract email domain from the first contact with an email
+      const firstEmailDomain = contacts.find((c) => c.emailAddresses?.[0]?.address)
+        ? extractEmailDomain(contacts[0].emailAddresses?.[0]?.address)
+        : undefined;
+
+      logger.info(`Detected as company with ${contacts.length} contacts`);
+      return {
+        type: 'company',
+        identifier: searchQuery,
+        displayName: contacts[0].companyName || searchQuery,
+        emailDomain: firstEmailDomain || generateEmailDomain(searchQuery),
+        companyContacts: contacts.map((c) => ({
+          name: c.displayName,
+          email: c.emailAddresses?.[0]?.address,
+          title: c.jobTitle,
+          department: c.department,
+        })),
+      };
+    }
+  } catch (error) {
+    logger.debug(`Contact search for company failed: ${error}`);
+  }
+
+  // Strategy 3: Try searching in people API
+  try {
+    const peopleResponse = await graphClient.makeRequest('/me/people', {
+      method: 'GET',
+      queryParams: {
+        $search: `"${searchQuery}"`,
+        $top: '5',
+      },
+    });
+
+    if (
+      peopleResponse &&
+      typeof peopleResponse === 'object' &&
+      'value' in peopleResponse &&
+      Array.isArray(peopleResponse.value) &&
+      peopleResponse.value.length > 0
+    ) {
+      const person = peopleResponse.value[0] as {
+        id?: string;
+        displayName?: string;
+        companyName?: string;
+        scoredEmailAddresses?: Array<{ address: string }>;
+      };
+
+      // If person has a company name that matches the search, it's likely a company search
+      if (
+        person.companyName &&
+        person.companyName.toLowerCase().includes(searchQuery.toLowerCase())
+      ) {
+        logger.info(`Detected as company from people API: ${person.companyName}`);
+        return {
+          type: 'company',
+          identifier: searchQuery,
+          displayName: person.companyName,
+          emailDomain:
+            extractEmailDomain(person.scoredEmailAddresses?.[0]?.address) ||
+            generateEmailDomain(searchQuery),
+        };
+      }
+
+      // Otherwise it's a person
+      logger.info(`Detected as person from people API: ${person.displayName}`);
+      return {
+        type: 'person',
+        identifier: searchQuery,
+        displayName: person.displayName || searchQuery,
+        emailDomain: extractEmailDomain(person.scoredEmailAddresses?.[0]?.address),
+        userEmail: person.scoredEmailAddresses?.[0]?.address,
+        userId: person.id,
+      };
+    }
+  } catch (error) {
+    logger.debug(`People search failed: ${error}`);
+  }
+
+  // Strategy 4: Fallback - assume it's a company if it looks like one
+  // (contains common company suffixes or multiple words)
+  const companyIndicators = [
+    'gmbh',
+    'ag',
+    'ltd',
+    'inc',
+    'corp',
+    'llc',
+    'company',
+    'co.',
+    'group',
+    'holding',
+    'se',
+    'kg',
+    'ohg',
+    'ug',
+  ];
+  const lowerQuery = searchQuery.toLowerCase();
+  const isLikelyCompany =
+    companyIndicators.some((indicator) => lowerQuery.includes(indicator)) ||
+    searchQuery.split(/\s+/).length >= 2;
+
+  if (isLikelyCompany) {
+    logger.info(`Assumed as company based on naming pattern: ${searchQuery}`);
+    return {
+      type: 'company',
+      identifier: searchQuery,
+      displayName: searchQuery,
+      emailDomain: generateEmailDomain(searchQuery),
+    };
+  }
+
+  // Default: unknown, will search by name
+  logger.info(`Could not determine type for: ${searchQuery}, treating as unknown`);
+  return {
+    type: 'unknown',
+    identifier: searchQuery,
+    displayName: searchQuery,
+    emailDomain: generateEmailDomain(searchQuery),
+  };
 }
 
 /**
@@ -1258,6 +1719,9 @@ export function registerCompoundTools(
   readOnly: boolean = false
 ): number {
   let registeredCount = 0;
+
+  // Initialize NLP Enhancer for structured query analysis
+  const nlpEnhancer = new NLPEnhancer();
 
   // ==========================================================================
   // 0. INTELLIGENT QUERY - PRIMARY ENTRY POINT - ALWAYS PROVIDES AN ANSWER
@@ -2535,6 +2999,15 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
       const msg = messages[detectedLang];
       logger.info(`Detected language: ${detectedLang}`);
 
+      // Perform NLP-based query decomposition for structured analysis
+      const queryAnalysis = nlpEnhancer.decomposeQuery(question);
+      logger.debug('Query decomposition completed', {
+        entity: queryAnalysis.entity,
+        intent: queryAnalysis.intent.type,
+        confidence: queryAnalysis.confidence,
+        subQueries: queryAnalysis.subQueries.length,
+      });
+
       // Combine question, context, and memory context
       let fullQuestion = context ? `${question} ${context}` : question;
 
@@ -2812,6 +3285,9 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
               : `Found ${totalCount} results across Microsoft 365.`
             : msg.noResultsMessage(question),
         summary,
+        // Include structured query analysis with Markdown summary
+        queryAnalysis,
+        queryAnalysisMarkdown: queryAnalysis.markdown,
         searchResults,
         followUpResults,
         metadata: {
@@ -3099,6 +3575,18 @@ Returns categorized examples with guaranteed working queries.`,
             {
               question: 'Show my Teams',
               tool: 'list-joined-teams',
+              guaranteed: true,
+              note: 'Requires organization mode',
+            },
+            {
+              question: 'Show posts from [channel name] channel',
+              tool: 'get-teams-channel-posts',
+              guaranteed: true,
+              note: 'Requires organization mode',
+            },
+            {
+              question: 'Was gibt es Neues im [Kanalname] Kanal?',
+              tool: 'get-teams-channel-posts',
               guaranteed: true,
               note: 'Requires organization mode',
             },
@@ -3720,6 +4208,254 @@ Use this when someone asks "What were my last messages with [person name]?" or s
   registeredCount++;
 
   // ==========================================================================
+  // 1b. GET TEAMS CHANNEL POSTS - Find and retrieve posts from a Teams channel by name
+  // ==========================================================================
+  server.tool(
+    'get-teams-channel-posts',
+    `📢 **GET TEAMS CHANNEL POSTS** - Retrieve posts from a Teams channel by name!
+📢 **TEAMS KANAL-BEITRÄGE ABRUFEN** - Ruft Beiträge aus einem Teams-Kanal per Name ab!
+
+This tool automatically:
+Dieses Tool führt automatisch aus:
+
+1. ✅ Searches all your Teams for the specified channel / Durchsucht alle Ihre Teams nach dem Kanal
+2. ✅ Finds the channel by name (partial match) / Findet den Kanal per Name (Teilübereinstimmung)
+3. ✅ Retrieves the latest posts/messages / Ruft die neuesten Beiträge/Nachrichten ab
+4. ✅ Optionally includes replies / Optional mit Antworten
+
+**Required Permission / Erforderliche Berechtigung:** ChannelMessage.Read.All (Delegated)
+
+**Use cases / Anwendungsfälle:**
+- "Show posts from Join Connect channel" / "Zeige Beiträge aus dem Join Connect Kanal"
+- "What's new in the Announcements channel?" / "Was gibt es Neues im Announcements Kanal?"
+- "Get messages from [channel name] in [team name]" / "Hole Nachrichten aus [Kanalname] in [Teamname]"`,
+    {
+      channelName: z
+        .string()
+        .describe(
+          'Name of the channel to search for (partial match, case-insensitive) / Name des Kanals (Teilübereinstimmung)'
+        ),
+      teamName: z
+        .string()
+        .optional()
+        .describe(
+          'Optional: Team name to narrow down the search / Optional: Teamname um die Suche einzuschränken'
+        ),
+      limit: z
+        .number()
+        .optional()
+        .describe('Maximum number of posts to return (default: 20, max: 50) / Maximale Anzahl'),
+      includeReplies: z
+        .boolean()
+        .optional()
+        .describe(
+          'Include replies to posts (default: false, slower) / Antworten einschließen (langsamer)'
+        ),
+    },
+    {
+      title: 'Get Teams Channel Posts',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ channelName, teamName, limit = 20, includeReplies = false }) => {
+      logger.info(
+        `Getting channel posts: channel="${channelName}", team="${teamName}", limit=${limit}`
+      );
+
+      // Step 1: Find the channel
+      const result = await findTeamsChannel(graphClient, channelName, teamName);
+
+      if (!result) {
+        // Build helpful error message with available teams
+        let availableTeams: string[] = [];
+        try {
+          const teamsResponse = await graphClient.makeRequest('/me/joinedTeams', {
+            method: 'GET',
+            queryParams: { $select: 'displayName' },
+          });
+          if (
+            teamsResponse &&
+            typeof teamsResponse === 'object' &&
+            'value' in teamsResponse &&
+            Array.isArray(teamsResponse.value)
+          ) {
+            availableTeams = (teamsResponse.value as Array<{ displayName: string }>).map(
+              (t) => t.displayName
+            );
+          }
+        } catch {
+          // Ignore errors when listing teams
+        }
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  success: false,
+                  error: 'Channel not found',
+                  message_en: `Could not find a channel matching "${channelName}"${teamName ? ` in team "${teamName}"` : ''}. Make sure the channel exists and you have access to it.`,
+                  message_de: `Konnte keinen Kanal mit dem Namen "${channelName}"${teamName ? ` im Team "${teamName}"` : ''} finden. Stellen Sie sicher, dass der Kanal existiert und Sie Zugriff haben.`,
+                  searchedFor: {
+                    channelName,
+                    teamName: teamName || 'all teams',
+                  },
+                  availableTeams: availableTeams.slice(0, 10),
+                  hint_en:
+                    'Try specifying the team name or check if you have the required permissions (ChannelMessage.Read.All)',
+                  hint_de:
+                    'Versuchen Sie den Teamnamen anzugeben oder prüfen Sie die Berechtigungen (ChannelMessage.Read.All)',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const { team, channel } = result;
+
+      // Step 2: Get messages from the channel
+      const messages = await getChannelMessages(
+        graphClient,
+        team.id,
+        channel.id,
+        limit,
+        includeReplies
+      );
+
+      if (messages.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  team: {
+                    id: team.id,
+                    name: team.displayName,
+                    webUrl: team.webUrl,
+                  },
+                  channel: {
+                    id: channel.id,
+                    name: channel.displayName,
+                    description: channel.description,
+                    webUrl: channel.webUrl,
+                    membershipType: channel.membershipType,
+                  },
+                  postsFound: 0,
+                  message_en: `Channel "${channel.displayName}" found but no posts available. The channel might be empty or you may need additional permissions.`,
+                  message_de: `Kanal "${channel.displayName}" gefunden, aber keine Beiträge verfügbar. Der Kanal ist möglicherweise leer oder Sie benötigen zusätzliche Berechtigungen.`,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      // Step 3: Format the messages for output
+      const formattedPosts = messages.map((msg) => {
+        const post: Record<string, unknown> = {
+          id: msg.id,
+          author: msg.from?.user?.displayName || msg.from?.application?.displayName || 'Unknown',
+          authorType: msg.from?.user ? 'user' : msg.from?.application ? 'application' : 'unknown',
+          content: msg.body?.content?.replace(/<[^>]*>/g, '').trim(), // Strip HTML tags
+          contentType: msg.body?.contentType,
+          createdAt: msg.createdDateTime,
+          lastModified: msg.lastModifiedDateTime,
+          importance: msg.importance,
+          messageType: msg.messageType,
+          webUrl: msg.webUrl,
+        };
+
+        // Add subject if present
+        if (msg.subject) {
+          post.subject = msg.subject;
+        }
+
+        // Add attachments info if present
+        if (msg.attachments && msg.attachments.length > 0) {
+          post.attachments = msg.attachments.map((a) => ({
+            name: a.name,
+            contentType: a.contentType,
+          }));
+        }
+
+        // Add mentions if present
+        if (msg.mentions && msg.mentions.length > 0) {
+          post.mentions = msg.mentions.map((m) => m.mentioned?.user?.displayName || m.mentionText);
+        }
+
+        // Add reactions summary if present
+        if (msg.reactions && msg.reactions.length > 0) {
+          const reactionCounts: Record<string, number> = {};
+          for (const r of msg.reactions) {
+            reactionCounts[r.reactionType] = (reactionCounts[r.reactionType] || 0) + 1;
+          }
+          post.reactions = reactionCounts;
+        }
+
+        // Add replies if fetched
+        const msgWithReplies = msg as GraphChannelMessage & { replies?: GraphChannelMessage[] };
+        if (msgWithReplies.replies && msgWithReplies.replies.length > 0) {
+          post.replies = msgWithReplies.replies.map((reply) => ({
+            id: reply.id,
+            author: reply.from?.user?.displayName || 'Unknown',
+            content: reply.body?.content?.replace(/<[^>]*>/g, '').trim(),
+            createdAt: reply.createdDateTime,
+          }));
+        }
+
+        return post;
+      });
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                success: true,
+                team: {
+                  id: team.id,
+                  name: team.displayName,
+                  description: team.description,
+                  webUrl: team.webUrl,
+                },
+                channel: {
+                  id: channel.id,
+                  name: channel.displayName,
+                  description: channel.description,
+                  webUrl: channel.webUrl,
+                  membershipType: channel.membershipType,
+                },
+                postsFound: formattedPosts.length,
+                includesReplies: includeReplies,
+                posts: formattedPosts,
+                hint_en: channel.webUrl
+                  ? `View channel in Teams: ${channel.webUrl}`
+                  : 'Open Teams to view the full channel',
+                hint_de: channel.webUrl
+                  ? `Kanal in Teams anzeigen: ${channel.webUrl}`
+                  : 'Öffnen Sie Teams um den vollständigen Kanal anzuzeigen',
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
   // 2. FIND EMAILS WITH PERSON - Combines user search + email search
   // ==========================================================================
   server.tool(
@@ -4231,6 +4967,9 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
     async ({ query, limit = 25, minRelevance = 0 }) => {
       logger.info(`Search Everything: "${query}" (limit: ${limit}, minRelevance: ${minRelevance})`);
 
+      // Perform NLP-based query decomposition for structured analysis
+      const queryAnalysis = nlpEnhancer.decomposeQuery(query);
+
       // Use centralized search function
       const searchResult = await executeCentralSearch(graphClient, query, {
         maxResults: Math.min(limit * 2, 100),
@@ -4378,6 +5117,9 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
               : `Found ${searchResult.totalHits} results for "${query}" across Microsoft 365`
             : `No results found for "${query}"`,
         ...(correctedQuery && { correctedQuery, originalQuery: query }),
+        // Include structured query analysis with Markdown summary
+        queryAnalysis,
+        queryAnalysisMarkdown: queryAnalysis.markdown,
         metadata: {
           searchDuration: `${searchResult.metadata.searchDuration}ms`,
           averageRank: Math.round(searchResult.metadata.averageRank),
@@ -7052,272 +7794,561 @@ Use this for "How is my team collaborating?", "Who are the most active team memb
   registeredCount++;
 
   // ==========================================================================
-  // 17. GET CUSTOMER 360 - Complete view of customer/partner relationship
+  // 17. GET CUSTOMER 360 - Complete 360-degree view across ALL Microsoft 365 products
   // ==========================================================================
   server.tool(
     'get-customer-360',
-    `Get a 360-degree view of a customer or partner relationship including:
-- All contacts from the organization
-- Complete email history
-- Meeting history and upcoming meetings
-- Shared documents and proposals
-- Recent Teams conversations
-- Open tasks and action items
+    `Get a comprehensive 360-degree view of a customer, partner, or person across ALL Microsoft 365 products.
 
-Use this for "Give me everything about [customer]", "Customer 360 for Acme Corp", or "What's our relationship status with [company]?".`,
+This tool automatically detects whether the input is a person name or company name and searches across 16+ Microsoft 365 products:
+
+**Core Search (Microsoft Search API):**
+- Emails (messages exchanged)
+- Calendar events and meetings
+- Files (OneDrive, SharePoint)
+- SharePoint sites
+- SharePoint lists and list items
+- Teams chat messages
+- People and contacts
+
+**Extended Search (Follow-up Queries):**
+- OneNote pages
+- Planner tasks
+- Microsoft To-Do tasks
+- Personal contacts
+- Online meetings
+- Joined Teams
+- Bookings appointments
+- Insights (trending and shared items)
+
+**Use cases:**
+- "Show me everything about XYZ" (person or company)
+- "Customer 360 for Acme Corp"
+- "What's our relationship with John Smith?"
+- "Give me all information about [customer name]"
+- "Zeige mir alles zum Kunden XYZ" (German)
+
+Returns a comprehensive summary including relationship health score and recommendations.`,
     {
-      companyName: z.string().describe('Customer or partner company name'),
-      emailDomain: z.string().optional().describe('Company email domain (e.g., acme.com)'),
+      customerIdentifier: z
+        .string()
+        .describe(
+          'Customer, partner, or person identifier - can be a person name, company name, or email address'
+        ),
+      emailDomain: z
+        .string()
+        .optional()
+        .describe('Optional: Company email domain (e.g., acme.com) to improve search accuracy'),
       days: z.number().optional().describe('Days of history to include (default: 90)'),
+      maxResults: z
+        .number()
+        .optional()
+        .describe('Maximum results per category (default: 25, max: 100)'),
     },
     {
-      title: 'Get Customer 360',
+      title: 'Get Customer 360 - Comprehensive View',
       readOnlyHint: true,
       openWorldHint: true,
     },
-    async ({ companyName, emailDomain, days = 90 }) => {
-      logger.info(`Getting Customer 360 for: ${companyName}`);
+    async ({ customerIdentifier, emailDomain, days = 90, maxResults = 25 }) => {
+      logger.info(`Getting comprehensive Customer 360 for: ${customerIdentifier}`);
 
+      const effectiveMaxResults = Math.min(maxResults, 100);
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - days);
+      const now = new Date();
 
+      // Step 1: Detect customer type (person vs company)
+      const customerType = await detectCustomerType(graphClient, customerIdentifier);
+      const searchDomain = emailDomain || customerType.emailDomain;
+      const searchQuery = customerType.displayName || customerIdentifier;
+
+      // Initialize result structure
       const result: Record<string, unknown> = {
-        customer: companyName,
-        domain: emailDomain,
+        customer: {
+          identifier: customerIdentifier,
+          type: customerType.type,
+          displayName: customerType.displayName,
+          emailDomain: searchDomain,
+          userId: customerType.userId,
+          userEmail: customerType.userEmail,
+        },
         analyzedPeriod: `Last ${days} days`,
         retrievedAt: new Date().toISOString(),
+        productsSearched: [] as string[],
       };
 
-      const searchDomain = emailDomain || companyName.toLowerCase().replace(/\s+/g, '') + '.com';
-      const promises: Promise<void>[] = [];
+      const productsSearched: string[] = [];
+      const searchPromises: Promise<void>[] = [];
 
-      // Find all contacts
-      promises.push(
+      // Step 2: Execute Central Search across all entity types
+      searchPromises.push(
         (async () => {
           try {
-            const contactsResponse = await graphClient.makeRequest('/me/contacts', {
-              method: 'GET',
-              queryParams: {
-                $filter: `contains(companyName, '${companyName}')`,
-                $top: '50',
-                $select:
-                  'displayName,emailAddresses,companyName,jobTitle,department,businessPhones',
-              },
-            });
-
-            const contacts: Array<{
-              name: string;
-              email?: string;
-              title?: string;
-              department?: string;
-              phone?: string;
-            }> = [];
-
-            if (
-              contactsResponse &&
-              typeof contactsResponse === 'object' &&
-              'value' in contactsResponse
-            ) {
-              for (const contact of contactsResponse.value as Array<{
-                displayName: string;
-                emailAddresses?: Array<{ address: string }>;
-                jobTitle?: string;
-                department?: string;
-                businessPhones?: string[];
-              }>) {
-                contacts.push({
-                  name: contact.displayName,
-                  email: contact.emailAddresses?.[0]?.address,
-                  title: contact.jobTitle,
-                  department: contact.department,
-                  phone: contact.businessPhones?.[0],
-                });
-              }
-            }
-
-            result.contacts = {
-              count: contacts.length,
-              people: contacts,
-            };
-          } catch (error) {
-            result.contacts = { error: `${error}` };
-          }
-        })()
-      );
-
-      // Email history
-      promises.push(
-        (async () => {
-          try {
-            const emailResponse = await graphClient.makeRequest('/me/messages', {
-              method: 'GET',
-              queryParams: {
-                $search: `"from:${searchDomain}" OR "to:${searchDomain}"`,
-                $top: '50',
-                $select: 'subject,from,toRecipients,receivedDateTime,bodyPreview,hasAttachments',
-                $orderby: 'receivedDateTime desc',
-              },
-            });
-
-            if (
-              emailResponse &&
-              typeof emailResponse === 'object' &&
-              'value' in emailResponse &&
-              Array.isArray(emailResponse.value)
-            ) {
-              const emails = emailResponse.value as GraphEmail[];
-              const fromCustomer = emails.filter((e) =>
-                e.from?.emailAddress?.address?.toLowerCase().includes(searchDomain.toLowerCase())
-              );
-              const toCustomer = emails.filter((e) =>
-                e.toRecipients?.some((r) =>
-                  r.emailAddress?.address?.toLowerCase().includes(searchDomain.toLowerCase())
-                )
-              );
-
-              result.emailHistory = {
-                totalEmails: emails.length,
-                fromCustomer: fromCustomer.length,
-                toCustomer: toCustomer.length,
-                recentEmails: emails.slice(0, 10).map((e) => ({
-                  subject: e.subject,
-                  from: e.from?.emailAddress?.address,
-                  date: e.receivedDateTime,
-                  hasAttachments: e.hasAttachments,
-                  preview: e.bodyPreview?.substring(0, 100),
-                })),
-                pendingReplies: fromCustomer.filter((e) => {
-                  // Simple heuristic: recent emails from customer might need response
-                  const received = new Date(e.receivedDateTime);
-                  const twoDaysAgo = new Date();
-                  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-                  return received > twoDaysAgo;
-                }).length,
-              };
-            }
-          } catch (error) {
-            result.emailHistory = { error: `${error}` };
-          }
-        })()
-      );
-
-      // Meeting history
-      promises.push(
-        (async () => {
-          try {
-            const now = new Date();
-            const futureDate = new Date();
-            futureDate.setDate(futureDate.getDate() + 30);
-
-            // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
-            const scheduleQueryParams: Record<string, string> = {
-              startDateTime: startDate.toISOString(),
-              endDateTime: futureDate.toISOString(),
-              $top: '100',
-              $select: 'subject,start,end,attendees,organizer,location',
-            };
-
-            const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(scheduleQueryParams)}`,
+            const centralSearchResult = await executeCentralSearch(
+              graphClient,
+              `${searchQuery} OR "${searchQuery}"${searchDomain ? ` OR "${searchDomain}"` : ''}`,
               {
-                method: 'GET',
+                entityTypes: [
+                  'message',
+                  'event',
+                  'driveItem',
+                  'site',
+                  'list',
+                  'listItem',
+                  'chatMessage',
+                  'person',
+                ],
+                maxResults: effectiveMaxResults * 2,
+                sortByRank: true,
+                includeTimeContext: true,
               }
             );
 
-            if (
-              meetingsResponse &&
-              typeof meetingsResponse === 'object' &&
-              'value' in meetingsResponse &&
-              Array.isArray(meetingsResponse.value)
-            ) {
-              const events = meetingsResponse.value as GraphEvent[];
-              const customerMeetings = events.filter((event) =>
-                event.attendees?.some((a) =>
-                  a.emailAddress?.address?.toLowerCase().includes(searchDomain.toLowerCase())
-                )
-              );
+            // Process emails
+            if (centralSearchResult.results.emails.length > 0) {
+              const emails = centralSearchResult.results.emails.slice(0, effectiveMaxResults);
+              result.emails = {
+                count: centralSearchResult.results.emails.length,
+                items: emails.map((hit) => ({
+                  subject: hit.resource?.subject,
+                  from: hit.resource?.from?.emailAddress?.address,
+                  to: hit.resource?.toRecipients?.[0]?.emailAddress?.address,
+                  date: hit.resource?.receivedDateTime,
+                  preview: hit.resource?.bodyPreview?.substring(0, 150),
+                  hasAttachments: hit.resource?.hasAttachments,
+                  webLink: hit.resource?.webLink,
+                  relevance: hit.relevanceScore,
+                })),
+              };
+              productsSearched.push('Outlook Mail');
+            }
 
-              const upcoming = customerMeetings.filter((m) => new Date(m.start.dateTime) >= now);
-              const past = customerMeetings.filter((m) => new Date(m.start.dateTime) < now);
+            // Process calendar events
+            if (centralSearchResult.results.events.length > 0) {
+              const events = centralSearchResult.results.events.slice(0, effectiveMaxResults);
+              const upcoming = events.filter((e) => new Date(e.resource?.start?.dateTime) >= now);
+              const past = events.filter((e) => new Date(e.resource?.start?.dateTime) < now);
 
-              result.meetings = {
-                total: customerMeetings.length,
+              result.calendar = {
+                count: centralSearchResult.results.events.length,
                 upcoming: {
                   count: upcoming.length,
-                  next: upcoming.slice(0, 5).map((m) => ({
-                    subject: m.subject,
-                    date: m.start.dateTime,
-                    location: m.location?.displayName,
+                  items: upcoming.slice(0, 10).map((hit) => ({
+                    subject: hit.resource?.subject,
+                    start: hit.resource?.start?.dateTime,
+                    end: hit.resource?.end?.dateTime,
+                    location: hit.resource?.location?.displayName,
+                    organizer: hit.resource?.organizer?.emailAddress?.address,
+                    webLink: hit.resource?.webLink,
                   })),
                 },
                 past: {
                   count: past.length,
-                  recent: past.slice(0, 5).map((m) => ({
-                    subject: m.subject,
-                    date: m.start.dateTime,
+                  items: past.slice(0, 10).map((hit) => ({
+                    subject: hit.resource?.subject,
+                    start: hit.resource?.start?.dateTime,
+                    end: hit.resource?.end?.dateTime,
+                    location: hit.resource?.location?.displayName,
                   })),
                 },
               };
+              productsSearched.push('Calendar');
+            }
+
+            // Process files
+            if (centralSearchResult.results.files.length > 0) {
+              const files = centralSearchResult.results.files.slice(0, effectiveMaxResults);
+              result.files = {
+                count: centralSearchResult.results.files.length,
+                items: files.map((hit) => ({
+                  name: hit.name,
+                  webUrl: hit.webUrl,
+                  type: hit.resource?.file?.mimeType || hit.resource?.['@odata.type'],
+                  modified: hit.resource?.lastModifiedDateTime,
+                  modifiedBy: hit.resource?.lastModifiedBy?.user?.displayName,
+                  size: hit.resource?.size,
+                  relevance: hit.relevanceScore,
+                })),
+              };
+              productsSearched.push('OneDrive/SharePoint Files');
+            }
+
+            // Process SharePoint sites
+            if (centralSearchResult.results.sites.length > 0) {
+              const sites = centralSearchResult.results.sites.slice(0, effectiveMaxResults);
+              result.sites = {
+                count: centralSearchResult.results.sites.length,
+                items: sites.map((hit) => ({
+                  name: hit.name,
+                  webUrl: hit.webUrl,
+                  description: hit.resource?.description,
+                  relevance: hit.relevanceScore,
+                })),
+              };
+              productsSearched.push('SharePoint Sites');
+            }
+
+            // Process list items
+            if (centralSearchResult.results.listItems.length > 0) {
+              const listItems = centralSearchResult.results.listItems.slice(0, effectiveMaxResults);
+              result.listItems = {
+                count: centralSearchResult.results.listItems.length,
+                items: listItems.map((hit) => ({
+                  name: hit.name,
+                  webUrl: hit.webUrl,
+                  listName: hit.resource?.fields?.Title,
+                  relevance: hit.relevanceScore,
+                })),
+              };
+              productsSearched.push('SharePoint Lists');
+            }
+
+            // Process Teams chats
+            if (centralSearchResult.results.chats.length > 0) {
+              const chats = centralSearchResult.results.chats.slice(0, effectiveMaxResults);
+              result.teamsChats = {
+                count: centralSearchResult.results.chats.length,
+                items: chats.map((hit) => ({
+                  content: hit.resource?.body?.content?.substring(0, 200),
+                  from: hit.resource?.from?.user?.displayName,
+                  date: hit.resource?.createdDateTime,
+                  chatType: hit.resource?.chatType,
+                  relevance: hit.relevanceScore,
+                })),
+              };
+              productsSearched.push('Teams Chats');
+            }
+
+            // Process people
+            if (centralSearchResult.results.people.length > 0) {
+              const people = centralSearchResult.results.people.slice(0, effectiveMaxResults);
+              result.people = {
+                count: centralSearchResult.results.people.length,
+                items: people.map((hit) => ({
+                  name: hit.name || hit.resource?.displayName,
+                  email:
+                    hit.resource?.emailAddresses?.[0]?.address ||
+                    hit.resource?.scoredEmailAddresses?.[0]?.address ||
+                    hit.resource?.mail,
+                  jobTitle: hit.resource?.jobTitle,
+                  department: hit.resource?.department,
+                  company: hit.resource?.companyName,
+                  phone: hit.resource?.phones?.[0]?.number || hit.resource?.businessPhones?.[0],
+                  relevance: hit.relevanceScore,
+                })),
+              };
+              productsSearched.push('People');
             }
           } catch (error) {
-            result.meetings = { error: `${error}` };
+            logger.warn(`Central search failed: ${error}`);
+            result.centralSearchError = `${error}`;
           }
         })()
       );
 
-      // Shared documents - use centralized search
-      promises.push(
+      // Step 3: Execute Follow-up Queries for extended products
+      searchPromises.push(
         (async () => {
           try {
-            const searchResult = await executeCentralSearch(
-              graphClient,
-              `${companyName} OR "${companyName}"`,
-              {
-                entityTypes: ['driveItem'],
-                maxResults: 20,
-                sortByRank: true,
-              }
-            );
+            const followUpResults = await executeFollowUpQueries(graphClient, searchQuery);
 
-            const files = searchResult.results.files.slice(0, 15).map((hit) => ({
-              name: hit.name || 'Unknown',
-              webUrl: hit.webUrl,
-              modified: hit.resource?.lastModifiedDateTime,
-              relevance: hit.relevanceScore,
-            }));
+            // Process OneNote pages
+            if (followUpResults.onenote && followUpResults.onenote.length > 0) {
+              result.onenote = {
+                count: followUpResults.onenote.length,
+                items: followUpResults.onenote.slice(0, effectiveMaxResults).map((page: any) => ({
+                  title: page.title,
+                  lastModified: page.lastModifiedDateTime,
+                  webUrl: page.links?.oneNoteWebUrl?.href,
+                })),
+              };
+              productsSearched.push('OneNote');
+            }
 
-            result.documents = {
-              count: files.length,
-              files,
-            };
+            // Process Planner tasks
+            if (followUpResults.planner && followUpResults.planner.length > 0) {
+              result.planner = {
+                count: followUpResults.planner.length,
+                items: followUpResults.planner.slice(0, effectiveMaxResults).map((task: any) => ({
+                  title: task.title,
+                  percentComplete: task.percentComplete,
+                  dueDate: task.dueDateTime,
+                  priority: task.priority,
+                  bucketId: task.bucketId,
+                })),
+              };
+              productsSearched.push('Planner');
+            }
+
+            // Process To-Do tasks
+            if (followUpResults.todo && followUpResults.todo.length > 0) {
+              result.todo = {
+                count: followUpResults.todo.length,
+                items: followUpResults.todo.slice(0, effectiveMaxResults).map((task: any) => ({
+                  title: task.title,
+                  status: task.status,
+                  dueDate: task.dueDateTime?.dateTime,
+                  importance: task.importance,
+                  listName: task.listName,
+                })),
+              };
+              productsSearched.push('Microsoft To-Do');
+            }
+
+            // Process personal contacts
+            if (followUpResults.contacts && followUpResults.contacts.length > 0) {
+              result.contacts = {
+                count: followUpResults.contacts.length,
+                items: followUpResults.contacts
+                  .slice(0, effectiveMaxResults)
+                  .map((contact: any) => ({
+                    displayName: contact.displayName,
+                    email: contact.emailAddresses?.[0]?.address,
+                    company: contact.companyName,
+                    jobTitle: contact.jobTitle,
+                    department: contact.department,
+                    phone: contact.businessPhones?.[0] || contact.mobilePhone,
+                  })),
+              };
+              productsSearched.push('Contacts');
+            }
+
+            // Process online meetings
+            if (followUpResults.meetings && followUpResults.meetings.length > 0) {
+              result.onlineMeetings = {
+                count: followUpResults.meetings.length,
+                items: followUpResults.meetings
+                  .slice(0, effectiveMaxResults)
+                  .map((meeting: any) => ({
+                    subject: meeting.subject,
+                    startDateTime: meeting.startDateTime,
+                    endDateTime: meeting.endDateTime,
+                    joinUrl: meeting.joinWebUrl,
+                  })),
+              };
+              productsSearched.push('Online Meetings');
+            }
+
+            // Process joined Teams
+            if (followUpResults.teams && followUpResults.teams.length > 0) {
+              result.teams = {
+                count: followUpResults.teams.length,
+                items: followUpResults.teams.slice(0, effectiveMaxResults).map((team: any) => ({
+                  displayName: team.displayName,
+                  description: team.description,
+                  webUrl: team.webUrl,
+                })),
+              };
+              productsSearched.push('Teams');
+            }
+
+            // Process bookings
+            if (followUpResults.bookings && followUpResults.bookings.length > 0) {
+              result.bookings = {
+                count: followUpResults.bookings.length,
+                items: followUpResults.bookings
+                  .slice(0, effectiveMaxResults)
+                  .map((booking: any) => ({
+                    customerName: booking.customerName,
+                    serviceName: booking.serviceName,
+                    startDateTime: booking.startDateTime?.dateTime,
+                    endDateTime: booking.endDateTime?.dateTime,
+                    businessName: booking.businessName,
+                  })),
+              };
+              productsSearched.push('Bookings');
+            }
+
+            // Process insights
+            if (followUpResults.insights && followUpResults.insights.length > 0) {
+              result.insights = {
+                count: followUpResults.insights.length,
+                items: followUpResults.insights
+                  .slice(0, effectiveMaxResults)
+                  .map((insight: any) => ({
+                    type: insight.insightType,
+                    resourceType: insight.resourceVisualization?.type,
+                    title: insight.resourceVisualization?.title,
+                    containerDisplayName: insight.resourceVisualization?.containerDisplayName,
+                    webUrl: insight.resourceReference?.webUrl,
+                  })),
+              };
+              productsSearched.push('Insights');
+            }
           } catch (error) {
-            result.documents = { error: `${error}` };
+            logger.warn(`Follow-up queries failed: ${error}`);
+            result.followUpError = `${error}`;
           }
         })()
       );
 
-      await Promise.allSettled(promises);
-
-      // Calculate relationship health score (simple heuristic)
-      const emailCount = (result.emailHistory as { totalEmails?: number })?.totalEmails || 0;
-      const meetingCount = (result.meetings as { total?: number })?.total || 0;
-      const contactCount = (result.contacts as { count?: number })?.count || 0;
-
-      let healthScore = 'Active';
-      if (emailCount < 5 && meetingCount < 2) {
-        healthScore = 'Needs Attention';
-      } else if (emailCount > 20 || meetingCount > 5) {
-        healthScore = 'Strong';
+      // Step 4: If we detected company contacts, add them to the result
+      if (customerType.companyContacts && customerType.companyContacts.length > 0) {
+        searchPromises.push(
+          (async () => {
+            result.companyContacts = {
+              count: customerType.companyContacts!.length,
+              items: customerType.companyContacts,
+            };
+            if (!productsSearched.includes('Contacts')) {
+              productsSearched.push('Company Contacts');
+            }
+          })()
+        );
       }
 
+      // Step 5: If it's a person, also get direct communication history
+      if (customerType.type === 'person' && customerType.userEmail) {
+        searchPromises.push(
+          (async () => {
+            try {
+              // Find emails specifically from/to this person
+              const emailsFromPerson = await findEmailsWithPerson(
+                graphClient,
+                customerType.userEmail!,
+                customerType.displayName,
+                effectiveMaxResults
+              );
+
+              if (emailsFromPerson.length > 0) {
+                result.directEmailHistory = {
+                  count: emailsFromPerson.length,
+                  items: emailsFromPerson.slice(0, effectiveMaxResults).map((e) => ({
+                    subject: e.subject,
+                    from: e.from?.emailAddress?.address,
+                    date: e.receivedDateTime,
+                    preview: e.bodyPreview?.substring(0, 100),
+                  })),
+                };
+              }
+
+              // Find meetings with this person
+              const meetingsWithPerson = await findMeetingsWithPerson(
+                graphClient,
+                customerType.userEmail!,
+                customerType.displayName,
+                effectiveMaxResults
+              );
+
+              if (meetingsWithPerson.length > 0) {
+                const upcoming = meetingsWithPerson.filter(
+                  (m) => new Date(m.start.dateTime) >= now
+                );
+                const past = meetingsWithPerson.filter((m) => new Date(m.start.dateTime) < now);
+
+                result.directMeetingHistory = {
+                  total: meetingsWithPerson.length,
+                  upcoming: {
+                    count: upcoming.length,
+                    items: upcoming.slice(0, 5).map((m) => ({
+                      subject: m.subject,
+                      start: m.start.dateTime,
+                      location: m.location?.displayName,
+                    })),
+                  },
+                  past: {
+                    count: past.length,
+                    items: past.slice(0, 5).map((m) => ({
+                      subject: m.subject,
+                      start: m.start.dateTime,
+                    })),
+                  },
+                };
+              }
+
+              // Find chats with this person
+              if (customerType.userId) {
+                const chats = await findChatsWithUser(
+                  graphClient,
+                  customerType.userId,
+                  customerType.userEmail,
+                  customerType.displayName
+                );
+
+                if (chats.length > 0) {
+                  result.directChats = {
+                    count: chats.length,
+                    items: chats.slice(0, effectiveMaxResults).map((chat) => ({
+                      chatType: chat.chatType,
+                      topic: chat.topic,
+                      lastUpdated: chat.lastUpdatedDateTime,
+                      memberCount: chat.members?.length,
+                    })),
+                  };
+                }
+              }
+            } catch (error) {
+              logger.warn(`Direct communication history failed: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Wait for all searches to complete
+      await Promise.allSettled(searchPromises);
+
+      // Step 6: Calculate comprehensive relationship summary
+      const emailCount =
+        ((result.emails as { count?: number })?.count || 0) +
+        ((result.directEmailHistory as { count?: number })?.count || 0);
+      const meetingCount =
+        ((result.calendar as { count?: number })?.count || 0) +
+        ((result.directMeetingHistory as { total?: number })?.total || 0);
+      const fileCount = (result.files as { count?: number })?.count || 0;
+      const chatCount =
+        ((result.teamsChats as { count?: number })?.count || 0) +
+        ((result.directChats as { count?: number })?.count || 0);
+      const contactCount =
+        ((result.contacts as { count?: number })?.count || 0) +
+        ((result.companyContacts as { count?: number })?.count || 0);
+      const taskCount =
+        ((result.planner as { count?: number })?.count || 0) +
+        ((result.todo as { count?: number })?.count || 0);
+      const siteCount = (result.sites as { count?: number })?.count || 0;
+      const onenoteCount = (result.onenote as { count?: number })?.count || 0;
+
+      const totalInteractions = emailCount + meetingCount + chatCount + fileCount;
+
+      // Determine relationship health score
+      let healthScore: string;
+      let recommendation: string;
+
+      if (totalInteractions === 0) {
+        healthScore = 'No Data';
+        recommendation = 'No interactions found. Consider reaching out to establish connection.';
+      } else if (totalInteractions < 5) {
+        healthScore = 'Low Activity';
+        recommendation = 'Limited recent interaction. Consider scheduling a follow-up meeting.';
+      } else if (totalInteractions < 15) {
+        healthScore = 'Moderate';
+        recommendation = 'Regular interaction maintained. Keep up the engagement.';
+      } else if (totalInteractions < 30) {
+        healthScore = 'Active';
+        recommendation = 'Good level of engagement. Relationship is healthy.';
+      } else {
+        healthScore = 'Very Active';
+        recommendation = 'Excellent engagement. Strong relationship with frequent interactions.';
+      }
+
+      result.productsSearched = productsSearched;
+
       result.relationshipSummary = {
+        customerType: customerType.type,
         healthScore,
-        totalInteractions: emailCount + meetingCount,
-        contactsKnown: contactCount,
-        recommendation:
-          healthScore === 'Needs Attention'
-            ? 'Consider scheduling a check-in meeting'
-            : 'Relationship is healthy',
+        recommendation,
+        metrics: {
+          totalInteractions,
+          emails: emailCount,
+          meetings: meetingCount,
+          files: fileCount,
+          chats: chatCount,
+          contacts: contactCount,
+          tasks: taskCount,
+          sites: siteCount,
+          notes: onenoteCount,
+        },
+        productsSearched: productsSearched.length,
       };
 
       return {
