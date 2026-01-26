@@ -932,7 +932,6 @@ All Rights Reserved © 2025 Join GmbH
 ## 📞 Support
 
 - 📋 [Issues](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/issues)
-- 📧 Contact: support@join.de
 
 ---
 
