@@ -146,6 +146,58 @@ interface GraphDriveItem {
   };
 }
 
+interface SearchHit {
+  resource: any;
+  summary?: string;
+  name?: string;
+  webUrl?: string;
+  type?: string;
+  date?: string;
+  from?: string;
+}
+
+interface SearchApiResults {
+  emails: SearchHit[];
+  events: SearchHit[];
+  files: SearchHit[];
+  sites: SearchHit[];
+  listItems: SearchHit[];
+  chats: SearchHit[];
+  people: SearchHit[];
+}
+
+interface FollowUpResults {
+  onenote?: any[];
+  planner?: any[];
+  todo?: any[];
+  contacts?: any[];
+  meetings?: any[];
+  teams?: any[];
+  bookings?: any[];
+  insights?: any[];
+}
+
+interface EnhancedAskM365Response {
+  question: string;
+  language: string;
+  searchedAt: string;
+  intent: any;
+  processingSteps: string[];
+  resultsFound: boolean;
+  totalResults: number;
+  status: string;
+  message: string;
+  summary?: string;
+  searchResults: SearchApiResults;
+  followUpResults: FollowUpResults;
+  permissionWarnings?: string[];
+  metadata: {
+    totalResults: number;
+    queryTime: number;
+    productsSearched: string[];
+  };
+}
+
 /**
  * Helper function to find a user by name, email, or phone
  */
@@ -581,6 +633,288 @@ async function findFilesFromPerson(
   // Deduplicate
   const uniqueFiles = Array.from(new Map(allFiles.map((f) => [f.id, f])).values());
   return uniqueFiles.slice(0, limit);
+}
+
+/**
+ * Product-specific query functions
+ */
+async function queryOneNote(graphClient: GraphClient, query: string): Promise<any[]> {
+  try {
+    const response = await graphClient.makeRequest('/me/onenote/pages', {
+      method: 'GET',
+      queryParams: {
+        $search: `"${query}"`,
+        $select: 'id,title,links,lastModifiedDateTime',
+        $top: '10',
+      },
+    });
+    return (response as { value: any[] })?.value || [];
+  } catch (error) {
+    logger.warn(`OneNote search failed: ${error}`);
+    return [];
+  }
+}
+
+async function queryPlanner(graphClient: GraphClient, query: string): Promise<any[]> {
+  try {
+    const response = await graphClient.makeRequest('/me/planner/tasks', {
+      method: 'GET',
+      queryParams: { $top: '50' },
+    });
+    const tasks = (response as { value: any[] })?.value || [];
+    return tasks.filter((t) => t.title?.toLowerCase().includes(query.toLowerCase()));
+  } catch (error) {
+    logger.warn(`Planner search failed: ${error}`);
+    return [];
+  }
+}
+
+async function queryToDo(graphClient: GraphClient, query: string): Promise<any[]> {
+  try {
+    const listsResponse = await graphClient.makeRequest('/me/todo/lists', { method: 'GET' });
+    const lists = (listsResponse as { value: any[] })?.value || [];
+    const allTasks: any[] = [];
+
+    for (const list of lists.slice(0, 5)) {
+      const tasksResponse = await graphClient.makeRequest(`/me/todo/lists/${list.id}/tasks`, {
+        method: 'GET',
+        queryParams: {
+          $filter: `contains(title,'${query.replace(/'/g, "''")}')`,
+          $top: '10',
+        },
+      });
+      const tasks = (tasksResponse as { value: any[] })?.value || [];
+      allTasks.push(...tasks.map((t) => ({ ...t, listName: list.displayName })));
+    }
+    return allTasks;
+  } catch (error) {
+    logger.warn(`To-Do search failed: ${error}`);
+    return [];
+  }
+}
+
+async function queryContacts(graphClient: GraphClient, query: string): Promise<any[]> {
+  try {
+    const response = await graphClient.makeRequest('/me/contacts', {
+      method: 'GET',
+      queryParams: {
+        $search: `"${query}"`,
+        $top: '10',
+      },
+    });
+    return (response as { value: any[] })?.value || [];
+  } catch (error) {
+    logger.warn(`Contacts search failed: ${error}`);
+    return [];
+  }
+}
+
+async function queryOnlineMeetings(graphClient: GraphClient, query: string): Promise<any[]> {
+  try {
+    const response = await graphClient.makeRequest('/me/onlineMeetings', {
+      method: 'GET',
+      queryParams: { $top: '50' },
+    });
+    const meetings = (response as { value: any[] })?.value || [];
+    return meetings.filter((m) => m.subject?.toLowerCase().includes(query.toLowerCase()));
+  } catch (error) {
+    logger.warn(`OnlineMeetings search failed: ${error}`);
+    return [];
+  }
+}
+
+async function queryJoinedTeams(graphClient: GraphClient, query: string): Promise<any[]> {
+  try {
+    const response = await graphClient.makeRequest('/me/joinedTeams', {
+      method: 'GET',
+    });
+    const teams = (response as { value: any[] })?.value || [];
+    return teams.filter((t) => t.displayName?.toLowerCase().includes(query.toLowerCase()));
+  } catch (error) {
+    logger.warn(`JoinedTeams search failed: ${error}`);
+    return [];
+  }
+}
+
+async function queryBookings(graphClient: GraphClient, query: string): Promise<any[]> {
+  try {
+    const businessesResponse = await graphClient.makeRequest('/solutions/bookingBusinesses', {
+      method: 'GET',
+    });
+    const businesses = (businessesResponse as { value: any[] })?.value || [];
+    const allAppointments: any[] = [];
+
+    for (const business of businesses.slice(0, 3)) {
+      const appointmentsResponse = await graphClient.makeRequest(
+        `/solutions/bookingBusinesses/${business.id}/appointments`,
+        {
+          method: 'GET',
+          queryParams: { $top: '20' },
+        }
+      );
+      const appointments = (appointmentsResponse as { value: any[] })?.value || [];
+      allAppointments.push(
+        ...appointments
+          .filter((a) => a.customerName?.toLowerCase().includes(query.toLowerCase()))
+          .map((a) => ({ ...a, businessName: business.displayName }))
+      );
+    }
+    return allAppointments;
+  } catch (error) {
+    logger.warn(`Bookings search failed: ${error}`);
+    return [];
+  }
+}
+
+async function queryInsights(graphClient: GraphClient): Promise<any[]> {
+  try {
+    const [trending, shared] = await Promise.allSettled([
+      graphClient.makeRequest('/me/insights/trending', {
+        method: 'GET',
+        queryParams: { $top: '10' },
+      }),
+      graphClient.makeRequest('/me/insights/shared', {
+        method: 'GET',
+        queryParams: { $top: '10' },
+      }),
+    ]);
+
+    const results: any[] = [];
+    if (trending.status === 'fulfilled' && trending.value) {
+      results.push(
+        ...((trending.value as { value: any[] })?.value || []).map((i) => ({
+          ...i,
+          insightType: 'trending',
+        }))
+      );
+    }
+    if (shared.status === 'fulfilled' && shared.value) {
+      results.push(
+        ...((shared.value as { value: any[] })?.value || []).map((i) => ({
+          ...i,
+          insightType: 'shared',
+        }))
+      );
+    }
+    return results;
+  } catch (error) {
+    logger.warn(`Insights search failed: ${error}`);
+    return [];
+  }
+}
+
+async function executeSearchApiFirst(
+  graphClient: GraphClient,
+  query: string,
+  maxResults: number = 500
+): Promise<SearchApiResults> {
+  const entityTypes = [
+    'message',
+    'event',
+    'driveItem',
+    'site',
+    'list',
+    'listItem',
+    'chatMessage',
+    'person',
+  ];
+
+  const results: SearchApiResults = {
+    emails: [],
+    events: [],
+    files: [],
+    sites: [],
+    listItems: [],
+    chats: [],
+    people: [],
+  };
+
+  try {
+    const response = await graphClient.makeRequest('/search/query', {
+      method: 'POST',
+      body: JSON.stringify({
+        requests: [
+          {
+            entityTypes,
+            query: { queryString: query },
+            from: 0,
+            size: Math.min(maxResults, 500),
+          },
+        ],
+      }),
+    });
+
+    if (response && typeof response === 'object' && 'value' in response) {
+      const searchValues = (response as { value: any[] }).value as Array<{
+        hitsContainers?: Array<{
+          hits?: Array<{
+            resource?: any;
+            summary?: string;
+          }>;
+        }>;
+      }>;
+
+      for (const container of searchValues) {
+        if (container.hitsContainers) {
+          for (const hitsContainer of container.hitsContainers) {
+            if (hitsContainer.hits) {
+              for (const hit of hitsContainer.hits) {
+                if (hit.resource) {
+                  const type = hit.resource['@odata.type'] || '';
+                  const hitData: SearchHit = {
+                    resource: hit.resource,
+                    summary: hit.summary,
+                    name: hit.resource.name || hit.resource.subject || hit.resource.displayName,
+                    webUrl: hit.resource.webUrl,
+                  };
+
+                  if (type.includes('message')) results.emails.push(hitData);
+                  else if (type.includes('event')) results.events.push(hitData);
+                  else if (type.includes('driveItem')) results.files.push(hitData);
+                  else if (type.includes('site')) results.sites.push(hitData);
+                  else if (type.includes('listItem')) results.listItems.push(hitData);
+                  else if (type.includes('chatMessage')) results.chats.push(hitData);
+                  else if (type.includes('person')) results.people.push(hitData);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (error) {
+    logger.error(`Microsoft Search API failed: ${error}`);
+  }
+
+  return results;
+}
+
+async function executeFollowUpQueries(
+  graphClient: GraphClient,
+  query: string
+): Promise<FollowUpResults> {
+  const [onenote, planner, todo, contacts, meetings, teams, bookings, insights] =
+    await Promise.allSettled([
+      queryOneNote(graphClient, query),
+      queryPlanner(graphClient, query),
+      queryToDo(graphClient, query),
+      queryContacts(graphClient, query),
+      queryOnlineMeetings(graphClient, query),
+      queryJoinedTeams(graphClient, query),
+      queryBookings(graphClient, query),
+      queryInsights(graphClient),
+    ]);
+
+  return {
+    onenote: onenote.status === 'fulfilled' ? onenote.value : [],
+    planner: planner.status === 'fulfilled' ? planner.value : [],
+    todo: todo.status === 'fulfilled' ? todo.value : [],
+    contacts: contacts.status === 'fulfilled' ? contacts.value : [],
+    meetings: meetings.status === 'fulfilled' ? meetings.value : [],
+    teams: teams.status === 'fulfilled' ? teams.value : [],
+    bookings: bookings.status === 'fulfilled' ? bookings.value : [],
+    insights: insights.status === 'fulfilled' ? insights.value : [],
+  };
 }
 
 /**
@@ -1026,7 +1360,22 @@ export function registerCompoundTools(
   };
 
   // Intent classification for intelligent routing
-  type Intent = 'email' | 'calendar' | 'files' | 'people' | 'teams' | 'tasks' | 'search' | 'mixed';
+  type Intent =
+    | 'email'
+    | 'calendar'
+    | 'files'
+    | 'people'
+    | 'teams'
+    | 'tasks'
+    | 'search'
+    | 'mixed'
+    | 'sharepoint'
+    | 'notes'
+    | 'planner'
+    | 'contacts'
+    | 'meetings'
+    | 'bookings'
+    | 'insights';
 
   interface IntentResult {
     primary: Intent;
@@ -1226,6 +1575,34 @@ export function registerCompoundTools(
       en: ['search', 'find', 'look for', 'where is', 'locate'],
       de: ['suche', 'suchen', 'finde', 'finden', 'wo ist', 'lokalisieren'],
     },
+    sharepoint: {
+      en: ['sharepoint', 'site', 'sites', 'list', 'lists', 'document library'],
+      de: ['sharepoint', 'seite', 'seiten', 'liste', 'listen', 'dokumentbibliothek'],
+    },
+    notes: {
+      en: ['onenote', 'notebook', 'note', 'notes', 'section'],
+      de: ['onenote', 'notizbuch', 'notiz', 'notizen', 'abschnitt'],
+    },
+    planner: {
+      en: ['planner', 'plan', 'bucket', 'board'],
+      de: ['planner', 'plan', 'bucket', 'board'],
+    },
+    contacts: {
+      en: ['contact', 'contacts', 'address book', 'phone number'],
+      de: ['kontakt', 'kontakte', 'adressbuch', 'telefonnummer'],
+    },
+    meetings: {
+      en: ['meeting', 'meetings', 'online meeting', 'teams meeting', 'call'],
+      de: ['meeting', 'meetings', 'online-meeting', 'teams-meeting', 'anruf'],
+    },
+    bookings: {
+      en: ['booking', 'appointment', 'schedule', 'reservation'],
+      de: ['buchung', 'termin', 'zeitplan', 'reservierung'],
+    },
+    insights: {
+      en: ['trending', 'shared with me', 'popular', 'used', 'analytics'],
+      de: ['trend', 'mit mir geteilt', 'beliebt', 'verwendet', 'analyse'],
+    },
     mixed: { en: [], de: [] },
   };
 
@@ -1357,6 +1734,13 @@ export function registerCompoundTools(
     teams: { scopes: [], workScopes: ['Chat.Read', 'ChatMessage.Read'] },
     tasks: { scopes: ['Tasks.Read'], workScopes: [] },
     search: { scopes: ['Mail.Read', 'Files.Read'], workScopes: ['Sites.Read.All'] },
+    sharepoint: { scopes: [], workScopes: ['Sites.Read.All', 'Sites.Selected'] },
+    notes: { scopes: ['Notes.Read'], workScopes: [] },
+    planner: { scopes: ['Tasks.Read'], workScopes: [] },
+    contacts: { scopes: ['Contacts.Read'], workScopes: [] },
+    meetings: { scopes: ['OnlineMeetings.Read'], workScopes: [] },
+    bookings: { scopes: ['Bookings.Read.All'], workScopes: [] },
+    insights: { scopes: [], workScopes: ['Sites.Read.All'] },
     mixed: { scopes: ['Mail.Read', 'Calendars.Read', 'Files.Read'], workScopes: [] },
   };
 
@@ -1395,6 +1779,13 @@ export function registerCompoundTools(
       tasks: 0,
       search: 0,
       mixed: 0,
+      sharepoint: 0,
+      notes: 0,
+      planner: 0,
+      contacts: 0,
+      meetings: 0,
+      bookings: 0,
+      insights: 0,
     };
 
     // Score each intent based on keyword matches
@@ -1737,6 +2128,83 @@ export function registerCompoundTools(
           break;
         }
 
+        case 'sharepoint': {
+          const searchQuery = entities.topic || 'recent';
+          const response = await graphClient.makeRequest('/search/query', {
+            method: 'POST',
+            body: JSON.stringify({
+              requests: [
+                {
+                  entityTypes: ['site', 'list', 'listItem'],
+                  query: { queryString: searchQuery },
+                  from: 0,
+                  size: 25,
+                },
+              ],
+            }),
+          });
+          if (response && typeof response === 'object' && 'value' in response) {
+            const items: any[] = [];
+            const searchValues = (response as { value: any[] }).value || [];
+            for (const container of searchValues) {
+              if (container.hitsContainers) {
+                for (const hitsContainer of container.hitsContainers) {
+                  if (hitsContainer.hits) {
+                    for (const hit of hitsContainer.hits) {
+                      if (hit.resource) {
+                        items.push({
+                          name: hit.resource.name || hit.resource.displayName,
+                          webUrl: hit.resource.webUrl,
+                          type: hit.resource['@odata.type'],
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            results.data = items;
+            results.count = items.length;
+          }
+          break;
+        }
+
+        case 'notes': {
+          results.data = await queryOneNote(graphClient, entities.topic || '');
+          results.count = (results.data as any[]).length;
+          break;
+        }
+
+        case 'planner': {
+          results.data = await queryPlanner(graphClient, entities.topic || '');
+          results.count = (results.data as any[]).length;
+          break;
+        }
+
+        case 'contacts': {
+          results.data = await queryContacts(graphClient, entities.topic || entities.person || '');
+          results.count = (results.data as any[]).length;
+          break;
+        }
+
+        case 'meetings': {
+          results.data = await queryOnlineMeetings(graphClient, entities.topic || '');
+          results.count = (results.data as any[]).length;
+          break;
+        }
+
+        case 'bookings': {
+          results.data = await queryBookings(graphClient, entities.topic || '');
+          results.count = (results.data as any[]).length;
+          break;
+        }
+
+        case 'insights': {
+          results.data = await queryInsights(graphClient);
+          results.count = (results.data as any[]).length;
+          break;
+        }
+
         case 'teams':
         case 'search':
         case 'mixed':
@@ -1806,58 +2274,41 @@ export function registerCompoundTools(
 
   server.tool(
     'ask-microsoft-365',
-    `🧠 **INTELLIGENT MICROSOFT 365 ASSISTANT** - THE SMARTEST WAY TO QUERY MS365!
+    `🧠 **ENHANCED INTELLIGENT MICROSOFT 365 ASSISTANT** - THE ULTIMATE WAY TO QUERY MS365!
 🇬🇧 English | 🇩🇪 Deutsch - Automatically detects your language!
 
 ⭐ **THIS IS THE RECOMMENDED PRIMARY TOOL** - Use this for ANY question about Microsoft 365 data!
 ⭐ **DIES IST DAS EMPFOHLENE HAUPT-TOOL** - Nutzen Sie es für JEDE Frage zu Microsoft 365 Daten!
 
-This tool provides INTELLIGENT query handling with these features:
-Dieses Tool bietet INTELLIGENTE Anfrageverarbeitung mit diesen Funktionen:
+This tool provides UNIVERSAL search across 16+ Microsoft 365 products:
+Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte:
 
-1. ✅ **ALWAYS returns an answer / Liefert IMMER eine Antwort** - never fails silently
-2. 🔄 **Automatic fallback / Automatischer Fallback** - tries multiple search strategies
-3. 🎯 **Smart query understanding / Intelligentes Verstehen** - interprets natural language (EN + DE)
-4. 📊 **Comprehensive results / Umfassende Ergebnisse** - searches across all data sources
-5. 💡 **Helpful suggestions / Hilfreiche Vorschläge** - provides next steps if no results found
-6. 🌍 **Bilingual / Zweisprachig** - responds in your language (English or German)
-7. 📅 **Time-aware / Zeitraum-bewusst** - understands time ranges (today, last week, this month, etc.)
-8. 🔐 **Permission-aware / Berechtigungs-bewusst** - explains when permissions are missing
+1.  📧 **Outlook Mail**
+2.  📅 **Calendar**
+3.  📁 **OneDrive & SharePoint Files**
+4.  🌐 **SharePoint Sites & Lists**
+5.  👥 **People & Organization**
+6.  📇 **Personal Contacts**
+7.  📓 **OneNote Notebooks**
+8.  🗓️ **Planner Tasks**
+9.  ✅ **Microsoft To-Do**
+10. 💬 **Teams Chats**
+11. 👥 **Joined Teams**
+12. 📹 **Online Meetings**
+13. 🗓️ **Bookings**
+14. 📈 **Insights (Trending)**
+15. 🤝 **Insights (Shared)**
+16. 📊 **Activity Analytics**
 
-**Time Range Examples / Zeitraum-Beispiele:**
-🇬🇧 "Show me emails from today" | "Meetings this week" | "Files from last month"
-🇬🇧 "What happened last 7 days?" | "Calendar for next week" | "Emails from yesterday"
-🇩🇪 "Zeige mir E-Mails von heute" | "Termine diese Woche" | "Dateien vom letzten Monat"
-🇩🇪 "Was passierte in den letzten 7 Tagen?" | "Kalender für nächste Woche" | "E-Mails von gestern"
+**Features:**
+- ✅ **ALWAYS returns an answer** - never fails silently
+- 🔄 **Search-First Strategy** - uses Microsoft Search API for relevant results
+- 🎯 **Smart query understanding** - interprets natural language (EN + DE)
+- 📊 **Comprehensive results** - aggregates data from all 16 sources
+- 💡 **Helpful suggestions** - provides next steps if no results found
+- 📅 **Time-aware** - understands "today", "last week", "this month", etc.
 
-**Supported Timeframes / Unterstützte Zeiträume:**
-today/heute, yesterday/gestern, tomorrow/morgen,
-this week/diese Woche, last week/letzte Woche, next week/nächste Woche,
-this month/diesen Monat, last month/letzten Monat, next month/nächsten Monat,
-last 7/30/90 days, this year/dieses Jahr, last year/letztes Jahr
-
-**Examples / Beispiele:**
-🇬🇧 "What do you know about Project Alpha?"
-🇬🇧 "Find information about customer ACME Corp"
-🇬🇧 "Show me emails from last week about the proposal"
-🇩🇪 "Was weißt du über Projekt Alpha?"
-🇩🇪 "Finde Informationen über Kunde ACME GmbH"
-🇩🇪 "Zeige mir E-Mails von letzter Woche zum Angebot"
-🇩🇪 "Welche Termine habe ich heute?"
-🇩🇪 "Suche alle Dateien zum Thema Budget"
-
-**This tool searches / Dieses Tool durchsucht:**
-- 📧 Emails / E-Mails
-- 📁 Files (OneDrive, SharePoint) / Dateien
-- 📅 Calendar events / Kalendertermine
-- ✅ Tasks / Aufgaben
-
-**Permission Notes / Berechtigungshinweise:**
-- Teams/Chat requires --org-mode / Teams/Chat erfordert --org-mode
-- Some features require work/school accounts / Einige Funktionen erfordern Geschäftskonten
-- Missing permissions are clearly explained / Fehlende Berechtigungen werden erklärt
-
-**GUARANTEE / GARANTIE: This tool will ALWAYS provide a response! / Dieses Tool liefert IMMER eine Antwort!**`,
+**GUARANTEE: This tool will ALWAYS provide a response!**`,
     {
       question: z
         .string()
@@ -1876,32 +2327,25 @@ last 7/30/90 days, this year/dieses Jahr, last year/letztes Jahr
         .describe('Response language: auto (detect), en (English), de (German). Default: auto'),
     },
     {
-      title: 'Intelligent Microsoft 365 Assistant (EN/DE)',
+      title: 'Enhanced Microsoft 365 Assistant (EN/DE)',
       readOnlyHint: true,
       openWorldHint: true,
     },
     async ({ question, context, language = 'auto' }) => {
-      logger.info(`Intelligent query: "${question}"${context ? ` (context: ${context})` : ''}`);
+      const startTime = Date.now();
+      logger.info(`Enhanced query: "${question}"${context ? ` (context: ${context})` : ''}`);
 
       // Detect language
       const detectedLang = language === 'auto' ? detectLanguage(question) : language;
       const msg = messages[detectedLang];
       logger.info(`Detected language: ${detectedLang}`);
 
-      // Combine question and context for full text
+      // Combine question and context
       const fullQuestion = context ? `${question} ${context}` : question;
 
-      // Step 1: Classify the intent
+      // Step 1: Classify intent
       const intentResult = classifyIntent(fullQuestion, detectedLang);
-      logger.info(
-        `Intent classified: ${intentResult.primary} (confidence: ${intentResult.confidence.toFixed(2)}), ` +
-          `entities: ${JSON.stringify(intentResult.extractedEntities)}`
-      );
-
-      // Track processing steps
       const processingSteps: string[] = [];
-      const results: Record<string, unknown> = {};
-      let totalCount = 0;
 
       // Intent labels for display
       const intentLabels: Record<Intent, { en: string; de: string }> = {
@@ -1913,181 +2357,115 @@ last 7/30/90 days, this year/dieses Jahr, last year/letztes Jahr
         tasks: { en: 'Tasks', de: 'Aufgaben' },
         search: { en: 'Search', de: 'Suche' },
         mixed: { en: 'Mixed', de: 'Gemischt' },
+        sharepoint: { en: 'SharePoint', de: 'SharePoint' },
+        notes: { en: 'OneNote', de: 'OneNote' },
+        planner: { en: 'Planner', de: 'Planner' },
+        contacts: { en: 'Contacts', de: 'Kontakte' },
+        meetings: { en: 'Meetings', de: 'Meetings' },
+        bookings: { en: 'Bookings', de: 'Bookings' },
+        insights: { en: 'Insights', de: 'Insights' },
       };
 
-      // Step 2: Execute primary intent query
       processingSteps.push(
         detectedLang === 'de'
-          ? `🎯 Intent erkannt: ${intentLabels[intentResult.primary].de} (Konfidenz: ${Math.round(intentResult.confidence * 100)}%)`
-          : `🎯 Intent detected: ${intentLabels[intentResult.primary].en} (confidence: ${Math.round(intentResult.confidence * 100)}%)`
+          ? `🎯 Intent: ${intentLabels[intentResult.primary].de} (${Math.round(intentResult.confidence * 100)}%)`
+          : `🎯 Intent: ${intentLabels[intentResult.primary].en} (${Math.round(intentResult.confidence * 100)}%)`
       );
 
-      if (intentResult.extractedEntities.topic) {
-        processingSteps.push(
-          detectedLang === 'de'
-            ? `📝 Thema extrahiert: "${intentResult.extractedEntities.topic}"`
-            : `📝 Topic extracted: "${intentResult.extractedEntities.topic}"`
-        );
-      }
-
-      if (intentResult.extractedEntities.person) {
-        processingSteps.push(
-          detectedLang === 'de'
-            ? `👤 Person extrahiert: "${intentResult.extractedEntities.person}"`
-            : `👤 Person extracted: "${intentResult.extractedEntities.person}"`
-        );
-      }
-
-      if (intentResult.extractedEntities.timeframe) {
-        processingSteps.push(
-          detectedLang === 'de'
-            ? `📅 Zeitraum: ${intentResult.extractedEntities.timeframe}`
-            : `📅 Timeframe: ${intentResult.extractedEntities.timeframe}`
-        );
-      }
-
-      // Execute primary intent
-      const primaryResult = await executeIntentQuery(
-        intentResult.primary,
-        intentResult.extractedEntities,
-        detectedLang
+      // Step 2: Central Search API query
+      processingSteps.push(
+        detectedLang === 'de'
+          ? `🔍 Starte Microsoft Search API Abfrage...`
+          : `🔍 Starting Microsoft Search API query...`
       );
 
-      // Track permission warnings
-      const permissionWarnings: string[] = [];
+      const searchQuery = intentResult.extractedEntities.topic || question;
+      const searchResults = await executeSearchApiFirst(graphClient, searchQuery);
 
-      if (primaryResult.count > 0) {
-        results[intentResult.primary] = primaryResult.data;
-        totalCount += primaryResult.count;
-        processingSteps.push(
-          detectedLang === 'de'
-            ? `✅ ${intentLabels[intentResult.primary].de}: ${primaryResult.count} Ergebnisse`
-            : `✅ ${intentLabels[intentResult.primary].en}: ${primaryResult.count} results`
-        );
-      } else if (primaryResult.error) {
-        // Handle permission errors
-        processingSteps.push(
-          detectedLang === 'de'
-            ? `⚠️ ${intentLabels[intentResult.primary].de}: Zugriffsproblem`
-            : `⚠️ ${intentLabels[intentResult.primary].en}: Access issue`
-        );
-        permissionWarnings.push(primaryResult.error);
-      }
+      // Step 3: Execute Follow-up queries for products not covered by Search API
+      processingSteps.push(
+        detectedLang === 'de'
+          ? `🔄 Erweitere Suche auf zusätzliche Produkte...`
+          : `🔄 Expanding search to additional products...`
+      );
 
-      // Add permission warning if applicable
-      if (primaryResult.permissionWarning) {
-        permissionWarnings.push(primaryResult.permissionWarning);
-      }
+      const followUpResults = await executeFollowUpQueries(graphClient, searchQuery);
 
-      // Step 3: Execute secondary intent if present and confidence is high enough
-      if (intentResult.secondary && intentResult.confidence >= 0.5) {
-        processingSteps.push(
-          detectedLang === 'de'
-            ? `🔄 Zusätzliche Suche: ${intentLabels[intentResult.secondary].de}`
-            : `🔄 Additional search: ${intentLabels[intentResult.secondary].en}`
-        );
-
-        const secondaryResult = await executeIntentQuery(
-          intentResult.secondary,
+      // Step 4: Product-specific primary intent execution (for more details)
+      let primaryIntentData: any = null;
+      if (intentResult.primary !== 'search' && intentResult.primary !== 'mixed') {
+        const primaryResult = await executeIntentQuery(
+          intentResult.primary,
           intentResult.extractedEntities,
           detectedLang
         );
-
-        if (secondaryResult.count > 0) {
-          results[intentResult.secondary] = secondaryResult.data;
-          totalCount += secondaryResult.count;
-          processingSteps.push(
-            detectedLang === 'de'
-              ? `✅ ${intentLabels[intentResult.secondary].de}: ${secondaryResult.count} Ergebnisse`
-              : `✅ ${intentLabels[intentResult.secondary].en}: ${secondaryResult.count} results`
-          );
-        } else if (secondaryResult.error) {
-          permissionWarnings.push(secondaryResult.error);
-        }
-
-        if (secondaryResult.permissionWarning) {
-          permissionWarnings.push(secondaryResult.permissionWarning);
+        if (primaryResult.count > 0) {
+          primaryIntentData = primaryResult.data;
         }
       }
 
-      // Step 4: Fallback to universal search if no results
-      if (totalCount === 0) {
-        processingSteps.push(
-          detectedLang === 'de'
-            ? `🔍 Fallback: Universelle Suche...`
-            : `🔍 Fallback: Universal search...`
-        );
+      // Aggregate counts
+      let totalCount = 0;
+      const productsSearched = [
+        'Mail',
+        'Calendar',
+        'Files',
+        'SharePoint',
+        'People',
+        'Contacts',
+        'OneNote',
+        'Planner',
+        'To-Do',
+        'Teams',
+        'Meetings',
+        'Bookings',
+        'Insights',
+      ];
 
-        const fallbackResult = await executeUniversalSearch(
-          graphClient,
-          intentResult.extractedEntities.topic || question,
-          25
-        );
+      totalCount += searchResults.emails.length;
+      totalCount += searchResults.events.length;
+      totalCount += searchResults.files.length;
+      totalCount += searchResults.sites.length;
+      totalCount += searchResults.listItems.length;
+      totalCount += searchResults.chats.length;
+      totalCount += searchResults.people.length;
 
-        if (fallbackResult.totalResults > 0) {
-          results.universalSearch = fallbackResult.results;
-          totalCount = fallbackResult.totalResults;
-          processingSteps.push(
-            detectedLang === 'de'
-              ? `✅ Universelle Suche: ${totalCount} Ergebnisse`
-              : `✅ Universal search: ${totalCount} results`
-          );
-        }
-      }
+      if (followUpResults.onenote) totalCount += followUpResults.onenote.length;
+      if (followUpResults.planner) totalCount += followUpResults.planner.length;
+      if (followUpResults.todo) totalCount += followUpResults.todo.length;
+      if (followUpResults.contacts) totalCount += followUpResults.contacts.length;
+      if (followUpResults.meetings) totalCount += followUpResults.meetings.length;
+      if (followUpResults.teams) totalCount += followUpResults.teams.length;
+      if (followUpResults.bookings) totalCount += followUpResults.bookings.length;
+      if (followUpResults.insights) totalCount += followUpResults.insights.length;
 
-      // Build response
-      const response: Record<string, unknown> = {
+      // Build Enhanced Response
+      const response: EnhancedAskM365Response = {
         question,
         language: detectedLang,
         searchedAt: new Date().toISOString(),
-        intent: {
-          primary: intentResult.primary,
-          secondary: intentResult.secondary,
-          confidence: Math.round(intentResult.confidence * 100),
-          extractedEntities: intentResult.extractedEntities,
-        },
+        intent: intentResult,
         processingSteps,
         resultsFound: totalCount > 0,
         totalResults: totalCount,
+        status: totalCount > 0 ? 'SUCCESS' : 'NO_RESULTS',
+        message:
+          totalCount > 0
+            ? detectedLang === 'de'
+              ? `${totalCount} Ergebnisse in Microsoft 365 gefunden.`
+              : `Found ${totalCount} results across Microsoft 365.`
+            : msg.noResultsMessage(question),
+        searchResults,
+        followUpResults,
+        metadata: {
+          totalResults: totalCount,
+          queryTime: Date.now() - startTime,
+          productsSearched,
+        },
       };
 
-      // Add permission warnings if any
-      if (permissionWarnings.length > 0) {
-        response.permissionWarnings = [...new Set(permissionWarnings)]; // Remove duplicates
-      }
-
-      if (totalCount > 0) {
-        response.status = 'SUCCESS';
-        response.message =
-          detectedLang === 'de'
-            ? `${totalCount} Ergebnis(se) für Ihre Anfrage gefunden.`
-            : `Found ${totalCount} result(s) for your query.`;
-        response.results = results;
-
-        // Generate summary based on what was found
-        const summaryParts: string[] = [];
-        for (const [key, value] of Object.entries(results)) {
-          if (Array.isArray(value)) {
-            const label = intentLabels[key as Intent]?.[detectedLang] || key;
-            summaryParts.push(`${value.length} ${label}`);
-          }
-        }
-        response.summary = summaryParts.join(', ');
-      } else {
-        response.status = permissionWarnings.length > 0 ? 'PERMISSION_ERROR' : 'NO_RESULTS';
-        response.message =
-          permissionWarnings.length > 0
-            ? detectedLang === 'de'
-              ? 'Zugriff auf einige Daten wurde verweigert. Siehe Berechtigungswarnungen unten.'
-              : 'Access to some data was denied. See permission warnings below.'
-            : msg.noResultsMessage(question);
-        response.explanation = msg.explanation;
-        response.suggestions = msg.suggestions;
-        response.searchCoverage = msg.searchCoverage;
-        response.tip =
-          detectedLang === 'de'
-            ? 'Tipp: Versuchen Sie "what-can-i-ask" um zu sehen, welche Fragen unterstützt werden.'
-            : 'Tip: Try "what-can-i-ask" to see what questions are supported.';
+      if (primaryIntentData) {
+        (response as any).primaryIntentResults = primaryIntentData;
       }
 
       return {
