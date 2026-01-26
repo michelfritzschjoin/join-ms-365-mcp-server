@@ -25,6 +25,7 @@ interface GraphRequestOptions {
   excludeResponse?: boolean;
   accessToken?: string;
   refreshToken?: string;
+  queryParams?: Record<string, string>;
 
   [key: string]: unknown;
 }
@@ -318,7 +319,15 @@ class GraphClient {
     options: GraphRequestOptions
   ): Promise<Response> {
     const cloudEndpoints = getCloudEndpoints(this.secrets.cloudType);
-    const url = `${cloudEndpoints.graphApi}/v1.0${endpoint}`;
+    let url = `${cloudEndpoints.graphApi}/v1.0${endpoint}`;
+
+    // Append queryParams to URL if provided
+    if (options.queryParams && Object.keys(options.queryParams).length > 0) {
+      const queryString = Object.entries(options.queryParams)
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+        .join('&');
+      url = `${url}${url.includes('?') ? '&' : '?'}${queryString}`;
+    }
 
     const headers: Record<string, string> = {
       Authorization: `Bearer ${accessToken}`,
