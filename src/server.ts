@@ -21,6 +21,67 @@ import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext } from './request-context.js';
+import { randomUUID } from 'crypto';
+
+/**
+ * Extract chat ID from request headers
+ * Checks multiple possible header names in priority order:
+ * 1. X-OpenWebUI-Chat-ID (OpenWebUI specific)
+ * 2. X-Chat-ID (generic)
+ * 3. X-Conversation-ID (alternative)
+ * 4. X-Session-ID (fallback)
+ * 5. Generate UUID if none provided
+ *
+ * @param req - Express request object
+ * @returns Chat ID string
+ */
+function extractChatId(req: Request): string {
+  const chatId =
+    req.get('X-OpenWebUI-Chat-ID') ||
+    req.get('X-Chat-ID') ||
+    req.get('X-Conversation-ID') ||
+    req.get('X-Session-ID') ||
+    req.get('x-openwebui-chat-id') ||
+    req.get('x-chat-id') ||
+    req.get('x-conversation-id') ||
+    req.get('x-session-id');
+
+  if (chatId) {
+    return chatId;
+  }
+
+  // Generate a UUID for this request if no chat ID provided
+  // This ensures each "anonymous" session still gets tracked
+  return `anon-${randomUUID()}`;
+}
+
+/**
+ * Extract user ID from Microsoft auth context or token
+ * @param req - Express request with microsoftAuth
+ * @returns User ID string or undefined
+ */
+function extractUserId(
+  req: Request & { microsoftAuth?: { accessToken: string; refreshToken?: string } }
+): string | undefined {
+  if (!req.microsoftAuth?.accessToken) {
+    return undefined;
+  }
+
+  // Try to extract user ID from JWT token (without full validation - just decoding)
+  try {
+    const token = req.microsoftAuth.accessToken;
+    const parts = token.split('.');
+    if (parts.length === 3) {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+      // Microsoft tokens typically have 'oid' (object ID) or 'sub' (subject)
+      return payload.oid || payload.sub || payload.unique_name;
+    }
+  } catch {
+    // Token parsing failed, return undefined
+  }
+
+  return undefined;
+}
 
 /**
  * Parse HTTP option into host and port components.
@@ -1455,16 +1516,25 @@ class MicrosoftGraphServer {
           };
 
           try {
+            // Extract chat ID and user ID for memory context
+            const chatId = extractChatId(req);
+            const userId = extractUserId(req);
+
+            logger.debug('MCP GET request context', { chatId, userId: userId?.substring(0, 8) });
+
             if (req.microsoftAuth) {
               await requestContext.run(
                 {
                   accessToken: req.microsoftAuth.accessToken,
                   refreshToken: req.microsoftAuth.refreshToken,
+                  chatId,
+                  userId,
                 },
                 handler
               );
             } else {
-              await handler();
+              // Even without auth, provide chat context
+              await requestContext.run({ accessToken: '', chatId, userId }, handler);
             }
           } catch (error) {
             logger.error('Error handling MCP GET request:', error);
@@ -1601,16 +1671,25 @@ class MicrosoftGraphServer {
           };
 
           try {
+            // Extract chat ID and user ID for memory context
+            const chatId = extractChatId(req);
+            const userId = extractUserId(req);
+
+            logger.debug('MCP POST request context', { chatId, userId: userId?.substring(0, 8) });
+
             if (req.microsoftAuth) {
               await requestContext.run(
                 {
                   accessToken: req.microsoftAuth.accessToken,
                   refreshToken: req.microsoftAuth.refreshToken,
+                  chatId,
+                  userId,
                 },
                 handler
               );
             } else {
-              await handler();
+              // Even without auth, provide chat context
+              await requestContext.run({ accessToken: '', chatId, userId }, handler);
             }
           } catch (error) {
             logger.error('Error handling MCP POST request:', error);

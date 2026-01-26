@@ -119,9 +119,35 @@ async function executeGraphTool(
 
     // Apply default $select for detailed content - no date filter by default
     // Date filters are only applied when user explicitly specifies a time range
+    const isCalendarTool = tool.path.includes('/events') || tool.path.includes('calendar');
+
+    // Apply default $top for calendar events to get more results (Microsoft Graph defaults to only 10)
+    if (isCalendarTool && !params['$top'] && !params['top']) {
+      params['$top'] = 100;
+      logger.info('Applied default $top=100 for calendar events (MS Graph default is only 10)');
+    }
+
+    // For calendarView, add default date range if not provided (required parameters)
+    if (tool.path.includes('/calendarView') || tool.alias === 'get-calendar-view') {
+      if (!params['startDateTime']) {
+        // Default to 30 days in the past
+        const startDate = new Date();
+        startDate.setDate(startDate.getDate() - 30);
+        params['startDateTime'] = startDate.toISOString();
+        logger.info('Applied default startDateTime (30 days ago) for calendarView');
+      }
+      if (!params['endDateTime']) {
+        // Default to 90 days in the future
+        const endDate = new Date();
+        endDate.setDate(endDate.getDate() + 90);
+        params['endDateTime'] = endDate.toISOString();
+        logger.info('Applied default endDateTime (90 days future) for calendarView');
+      }
+    }
+
     if (!params['$select']) {
       // Calendar events - return detailed content
-      if (tool.path.includes('/events') || tool.path.includes('calendar')) {
+      if (isCalendarTool) {
         params['$select'] = [
           'id',
           'subject',

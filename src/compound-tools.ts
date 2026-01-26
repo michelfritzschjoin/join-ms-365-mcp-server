@@ -13,6 +13,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import GraphClient from './graph-client.js';
 import logger from './logger.js';
+import { getChatMemoryStore, isChatMemoryEnabled, type EntityType } from './chat-memory.js';
+import { getChatId, getUserId } from './request-context.js';
 
 /**
  * Build query string for Microsoft Graph API requests
@@ -2505,13 +2507,43 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
       const startTime = Date.now();
       logger.info(`Enhanced query: "${question}"${context ? ` (context: ${context})` : ''}`);
 
+      // Get chat memory context if enabled
+      const chatId = getChatId();
+      const userId = getUserId();
+      let memoryContext: string | null = null;
+      let memoryStore: ReturnType<typeof getChatMemoryStore> | null = null;
+
+      if (isChatMemoryEnabled() && chatId) {
+        memoryStore = getChatMemoryStore();
+        memoryContext = memoryStore.buildContextForQuery(chatId);
+
+        // Apply stored preferences if available
+        const prefs = memoryStore.getPreferences(chatId);
+        if (prefs?.language && language === 'auto') {
+          language = prefs.language;
+        }
+
+        logger.debug('Chat memory context available', {
+          chatId: chatId.substring(0, 8),
+          hasContext: !!memoryContext,
+          prefsApplied: !!prefs?.language,
+        });
+      }
+
       // Detect language
       const detectedLang = language === 'auto' ? detectLanguage(question) : language;
       const msg = messages[detectedLang];
       logger.info(`Detected language: ${detectedLang}`);
 
-      // Combine question and context
-      const fullQuestion = context ? `${question} ${context}` : question;
+      // Combine question, context, and memory context
+      let fullQuestion = context ? `${question} ${context}` : question;
+
+      // Enhance query with memory context if available
+      if (memoryContext) {
+        // Add memory context as additional context for better search
+        fullQuestion = `${fullQuestion}\n\n[Previous conversation context: ${memoryContext}]`;
+        logger.debug('Query enhanced with memory context');
+      }
 
       // Step 1: Classify intent
       const intentResult = classifyIntent(fullQuestion, detectedLang);
@@ -2791,6 +2823,73 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
 
       if (primaryIntentData) {
         (response as any).primaryIntentResults = primaryIntentData;
+      }
+
+      // Store conversation in chat memory if enabled
+      if (isChatMemoryEnabled() && chatId && memoryStore) {
+        try {
+          // Store the question and summarized answer
+          const answerSummary =
+            totalCount > 0
+              ? `Found ${totalCount} results: ${summary || 'Various Microsoft 365 items'}`
+              : 'No results found';
+
+          memoryStore.addConversation(chatId, question, answerSummary, {
+            toolUsed: 'ask-microsoft-365',
+            resultCount: totalCount,
+            sources: productsSearched,
+            userId,
+          });
+
+          // Extract and store mentioned entities
+          const entities: Partial<Record<EntityType, string[]>> = {};
+
+          // Extract people from results
+          if (searchResults.people.length > 0) {
+            entities.people = searchResults.people
+              .map((p) => p.name || p.resource?.displayName)
+              .filter((n): n is string => !!n)
+              .slice(0, 10);
+          }
+
+          // Extract files from results
+          if (searchResults.files.length > 0) {
+            entities.files = searchResults.files
+              .map((f) => f.name || f.resource?.name)
+              .filter((n): n is string => !!n)
+              .slice(0, 10);
+          }
+
+          // Extract events from results
+          if (searchResults.events.length > 0) {
+            entities.events = searchResults.events
+              .map((e) => e.resource?.subject || e.name)
+              .filter((n): n is string => !!n)
+              .slice(0, 10);
+          }
+
+          // Extract topics from the question
+          if (intentResult.extractedEntities.topic) {
+            entities.topics = [intentResult.extractedEntities.topic];
+          }
+
+          if (Object.keys(entities).length > 0) {
+            memoryStore.addEntities(chatId, entities, userId);
+          }
+
+          // Store language preference if user explicitly set it
+          if (language !== 'auto') {
+            memoryStore.setPreference(chatId, 'language', detectedLang, userId);
+          }
+
+          logger.debug('Stored conversation in chat memory', {
+            chatId: chatId.substring(0, 8),
+            entitiesStored: Object.keys(entities).length,
+          });
+        } catch (memoryError) {
+          // Don't fail the request if memory storage fails
+          logger.warn('Failed to store in chat memory', { error: String(memoryError) });
+        }
       }
 
       return {
@@ -8626,6 +8725,426 @@ Use this for "Who do I work with most?", "Map my professional network", or "Anal
           },
         ],
       };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // CHAT MEMORY MANAGEMENT TOOLS
+  // ==========================================================================
+
+  /**
+   * Chat Memory Status - Shows current chat memory contents
+   */
+  server.tool(
+    'chat-memory-status',
+    `🧠 **CHAT MEMORY STATUS** - View your current conversation memory
+
+This tool shows you what the assistant remembers about your current chat session:
+- Recent conversation history
+- Mentioned people, files, events, and topics
+- Your preferences for this chat
+
+Use this to understand what context the assistant has from previous messages.
+
+Note: Chat memory is automatically cleared after 72 hours of inactivity.`,
+    {},
+    {
+      title: 'Chat Memory Status',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async () => {
+      const chatId = getChatId();
+
+      if (!isChatMemoryEnabled()) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'DISABLED',
+                  message:
+                    'Chat memory is disabled. Set MS365_MCP_CHAT_MEMORY_ENABLED=true to enable.',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      if (!chatId) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'NO_CHAT_ID',
+                  message:
+                    'No chat ID detected. Ensure your client sends X-Chat-ID or X-OpenWebUI-Chat-ID header.',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      const memoryStore = getChatMemoryStore();
+      const summary = memoryStore.getMemorySummary(chatId);
+      const serialized = memoryStore.serializeMemory(chatId);
+      const stats = memoryStore.getStats();
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                status: 'SUCCESS',
+                chatId: chatId.substring(0, 8) + '...',
+                summary,
+                memory: serialized,
+                globalStats: {
+                  activeSessions: stats.activeSessions,
+                  totalConversations: stats.totalConversations,
+                  memoryUsage: stats.memoryUsageEstimate,
+                },
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  /**
+   * Chat Memory Clear - Clears memory for current chat
+   */
+  server.tool(
+    'chat-memory-clear',
+    `🗑️ **CLEAR CHAT MEMORY** - Reset your conversation memory
+
+This tool clears all memory for your current chat session:
+- Removes conversation history
+- Clears mentioned entities (people, files, events, topics)
+- Resets preferences
+
+Use this when you want to start fresh without previous context.`,
+    {
+      confirm: z
+        .boolean()
+        .optional()
+        .describe(
+          'Set to true to confirm clearing the memory. Without confirmation, shows what would be cleared.'
+        ),
+    },
+    {
+      title: 'Clear Chat Memory',
+      readOnlyHint: false,
+      openWorldHint: false,
+    },
+    async ({ confirm = false }) => {
+      const chatId = getChatId();
+
+      if (!isChatMemoryEnabled()) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'DISABLED',
+                  message: 'Chat memory is disabled.',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      if (!chatId) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'NO_CHAT_ID',
+                  message: 'No chat ID detected.',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      const memoryStore = getChatMemoryStore();
+
+      if (!confirm) {
+        // Preview what would be cleared
+        const serialized = memoryStore.serializeMemory(chatId);
+        if (!serialized) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(
+                  {
+                    status: 'NO_MEMORY',
+                    message: 'No memory exists for this chat session.',
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'PREVIEW',
+                  message: 'This is what will be cleared. Call with confirm=true to proceed.',
+                  memory: {
+                    conversations: serialized.conversationHistory.length,
+                    entities: {
+                      people: serialized.mentionedEntities.people.length,
+                      files: serialized.mentionedEntities.files.length,
+                      events: serialized.mentionedEntities.events.length,
+                      topics: serialized.mentionedEntities.topics.length,
+                    },
+                    hasPreferences: Object.keys(serialized.preferences).length > 0,
+                  },
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      // Actually clear the memory
+      const cleared = memoryStore.clearMemory(chatId);
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                status: cleared ? 'CLEARED' : 'NOT_FOUND',
+                message: cleared
+                  ? 'Chat memory has been cleared successfully.'
+                  : 'No memory found to clear.',
+                chatId: chatId.substring(0, 8) + '...',
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  /**
+   * Chat Memory Set Preference - Set a preference for current chat
+   */
+  server.tool(
+    'chat-memory-set-preference',
+    `⚙️ **SET CHAT PREFERENCE** - Configure preferences for this chat session
+
+This tool allows you to set preferences that persist throughout your chat session:
+- **language**: Set preferred response language (en, de, or auto)
+- **resultLimit**: Set default number of results to return
+- **preferredSources**: Set which Microsoft 365 products to search first
+
+Preferences are automatically applied to subsequent queries in this chat.`,
+    {
+      preference: z
+        .enum(['language', 'resultLimit', 'preferredSources'])
+        .describe('The preference to set'),
+      value: z
+        .string()
+        .describe(
+          'The value for the preference. For language: en|de|auto. For resultLimit: number. For preferredSources: comma-separated list (email,calendar,files,teams)'
+        ),
+    },
+    {
+      title: 'Set Chat Preference',
+      readOnlyHint: false,
+      openWorldHint: false,
+    },
+    async ({ preference, value }) => {
+      const chatId = getChatId();
+      const userId = getUserId();
+
+      if (!isChatMemoryEnabled()) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'DISABLED',
+                  message: 'Chat memory is disabled.',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      if (!chatId) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'NO_CHAT_ID',
+                  message: 'No chat ID detected.',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      const memoryStore = getChatMemoryStore();
+
+      try {
+        switch (preference) {
+          case 'language': {
+            if (!['en', 'de', 'auto'].includes(value)) {
+              return {
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: JSON.stringify(
+                      {
+                        status: 'ERROR',
+                        message: 'Invalid language value. Use: en, de, or auto',
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            }
+            memoryStore.setPreference(chatId, 'language', value as 'en' | 'de' | 'auto', userId);
+            break;
+          }
+          case 'resultLimit': {
+            const limit = parseInt(value, 10);
+            if (isNaN(limit) || limit < 1 || limit > 100) {
+              return {
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: JSON.stringify(
+                      {
+                        status: 'ERROR',
+                        message: 'Invalid resultLimit. Use a number between 1 and 100.',
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            }
+            memoryStore.setPreference(chatId, 'resultLimit', limit, userId);
+            break;
+          }
+          case 'preferredSources': {
+            const sources = value
+              .split(',')
+              .map((s) => s.trim().toLowerCase())
+              .filter((s) => s.length > 0);
+            if (sources.length === 0) {
+              return {
+                content: [
+                  {
+                    type: 'text' as const,
+                    text: JSON.stringify(
+                      {
+                        status: 'ERROR',
+                        message:
+                          'Invalid preferredSources. Provide comma-separated values like: email,calendar,files',
+                      },
+                      null,
+                      2
+                    ),
+                  },
+                ],
+              };
+            }
+            memoryStore.setPreference(chatId, 'preferredSources', sources, userId);
+            break;
+          }
+        }
+
+        const prefs = memoryStore.getPreferences(chatId);
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'SUCCESS',
+                  message: `Preference '${preference}' has been set to '${value}'`,
+                  currentPreferences: prefs,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  status: 'ERROR',
+                  message: `Failed to set preference: ${String(error)}`,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
     }
   );
   registeredCount++;

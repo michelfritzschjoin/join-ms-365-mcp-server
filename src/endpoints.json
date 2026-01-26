@@ -113,7 +113,8 @@
     "method": "get",
     "toolName": "list-calendar-events",
     "scopes": ["Calendars.Read"],
-    "supportsTimezone": true
+    "supportsTimezone": true,
+    "llmTip": "IMPORTANT: This shows only events from the PRIMARY calendar. For ALL events including recurring instances and shared calendars, use 'get-calendar-view' instead. Default returns 100 events. Use $top for more, or fetchAllPages=true for all. Use $orderby='start/dateTime' to sort by date."
   },
   {
     "pathPattern": "/me/events/{event-id}",
@@ -181,7 +182,8 @@
     "method": "get",
     "toolName": "get-calendar-view",
     "scopes": ["Calendars.Read"],
-    "supportsTimezone": true
+    "supportsTimezone": true,
+    "llmTip": "PREFERRED for viewing all events! Shows ALL events (including recurring instances and shared calendars) within a date range. Requires startDateTime and endDateTime (defaults: 30 days past to 90 days future). Returns events where user is organizer OR attendee. Use $top=200 or fetchAllPages=true for large calendars."
   },
   {
     "pathPattern": "/me/calendars",
