@@ -3784,11 +3784,13 @@ This is the ultimate tool for "Tell me everything about my interactions with [pe
 - The user asks a general question about any topic, person, project, or company
 - No other tool seems appropriate for the request
 
-This tool searches across ALL Microsoft 365 products simultaneously:
+This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 products simultaneously:
 - 📧 Emails (subject, body, attachments)
 - 💬 Teams messages and chats
 - 📁 Files (OneDrive, SharePoint)
 - 📅 Calendar events and meetings
+- 👤 People and contacts
+- 📋 Lists and SharePoint content
 
 **Examples of when to use this tool:**
 - "What do you know about [any topic]?" → Use search-everything
@@ -3806,75 +3808,105 @@ This is the go-to tool for any general query or when no specific tool matches th
         .describe(
           'The search query - can be any topic, person, company, project, keyword, or phrase the user is asking about'
         ),
-      limit: z.number().optional().describe('Maximum results per category (default: 10)'),
+      limit: z.number().optional().describe('Maximum results per category (default: 25)'),
     },
     {
       title: 'Universal Search (Fallback)',
       readOnlyHint: true,
       openWorldHint: true,
     },
-    async ({ query, limit = 10 }) => {
-      logger.info(`Searching everything for: ${query}`);
+    async ({ query, limit = 25 }) => {
+      logger.info(`Searching everything for: "${query}" using Microsoft Search API`);
 
       const results: Record<string, unknown> = {
         query,
         searchedAt: new Date().toISOString(),
       };
 
-      // Search emails
-      try {
-        const emailResponse = await graphClient.makeRequest('/me/messages', {
-          method: 'GET',
-          queryParams: {
-            $search: `"${query}"`,
-            $top: String(limit),
-            $select: 'id,subject,bodyPreview,receivedDateTime,from',
-          },
-        });
+      // Use Microsoft Search API to search ALL entity types at once
+      // This is the primary and most comprehensive search method
+      const entityTypes = [
+        'message', // Emails
+        'event', // Calendar events
+        'driveItem', // Files
+        'site', // SharePoint sites
+        'list', // SharePoint lists
+        'listItem', // SharePoint list items
+        'chatMessage', // Teams messages
+        'person', // People
+      ];
 
-        if (
-          emailResponse &&
-          typeof emailResponse === 'object' &&
-          'value' in emailResponse &&
-          Array.isArray(emailResponse.value)
-        ) {
-          results.emails = {
-            count: emailResponse.value.length,
-            items: (emailResponse.value as GraphEmail[]).map((e) => ({
-              subject: e.subject,
-              from: e.from?.emailAddress?.address,
-              date: e.receivedDateTime,
-              preview: e.bodyPreview?.substring(0, 100),
-            })),
-          };
-        }
-      } catch (error) {
-        results.emails = { error: `Search failed: ${error}` };
-      }
+      // Structured results by category
+      const emails: Array<{
+        subject?: string;
+        from?: string;
+        date?: string;
+        preview?: string;
+        webUrl?: string;
+        rank?: number;
+      }> = [];
+      const events: Array<{
+        subject?: string;
+        start?: string;
+        end?: string;
+        organizer?: string;
+        webUrl?: string;
+        rank?: number;
+      }> = [];
+      const files: Array<{
+        name?: string;
+        webUrl?: string;
+        lastModified?: string;
+        type?: string;
+        rank?: number;
+      }> = [];
+      const sites: Array<{
+        name?: string;
+        webUrl?: string;
+        description?: string;
+        rank?: number;
+      }> = [];
+      const chats: Array<{
+        content?: string;
+        from?: string;
+        date?: string;
+        webUrl?: string;
+        rank?: number;
+      }> = [];
+      const people: Array<{
+        name?: string;
+        email?: string;
+        jobTitle?: string;
+        department?: string;
+        rank?: number;
+      }> = [];
 
-      // Search files using Microsoft Search API
       try {
+        // Microsoft Search API - NO date filter for maximum results
         const searchResponse = await graphClient.makeRequest('/search/query', {
           method: 'POST',
           body: JSON.stringify({
             requests: [
               {
-                entityTypes: ['driveItem', 'listItem', 'site'],
+                entityTypes,
                 query: { queryString: query },
                 from: 0,
-                size: limit,
+                size: Math.min(limit * 2, 100), // Fetch more to filter by relevance
               },
             ],
           }),
         });
 
         if (searchResponse && typeof searchResponse === 'object' && 'value' in searchResponse) {
-          const items: Array<{ name?: string; webUrl?: string; type?: string }> = [];
-          const searchValues = searchResponse.value as Array<{
+          const searchValues = (searchResponse as { value: unknown[] }).value as Array<{
             hitsContainers?: Array<{
               hits?: Array<{
-                resource?: { name?: string; webUrl?: string; '@odata.type'?: string };
+                rank?: number;
+                summary?: string;
+                resource?: Record<string, unknown>;
               }>;
+              total?: number;
+              moreResultsAvailable?: boolean;
             }>;
           }>;
 
@@ -3884,74 +3916,186 @@ This is the go-to tool for any general query or when no specific tool matches th
                 if (hitsContainer.hits) {
                   for (const hit of hitsContainer.hits) {
                     if (hit.resource) {
-                      items.push({
-                        name: hit.resource.name,
-                        webUrl: hit.resource.webUrl,
-                        type: hit.resource['@odata.type'],
-                      });
+                      const type = (hit.resource['@odata.type'] as string) || '';
+                      const rank = hit.rank || 0;
+
+                      // Categorize by type
+                      if (type.includes('message') && !type.includes('chat')) {
+                        emails.push({
+                          subject: hit.resource.subject as string,
+                          from: (hit.resource.from as { emailAddress?: { address?: string } })
+                            ?.emailAddress?.address,
+                          date: hit.resource.receivedDateTime as string,
+                          preview: (hit.resource.bodyPreview as string)?.substring(0, 150),
+                          webUrl: hit.resource.webLink as string,
+                          rank,
+                        });
+                      } else if (type.includes('event')) {
+                        events.push({
+                          subject: hit.resource.subject as string,
+                          start: (hit.resource.start as { dateTime?: string })?.dateTime,
+                          end: (hit.resource.end as { dateTime?: string })?.dateTime,
+                          organizer: (
+                            hit.resource.organizer as { emailAddress?: { name?: string } }
+                          )?.emailAddress?.name,
+                          webUrl: hit.resource.webLink as string,
+                          rank,
+                        });
+                      } else if (type.includes('driveItem')) {
+                        files.push({
+                          name: hit.resource.name as string,
+                          webUrl: hit.resource.webUrl as string,
+                          lastModified: hit.resource.lastModifiedDateTime as string,
+                          type: 'file',
+                          rank,
+                        });
+                      } else if (type.includes('site')) {
+                        sites.push({
+                          name:
+                            (hit.resource.displayName as string) || (hit.resource.name as string),
+                          webUrl: hit.resource.webUrl as string,
+                          description: hit.resource.description as string,
+                          rank,
+                        });
+                      } else if (type.includes('listItem')) {
+                        files.push({
+                          name:
+                            (hit.resource.name as string) ||
+                            ((hit.resource.fields as { Title?: string })?.Title as string),
+                          webUrl: hit.resource.webUrl as string,
+                          lastModified: hit.resource.lastModifiedDateTime as string,
+                          type: 'listItem',
+                          rank,
+                        });
+                      } else if (type.includes('chatMessage')) {
+                        chats.push({
+                          content: (hit.resource.body as { content?: string })?.content?.substring(
+                            0,
+                            200
+                          ),
+                          from: (hit.resource.from as { user?: { displayName?: string } })?.user
+                            ?.displayName,
+                          date: hit.resource.createdDateTime as string,
+                          webUrl: hit.resource.webUrl as string,
+                          rank,
+                        });
+                      } else if (type.includes('person')) {
+                        people.push({
+                          name: hit.resource.displayName as string,
+                          email: (hit.resource.emailAddresses as Array<{ address?: string }>)?.[0]
+                            ?.address,
+                          jobTitle: hit.resource.jobTitle as string,
+                          department: hit.resource.department as string,
+                          rank,
+                        });
+                      }
                     }
                   }
                 }
               }
             }
           }
-
-          results.files = {
-            count: items.length,
-            items: items.slice(0, limit),
-          };
         }
       } catch (error) {
-        results.files = { error: `Search failed: ${error}` };
+        logger.error(`Microsoft Search API failed: ${error}`);
+        results.searchError = `Search API failed: ${error}`;
       }
 
-      // Search calendar events
-      // Note: $filter with contains() on calendarView often causes 500 errors
-      // Use client-side filtering instead for reliability
+      // Also search people via /me/people for better person results
       try {
-        const now = new Date();
-        const pastDate = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
-        const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
-
-        // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
-        const queryParams: Record<string, string> = {
-          startDateTime: pastDate.toISOString(),
-          endDateTime: futureDate.toISOString(),
-          $top: '100', // Fetch more to filter client-side
-          $select: 'id,subject,start,end,location',
-          $orderby: 'start/dateTime desc',
-        };
-
-        const calendarResponse = await graphClient.makeRequest(
-          `/me/calendarView?${buildGraphQueryString(queryParams)}`,
-          {
-            method: 'GET',
-          }
-        );
+        const peopleResponse = await graphClient.makeRequest('/me/people', {
+          method: 'GET',
+          queryParams: {
+            $search: `"${query}"`,
+            $top: '10',
+          },
+        });
 
         if (
-          calendarResponse &&
-          typeof calendarResponse === 'object' &&
-          'value' in calendarResponse &&
-          Array.isArray(calendarResponse.value)
+          peopleResponse &&
+          typeof peopleResponse === 'object' &&
+          'value' in peopleResponse &&
+          Array.isArray((peopleResponse as { value: unknown[] }).value)
         ) {
-          // Client-side filtering for reliability (avoids 500 errors from OData contains)
-          const queryLower = query.toLowerCase();
-          const filteredEvents = (calendarResponse.value as GraphEvent[]).filter((e) =>
-            e.subject?.toLowerCase().includes(queryLower)
-          );
-          results.events = {
-            count: filteredEvents.length,
-            items: filteredEvents.slice(0, limit).map((e) => ({
-              subject: e.subject,
-              start: e.start?.dateTime,
-              location: e.location?.displayName,
-            })),
-          };
+          for (const p of (peopleResponse as { value: unknown[] }).value) {
+            const person = p as {
+              displayName?: string;
+              emailAddresses?: Array<{ address?: string }>;
+              jobTitle?: string;
+              department?: string;
+            };
+            // Avoid duplicates
+            const exists = people.some(
+              (existing) =>
+                existing.email === person.emailAddresses?.[0]?.address ||
+                existing.name === person.displayName
+            );
+            if (!exists) {
+              people.push({
+                name: person.displayName,
+                email: person.emailAddresses?.[0]?.address,
+                jobTitle: person.jobTitle,
+                department: person.department,
+                rank: 50, // Default rank for /me/people results
+              });
+            }
+          }
         }
       } catch (error) {
-        logger.warn(`Calendar search failed: ${error}`);
-        results.events = { error: `Search failed: ${error}` };
+        logger.debug(`People search failed: ${error}`);
+      }
+
+      // Sort all results by rank (higher = more relevant) and limit
+      const sortByRank = <T extends { rank?: number }>(arr: T[]): T[] =>
+        arr.sort((a, b) => (b.rank || 0) - (a.rank || 0)).slice(0, limit);
+
+      // Build structured response
+      const totalResults =
+        emails.length + events.length + files.length + sites.length + chats.length + people.length;
+
+      results.totalResults = totalResults;
+      results.status = totalResults > 0 ? 'SUCCESS' : 'NO_RESULTS';
+      results.message =
+        totalResults > 0
+          ? `Found ${totalResults} results for "${query}" across Microsoft 365`
+          : `No results found for "${query}"`;
+
+      // Include categories with results
+      if (emails.length > 0) {
+        results.emails = {
+          count: emails.length,
+          items: sortByRank(emails).map(({ rank, ...rest }) => rest),
+        };
+      }
+      if (events.length > 0) {
+        results.events = {
+          count: events.length,
+          items: sortByRank(events).map(({ rank, ...rest }) => rest),
+        };
+      }
+      if (files.length > 0) {
+        results.files = {
+          count: files.length,
+          items: sortByRank(files).map(({ rank, ...rest }) => rest),
+        };
+      }
+      if (sites.length > 0) {
+        results.sites = {
+          count: sites.length,
+          items: sortByRank(sites).map(({ rank, ...rest }) => rest),
+        };
+      }
+      if (chats.length > 0) {
+        results.teamsMessages = {
+          count: chats.length,
+          items: sortByRank(chats).map(({ rank, ...rest }) => rest),
+        };
+      }
+      if (people.length > 0) {
+        results.people = {
+          count: people.length,
+          items: sortByRank(people).map(({ rank, ...rest }) => rest),
+        };
       }
 
       return {
