@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import type KnowledgeBase from './knowledge-base.js';
+import { formatGraphResponse } from './response-formatter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -120,6 +121,7 @@ async function executeGraphTool(
     // Apply default $select for detailed content - no date filter by default
     // Date filters are only applied when user explicitly specifies a time range
     const isCalendarTool = tool.path.includes('/events') || tool.path.includes('calendar');
+    const isMailTool = tool.path.includes('/messages') || tool.path.includes('/mail');
 
     // Apply default $top for calendar events to get more results (Microsoft Graph defaults to only 10)
     if (isCalendarTool && !params['$top'] && !params['top']) {
@@ -529,6 +531,19 @@ async function executeGraphTool(
         }
         if (jsonResponse['@odata.nextLink']) {
           logger.info(`Response has pagination nextLink: ${jsonResponse['@odata.nextLink']}`);
+        }
+
+        // Format calendar and mail responses with structured output and local time
+        if (isCalendarTool || isMailTool) {
+          const { formatted, isFormatted, type } = formatGraphResponse(
+            jsonResponse,
+            tool.alias,
+            params
+          );
+          if (isFormatted) {
+            response.content[0].text = JSON.stringify(formatted, null, 2);
+            logger.info(`Applied structured ${type} formatting with server local time`);
+          }
         }
       } catch {
         // Non-JSON response

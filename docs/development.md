@@ -378,14 +378,61 @@ docker run -p 3000:3000 \
 
 ## Release Process
 
-1. Update version in `package.json`
-2. Update CHANGELOG.md
-3. Run full verification: `npm run verify`
-4. Commit changes: `git commit -m "chore: release vX.Y.Z"`
-5. Tag release: `git tag vX.Y.Z`
-6. Push: `git push && git push --tags`
+### Automatic Versioning with Semantic Release
 
-Semantic Release handles npm publishing automatically. Docker images are built automatically via GitHub Actions.
+This project uses **semantic-release** for fully automated versioning based on commit messages. **No manual version updates are required.**
+
+When code is pushed to `main`:
+
+1. Semantic-release analyzes commit messages
+2. Determines the next version (major/minor/patch)
+3. Updates `package.json` version
+4. Updates `docs/changelog.md` automatically
+5. Creates a Git tag and GitHub Release
+6. Triggers Docker image build
+
+### How Versions Are Determined
+
+| Commit Type        | Description             | Version Bump  |
+| ------------------ | ----------------------- | ------------- |
+| `feat:`            | New feature             | Minor (0.X.0) |
+| `fix:`             | Bug fix                 | Patch (0.0.X) |
+| `perf:`            | Performance improvement | Patch         |
+| `refactor:`        | Code refactoring        | Patch         |
+| `BREAKING CHANGE:` | Breaking changes        | Major (X.0.0) |
+
+### Example Workflow
+
+```bash
+# Make changes
+git add .
+
+# Commit using conventional format
+git commit -m "feat(mail): add attachment download support"
+
+# Push to main
+git push origin main
+
+# Semantic release handles the rest automatically!
+```
+
+### Dry Run
+
+Preview what will happen without making changes:
+
+```bash
+npm run release:dry-run
+```
+
+### NPM Scripts for Release
+
+| Script                    | Description                        |
+| ------------------------- | ---------------------------------- |
+| `npm run release`         | Run semantic-release (CI only)     |
+| `npm run release:dry-run` | Preview release without publishing |
+| `npm run commitlint`      | Validate commit message format     |
+
+Docker images are built automatically via GitHub Actions when new versions are tagged.
 
 ## Contributing
 
@@ -398,7 +445,9 @@ Semantic Release handles npm publishing automatically. Docker images are built a
 7. Push: `git push origin feature/my-feature`
 8. Create Pull Request
 
-### Commit Message Format
+### Commit Message Format (Conventional Commits)
+
+This project enforces **Conventional Commits** for all commit messages using commitlint and husky hooks.
 
 ```
 type(scope): description
@@ -408,7 +457,66 @@ type(scope): description
 [optional footer]
 ```
 
-Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+#### Commit Types
+
+| Type         | Description                   | Triggers Release |
+| ------------ | ----------------------------- | ---------------- |
+| `feat`       | New feature                   | ✅ Minor         |
+| `fix`        | Bug fix                       | ✅ Patch         |
+| `docs`       | Documentation only            | ❌               |
+| `style`      | Code style (formatting, etc.) | ❌               |
+| `refactor`   | Code refactoring              | ✅ Patch         |
+| `perf`       | Performance improvements      | ✅ Patch         |
+| `test`       | Adding or fixing tests        | ❌               |
+| `build`      | Build system changes          | ❌               |
+| `ci`         | CI/CD configuration           | ❌               |
+| `chore`      | Other changes                 | ❌               |
+| `revert`     | Revert previous commit        | ✅ Patch         |
+| `security`   | Security fixes                | ✅ Patch         |
+| `compliance` | GDPR/ISO compliance           | ✅ Patch         |
+
+#### Examples
+
+```bash
+# Feature
+git commit -m "feat(calendar): add recurring event support"
+
+# Bug fix
+git commit -m "fix(auth): resolve token refresh on expired session"
+
+# Breaking change (triggers major version)
+git commit -m "feat(api)!: change response format for mail endpoints
+
+BREAKING CHANGE: Mail response now returns array instead of object"
+
+# Documentation
+git commit -m "docs: update API reference with new endpoints"
+
+# Security fix
+git commit -m "security: sanitize user input in search queries"
+```
+
+#### Validation
+
+Commit messages are validated automatically by husky hooks. Invalid commits will be rejected:
+
+```bash
+# ❌ Bad - no type
+git commit -m "added new feature"
+
+# ❌ Bad - wrong format
+git commit -m "FEAT: Add feature"
+
+# ✅ Good
+git commit -m "feat: add new feature"
+```
+
+#### Git Hooks
+
+The following hooks are automatically installed:
+
+- **pre-commit**: Runs format check, lint, build, and tests
+- **commit-msg**: Validates commit message format with commitlint
 
 ---
 
