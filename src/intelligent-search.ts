@@ -112,6 +112,10 @@ export class SearchFirstStrategy {
         this.learningSystem.getRecommendedEntityTypes(query, context?.sources?.join(','));
 
       // Build search request body
+      const now = new Date();
+      const startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString();
+      const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
+
       const requestBody = {
         requests: [
           {
@@ -121,6 +125,13 @@ export class SearchFirstStrategy {
             },
             from: 0,
             size: context?.maxResults || parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10),
+            // Mandatory for 'event' entityType
+            ...(recommendedEntityTypes.includes('event') && {
+              timeContext: {
+                startDateTime: startDate,
+                endDateTime: endDate,
+              },
+            }),
             ...(context?.timeRange && { timeRange: context.timeRange }),
           },
         ],

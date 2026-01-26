@@ -26,6 +26,10 @@ let dataAggregator: DataAggregator | null = null;
 let downloadLinkGenerator: DownloadLinkGenerator | null = null;
 let learningDashboard: LearningDashboard | null = null;
 
+// Store references for status checks
+let knowledgeBaseInstance: KnowledgeBase | null = null;
+let learningSystemInstance: LearningSystem | null = null;
+
 /**
  * Initialize discovery components
  */
@@ -36,6 +40,50 @@ function initializeDiscoveryComponents(graphClient: GraphClient, secrets: AppSec
   const entityExtractor = new EntityExtractor();
   const queryRefiner = new QueryRefiner(synonymExpander);
   const toolCombiner = new ToolCombiner(graphClient);
+
+  // Store references for status checks
+  knowledgeBaseInstance = knowledgeBase;
+  learningSystemInstance = learningSystem;
+
+  // Log Learning System initialization status
+  const learningEnabled =
+    process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
+    process.env.MS365_MCP_LEARNING_ENABLED !== '0';
+  const clusterEnabled =
+    process.env.MS365_MCP_LEARNING_CLUSTER_ENABLED === 'true' ||
+    process.env.MS365_MCP_LEARNING_CLUSTER_ENABLED !== 'false';
+  const nlpEnabled =
+    process.env.MS365_MCP_LEARNING_NLP_ENABLED === 'true' ||
+    process.env.MS365_MCP_LEARNING_NLP_ENABLED !== 'false';
+
+  logger.info('Learning System initialized', {
+    learningEnabled,
+    clusterEnabled,
+    nlpEnabled,
+    knowledgeBasePath:
+      process.env.MS365_MCP_KNOWLEDGE_BASE_PATH || './data/knowledge-base.json',
+    decayDays: process.env.MS365_MCP_LEARNING_DECAY_DAYS || '90',
+    decayFactor: process.env.MS365_MCP_LEARNING_DECAY_FACTOR || '0.1',
+  });
+
+  // Log knowledge base status
+  const kbData = knowledgeBase.getAllData();
+  const totalPatterns = Object.keys(kbData.queryPatterns).length;
+  const totalQueries = Object.keys(kbData.successfulQueries).length;
+  const totalSynonyms = Object.keys(kbData.learnedSynonyms).length;
+  const totalFeedback = Object.values(kbData.userFeedback).reduce(
+    (sum, arr) => sum + arr.length,
+    0
+  );
+
+  logger.info('Knowledge Base status', {
+    totalPatterns,
+    totalQueries,
+    totalSynonyms,
+    totalFeedback,
+    lastUpdated: kbData.lastUpdated,
+    version: kbData.version,
+  });
 
   searchStrategy = new SearchFirstStrategy(
     graphClient,

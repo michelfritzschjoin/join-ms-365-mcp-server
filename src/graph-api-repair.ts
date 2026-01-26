@@ -110,6 +110,9 @@ export class GraphApiRepairManager {
     const strategiesToTry =
       strategies || this.strategies.filter((s) => this.isStrategyEnabled(s.name));
 
+    let currentRequest = { ...request };
+    let finalResult: RepairResult | null = null;
+
     // Try strategies in order
     for (const strategy of strategiesToTry) {
       if (!strategy.canRepair(request.originalError)) {
@@ -117,40 +120,26 @@ export class GraphApiRepairManager {
       }
 
       try {
-        logger.info(`Attempting repair with strategy: ${strategy.name}`, {
-          endpoint: request.endpoint,
-          errorCode: request.originalError.errorCode,
-        });
+        const result = await strategy.repair(currentRequest);
 
-        const result = await strategy.repair(request);
-
-        // Record in history
-        this.recordRepair(request, strategy.name, result);
-
-        if (result.success) {
-          logger.info(`Repair successful with strategy: ${strategy.name}`, {
-            endpoint: request.endpoint,
-            message: result.message,
+        if (result.success && result.repairedRequest) {
+          // Update current request for next strategy in chain
+          currentRequest = result.repairedRequest;
+          finalResult = result;
+          
+          logger.info(`Repair strategy ${strategy.name} succeeded`, {
+            endpoint: currentRequest.endpoint,
           });
-          return result;
         }
-
-        logger.debug(`Repair attempt failed with strategy: ${strategy.name}`, {
-          endpoint: request.endpoint,
-          message: result.message,
-        });
       } catch (error) {
-        logger.error(`Repair strategy ${strategy.name} threw error: ${error}`, {
-          endpoint: request.endpoint,
-        });
-        // Continue to next strategy
+        logger.error(`Repair strategy ${strategy.name} threw error: ${error}`);
       }
     }
 
-    logger.warn('All repair strategies failed', {
-      endpoint: request.endpoint,
-      errorCode: request.originalError.errorCode,
-    });
+    if (finalResult) {
+      this.recordRepair(request, 'chained', finalResult);
+      return finalResult;
+    }
 
     return null;
   }

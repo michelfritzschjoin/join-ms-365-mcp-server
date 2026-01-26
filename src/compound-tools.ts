@@ -830,6 +830,10 @@ async function executeSearchApiFirst(
   };
 
   try {
+    const now = new Date();
+    const startDate = new Date(now.getFullYear() - 1, now.getMonth(), now.getDate()).toISOString();
+    const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
+
     const response = await graphClient.makeRequest('/search/query', {
       method: 'POST',
       body: JSON.stringify({
@@ -839,6 +843,11 @@ async function executeSearchApiFirst(
             query: { queryString: query },
             from: 0,
             size: Math.min(maxResults, 500),
+            // Mandatory for 'event' entityType
+            timeContext: {
+              startDateTime: startDate,
+              endDateTime: endDate,
+            },
           },
         ],
       }),

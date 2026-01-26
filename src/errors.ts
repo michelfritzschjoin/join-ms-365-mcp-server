@@ -212,7 +212,7 @@ function parseGraphApiErrorFromObject(
     result.statusCode === 403
   ) {
     // Try to extract missing scopes from message
-    const scopeMatches = message.match(/([A-Za-z]+\.[A-Za-z]+(?:\.[A-Za-z]+)?)/g);
+    const scopeMatches = result.message.match(/([A-Z][A-Za-z]+\.[A-Z][A-Za-z]+(?:\.[A-Z][A-Za-z]+)?)/g);
     if (scopeMatches) {
       result.missingScopes = [...new Set(scopeMatches)];
     }

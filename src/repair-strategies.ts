@@ -148,6 +148,7 @@ export class ParameterRepairStrategy implements RepairStrategy {
   canRepair(error: ParsedGraphApiError): boolean {
     return (
       error.statusCode === 400 ||
+      error.statusCode === 404 ||
       error.invalidParameters !== undefined ||
       error.message.toLowerCase().includes('invalid') ||
       error.message.toLowerCase().includes('parameter')
