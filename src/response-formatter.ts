@@ -669,10 +669,11 @@ export function formatGraphResponse(
     const formatted = formatCalendarResponse(obj, startDateTime, endDateTime);
     const textOutput = calendarResponseToText(formatted);
 
+    // _humanReadable at the top of the response
     return {
       formatted: {
-        ...formatted,
         _humanReadable: textOutput,
+        ...formatted,
       },
       isFormatted: true,
       type: 'calendar',
@@ -684,10 +685,11 @@ export function formatGraphResponse(
     const formatted = formatMailResponse(obj);
     const textOutput = mailResponseToText(formatted);
 
+    // _humanReadable at the top of the response
     return {
       formatted: {
-        ...formatted,
         _humanReadable: textOutput,
+        ...formatted,
       },
       isFormatted: true,
       type: 'mail',

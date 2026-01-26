@@ -2758,6 +2758,7 @@ export function registerCompoundTools(
             const dateContext = generateDateTimeContext(lang);
 
             results.data = {
+              _humanReadable: mailResponseToText(formattedResponse),
               _llmInstructions:
                 lang === 'de'
                   ? `WICHTIG: Liste ALLE E-Mails unten mit Betreff, Absender, Datum und Uhrzeit (${dateContext.timezone}) auf. Heute ist ${dateContext.formatted}. Zeige die E-Mails NICHT als Zusammenfassung, sondern als vollständige Liste.`
@@ -2766,7 +2767,6 @@ export function registerCompoundTools(
               summary: formattedResponse.summary,
               messages: formattedResponse.messages,
               groupedByDate: formattedResponse.groupedByDate,
-              _humanReadable: mailResponseToText(formattedResponse),
             };
             results.count = formattedResponse.summary.totalMessages;
           }
@@ -2812,6 +2812,7 @@ export function registerCompoundTools(
             const dateContext = generateDateTimeContext(lang);
 
             results.data = {
+              _humanReadable: calendarResponseToText(formattedResponse),
               _llmInstructions:
                 lang === 'de'
                   ? `WICHTIG: Liste ALLE Termine unten mit Betreff, Datum, Uhrzeit (${dateContext.timezone}, NICHT UTC!) und Ort auf. Heute ist ${dateContext.formatted}. "Morgen" bedeutet ${dateContext.references.tomorrow}. Zeige die Termine NICHT als Zusammenfassung, sondern als vollständige Liste mit lokalen Uhrzeiten.`
@@ -2820,7 +2821,6 @@ export function registerCompoundTools(
               summary: formattedResponse.summary,
               events: formattedResponse.events,
               groupedByDate: formattedResponse.groupedByDate,
-              _humanReadable: calendarResponseToText(formattedResponse),
             };
             results.count = formattedResponse.summary.totalEvents;
           }
