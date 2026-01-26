@@ -7,6 +7,16 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.0.0...v1.1.0) (2026-01-26)
+
+### Features
+
+* add structured response formatting with server local time for calendar and mail ([cfd203f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/cfd203fee0d881ab672a0690ca25194f6b039253))
+
+### Bug Fixes
+
+* set timezone to europe/berlin in docker for correct date handling ([bd69a4f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bd69a4fd7f290898e8bba63009866d19f199083f))
+
 ## 1.0.0 (2026-01-26)
 
 ### Features
