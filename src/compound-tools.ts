@@ -888,33 +888,54 @@ async function executeSearchApiFirst(
             if (hitsContainer.hits) {
               for (const hit of hitsContainer.hits) {
                 if (hit.resource) {
-                  const type = hit.resource['@odata.type'] || '';
+                  const type = (hit.resource['@odata.type'] || '').toLowerCase();
+                  const rank = (hit as { rank?: number }).rank || 0;
                   const hitData: SearchHit = {
-                    resource: hit.resource,
+                    resource: { ...hit.resource, _rank: rank },
                     summary: hit.summary,
                     name: hit.resource.name || hit.resource.subject || hit.resource.displayName,
                     webUrl: hit.resource.webUrl,
                   };
 
-                  // Check for person by type or by properties (more robust detection)
+                  // Enhanced person detection with multiple type variations
                   const isPerson =
                     type.includes('person') ||
                     type.includes('microsoft.graph.person') ||
+                    type.includes('#microsoft.graph.person') ||
+                    type.includes('contact') ||
+                    type.includes('microsoft.graph.contact') ||
+                    type.includes('orgcontact') ||
+                    type.includes('user') ||
                     (hit.resource.displayName &&
                       (hit.resource.emailAddresses ||
                         hit.resource.userPrincipalName ||
-                        hit.resource.mail) &&
+                        hit.resource.mail ||
+                        hit.resource.scoredEmailAddresses) &&
                       !type.includes('message') &&
                       !type.includes('event') &&
-                      !type.includes('driveItem'));
+                      !type.includes('driveitem') &&
+                      !type.includes('site') &&
+                      !type.includes('list'));
 
-                  if (type.includes('message')) results.emails.push(hitData);
-                  else if (type.includes('event')) results.events.push(hitData);
-                  else if (type.includes('driveItem')) results.files.push(hitData);
-                  else if (type.includes('site')) results.sites.push(hitData);
-                  else if (type.includes('listItem')) results.listItems.push(hitData);
-                  else if (type.includes('chatMessage')) results.chats.push(hitData);
-                  else if (isPerson) results.people.push(hitData);
+                  // Categorize by type with priority order
+                  if (type.includes('message') && !type.includes('chat')) {
+                    results.emails.push(hitData);
+                  } else if (type.includes('event')) {
+                    results.events.push(hitData);
+                  } else if (type.includes('driveitem')) {
+                    results.files.push(hitData);
+                  } else if (type.includes('site') && !type.includes('listitem')) {
+                    results.sites.push(hitData);
+                  } else if (type.includes('listitem') || type.includes('list')) {
+                    results.listItems.push(hitData);
+                  } else if (type.includes('chatmessage')) {
+                    results.chats.push(hitData);
+                  } else if (isPerson) {
+                    results.people.push(hitData);
+                  } else {
+                    // Log unrecognized types for debugging
+                    logger.debug(`Unrecognized search result type: ${type}`);
+                  }
                 }
               }
             }
@@ -2517,7 +2538,50 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
         }
       }
 
-      // Aggregate counts
+      // Merge contacts from followUpResults into searchResults.people
+      if (followUpResults.contacts && Array.isArray(followUpResults.contacts)) {
+        for (const contact of followUpResults.contacts) {
+          const c = contact as {
+            displayName?: string;
+            givenName?: string;
+            surname?: string;
+            emailAddresses?: Array<{ address?: string }>;
+            businessPhones?: string[];
+            department?: string;
+            jobTitle?: string;
+            companyName?: string;
+          };
+          const contactName = c.displayName || `${c.givenName || ''} ${c.surname || ''}`.trim();
+          const contactEmail = c.emailAddresses?.[0]?.address;
+
+          const contactHit: SearchHit = {
+            resource: {
+              displayName: contactName,
+              emailAddresses: c.emailAddresses,
+              phones: c.businessPhones?.map((p) => ({ number: p })),
+              department: c.department,
+              jobTitle: c.jobTitle,
+              companyName: c.companyName,
+              _source: 'contacts',
+            },
+            summary: undefined,
+            name: contactName,
+            webUrl: undefined,
+          };
+
+          // Deduplicate by name or email
+          const exists = searchResults.people.some(
+            (p) =>
+              p.name === contactHit.name ||
+              (contactEmail && p.resource?.emailAddresses?.[0]?.address === contactEmail)
+          );
+          if (!exists && contactName) {
+            searchResults.people.push(contactHit);
+          }
+        }
+      }
+
+      // Aggregate counts (excluding contacts since they're merged into people)
       let totalCount = 0;
       const productsSearched = [
         'Mail',
@@ -2546,11 +2610,94 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
       if (followUpResults.onenote) totalCount += followUpResults.onenote.length;
       if (followUpResults.planner) totalCount += followUpResults.planner.length;
       if (followUpResults.todo) totalCount += followUpResults.todo.length;
-      if (followUpResults.contacts) totalCount += followUpResults.contacts.length;
+      // Note: contacts are already merged into searchResults.people, don't double-count
       if (followUpResults.meetings) totalCount += followUpResults.meetings.length;
       if (followUpResults.teams) totalCount += followUpResults.teams.length;
       if (followUpResults.bookings) totalCount += followUpResults.bookings.length;
       if (followUpResults.insights) totalCount += followUpResults.insights.length;
+
+      // Sort all results by rank (higher rank = more relevant)
+      const sortByRank = (hits: SearchHit[]): SearchHit[] => {
+        return [...hits].sort((a, b) => {
+          const rankA = (a.resource as { _rank?: number })?._rank || 0;
+          const rankB = (b.resource as { _rank?: number })?._rank || 0;
+          return rankB - rankA;
+        });
+      };
+
+      // Apply ranking to all categories
+      searchResults.emails = sortByRank(searchResults.emails);
+      searchResults.events = sortByRank(searchResults.events);
+      searchResults.files = sortByRank(searchResults.files);
+      searchResults.sites = sortByRank(searchResults.sites);
+      searchResults.listItems = sortByRank(searchResults.listItems);
+      searchResults.chats = sortByRank(searchResults.chats);
+      searchResults.people = sortByRank(searchResults.people);
+
+      // Generate structured summary for people intent
+      let summary: string | undefined;
+      if (intentResult.primary === 'people' && searchResults.people.length > 0) {
+        const topPeople = searchResults.people.slice(0, 5);
+        const peopleSummary = topPeople
+          .map((p) => {
+            const name = p.name || p.resource?.displayName || 'Unknown';
+            const email = p.resource?.emailAddresses?.[0]?.address || p.resource?.mail || '';
+            const jobTitle = p.resource?.jobTitle || '';
+            const department = p.resource?.department || '';
+            const company = p.resource?.companyName || '';
+
+            let details = name;
+            if (email) details += ` (${email})`;
+            if (jobTitle) details += ` - ${jobTitle}`;
+            if (department) details += `, ${department}`;
+            if (company) details += ` @ ${company}`;
+            return details;
+          })
+          .join('\n');
+
+        summary =
+          detectedLang === 'de'
+            ? `Gefundene Personen für "${searchQuery}":\n${peopleSummary}${searchResults.people.length > 5 ? `\n... und ${searchResults.people.length - 5} weitere` : ''}`
+            : `Found people for "${searchQuery}":\n${peopleSummary}${searchResults.people.length > 5 ? `\n... and ${searchResults.people.length - 5} more` : ''}`;
+      } else if (totalCount > 0) {
+        // Generate general summary for other intents
+        const parts: string[] = [];
+        if (searchResults.emails.length > 0)
+          parts.push(
+            detectedLang === 'de'
+              ? `${searchResults.emails.length} E-Mails`
+              : `${searchResults.emails.length} emails`
+          );
+        if (searchResults.events.length > 0)
+          parts.push(
+            detectedLang === 'de'
+              ? `${searchResults.events.length} Termine`
+              : `${searchResults.events.length} events`
+          );
+        if (searchResults.files.length > 0)
+          parts.push(
+            detectedLang === 'de'
+              ? `${searchResults.files.length} Dateien`
+              : `${searchResults.files.length} files`
+          );
+        if (searchResults.people.length > 0)
+          parts.push(
+            detectedLang === 'de'
+              ? `${searchResults.people.length} Personen`
+              : `${searchResults.people.length} people`
+          );
+        if (searchResults.chats.length > 0)
+          parts.push(
+            detectedLang === 'de'
+              ? `${searchResults.chats.length} Teams-Nachrichten`
+              : `${searchResults.chats.length} Teams messages`
+          );
+
+        if (parts.length > 0) {
+          summary =
+            detectedLang === 'de' ? `Gefunden: ${parts.join(', ')}` : `Found: ${parts.join(', ')}`;
+        }
+      }
 
       // Build Enhanced Response
       const response: EnhancedAskM365Response = {
@@ -2568,6 +2715,7 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
               ? `${totalCount} Ergebnisse in Microsoft 365 gefunden.`
               : `Found ${totalCount} results across Microsoft 365.`
             : msg.noResultsMessage(question),
+        summary,
         searchResults,
         followUpResults,
         metadata: {
