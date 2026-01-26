@@ -30,6 +30,20 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate client code
+        run: npm run generate
+        # Generate on x86_64 GitHub runner, then use for both amd64 and arm64 Docker builds
+        # This avoids qemu emulation issues when generating in ARM64 Docker builds
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
