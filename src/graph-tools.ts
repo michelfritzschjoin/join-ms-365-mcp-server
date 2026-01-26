@@ -117,28 +117,11 @@ async function executeGraphTool(
   try {
     const parameterDefinitions = tool.parameters || [];
 
-    // Apply default values for calendar date/time parameters when not provided
-    // If no date is given, default to current system date/time until tomorrow end of day
-    if (tool.path.includes('calendar')) {
-      const now = new Date();
-
-      if (!params.startDateTime) {
-        // Default to current date/time
-        params.startDateTime = now.toISOString();
-        logger.info(`Applied default startDateTime (current system time): ${params.startDateTime}`);
-      }
-
-      if (!params.endDateTime) {
-        // Default to tomorrow end of day (23:59:59)
-        const tomorrow = new Date(now);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        tomorrow.setHours(23, 59, 59, 999);
-        params.endDateTime = tomorrow.toISOString();
-        logger.info(`Applied default endDateTime (tomorrow end of day): ${params.endDateTime}`);
-      }
-
-      // Ensure detailed content is returned by default
-      if (!params['$select']) {
+    // Apply default $select for detailed content - no date filter by default
+    // Date filters are only applied when user explicitly specifies a time range
+    if (!params['$select']) {
+      // Calendar events - return detailed content
+      if (tool.path.includes('/events') || tool.path.includes('calendar')) {
         params['$select'] = [
           'id',
           'subject',
@@ -161,6 +144,96 @@ async function executeGraphTool(
           'categories',
         ];
         logger.info('Applied default $select for detailed calendar content');
+      }
+      // Mail messages - return detailed content
+      else if (tool.path.includes('/messages') || tool.path.includes('/mail')) {
+        params['$select'] = [
+          'id',
+          'subject',
+          'bodyPreview',
+          'body',
+          'from',
+          'toRecipients',
+          'ccRecipients',
+          'receivedDateTime',
+          'sentDateTime',
+          'hasAttachments',
+          'importance',
+          'isRead',
+          'isDraft',
+          'webLink',
+          'categories',
+          'flag',
+        ];
+        logger.info('Applied default $select for detailed mail content');
+      }
+      // Files/Drive items - return detailed content
+      else if (tool.path.includes('/drive') || tool.path.includes('/items')) {
+        params['$select'] = [
+          'id',
+          'name',
+          'size',
+          'createdDateTime',
+          'lastModifiedDateTime',
+          'webUrl',
+          'createdBy',
+          'lastModifiedBy',
+          'file',
+          'folder',
+          'parentReference',
+        ];
+        logger.info('Applied default $select for detailed file content');
+      }
+      // Tasks - return detailed content
+      else if (tool.path.includes('/tasks') || tool.path.includes('/todo')) {
+        params['$select'] = [
+          'id',
+          'title',
+          'body',
+          'importance',
+          'status',
+          'createdDateTime',
+          'lastModifiedDateTime',
+          'dueDateTime',
+          'completedDateTime',
+          'reminderDateTime',
+          'categories',
+        ];
+        logger.info('Applied default $select for detailed task content');
+      }
+      // Contacts - return detailed content
+      else if (tool.path.includes('/contacts')) {
+        params['$select'] = [
+          'id',
+          'displayName',
+          'givenName',
+          'surname',
+          'emailAddresses',
+          'businessPhones',
+          'mobilePhone',
+          'companyName',
+          'jobTitle',
+          'department',
+          'officeLocation',
+        ];
+        logger.info('Applied default $select for detailed contact content');
+      }
+      // Users - return detailed content
+      else if (tool.path.includes('/users')) {
+        params['$select'] = [
+          'id',
+          'displayName',
+          'givenName',
+          'surname',
+          'mail',
+          'userPrincipalName',
+          'jobTitle',
+          'department',
+          'officeLocation',
+          'mobilePhone',
+          'businessPhones',
+        ];
+        logger.info('Applied default $select for detailed user content');
       }
     }
 
@@ -572,15 +645,15 @@ export function registerGraphTools(
     const paramSchema: Record<string, z.ZodTypeAny> = {};
     if (tool.parameters && tool.parameters.length > 0) {
       for (const param of tool.parameters) {
-        // Make startDateTime and endDateTime optional for calendar tools and add default behavior description
+        // Make startDateTime and endDateTime optional for calendar tools - no default date filter
         if (
           (param.name === 'startDateTime' || param.name === 'endDateTime') &&
           tool.path.includes('calendar')
         ) {
           const defaultDescription =
             param.name === 'startDateTime'
-              ? 'The start date and time in ISO 8601 format. If not provided, defaults to current date/time.'
-              : 'The end date and time in ISO 8601 format. If not provided, defaults to tomorrow end of day (23:59:59).';
+              ? 'The start date and time in ISO 8601 format. Optional - if not provided, no date filter is applied and all events are returned.'
+              : 'The end date and time in ISO 8601 format. Optional - if not provided, no date filter is applied and all events are returned.';
           paramSchema[param.name] = z.string().describe(defaultDescription).optional();
         } else {
           paramSchema[param.name] = param.schema || z.any();
