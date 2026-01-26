@@ -40,10 +40,17 @@ FROM node:24-alpine AS release
 
 WORKDIR /app
 
+# Set timezone to Europe/Berlin for correct date/time handling
+RUN apk add --no-cache tzdata && \
+    cp /usr/share/zoneinfo/Europe/Berlin /etc/localtime && \
+    echo "Europe/Berlin" > /etc/timezone && \
+    apk del tzdata
+
 COPY --from=builder /app/dist /app/dist
 COPY --from=builder /app/package*.json ./
 
 ENV NODE_ENV=production
+ENV TZ=Europe/Berlin
 RUN npm ci --ignore-scripts --omit=dev
 
 ENTRYPOINT ["node", "dist/index.js"]

@@ -25,6 +25,8 @@ services:
     restart: unless-stopped
     env_file:
       - stack.env
+    environment:
+      - TZ=Europe/Berlin
     # Command: Start HTTP server on port 3000 with verbose logging
     # Options:
     #   --http <port>  : Start in HTTP server mode (Streamable HTTP transport)
@@ -80,6 +82,8 @@ services:
       - standalone
     env_file:
       - stack.env
+    environment:
+      - TZ=Europe/Berlin
     command: ["--http", "3000", "-v"]
     ports:
       # Expose port directly (use only in development or behind your own proxy)
