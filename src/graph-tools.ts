@@ -117,6 +117,53 @@ async function executeGraphTool(
   try {
     const parameterDefinitions = tool.parameters || [];
 
+    // Apply default values for calendar date/time parameters when not provided
+    // If no date is given, default to current system date/time until tomorrow end of day
+    if (tool.path.includes('calendar')) {
+      const now = new Date();
+
+      if (!params.startDateTime) {
+        // Default to current date/time
+        params.startDateTime = now.toISOString();
+        logger.info(`Applied default startDateTime (current system time): ${params.startDateTime}`);
+      }
+
+      if (!params.endDateTime) {
+        // Default to tomorrow end of day (23:59:59)
+        const tomorrow = new Date(now);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        tomorrow.setHours(23, 59, 59, 999);
+        params.endDateTime = tomorrow.toISOString();
+        logger.info(`Applied default endDateTime (tomorrow end of day): ${params.endDateTime}`);
+      }
+
+      // Ensure detailed content is returned by default
+      if (!params['$select']) {
+        params['$select'] = [
+          'id',
+          'subject',
+          'bodyPreview',
+          'body',
+          'start',
+          'end',
+          'location',
+          'attendees',
+          'organizer',
+          'isOnlineMeeting',
+          'onlineMeeting',
+          'webLink',
+          'isAllDay',
+          'isCancelled',
+          'importance',
+          'sensitivity',
+          'showAs',
+          'responseStatus',
+          'categories',
+        ];
+        logger.info('Applied default $select for detailed calendar content');
+      }
+    }
+
     let path = tool.path;
     const queryParams: Record<string, string> = {};
     const headers: Record<string, string> = {};
@@ -525,7 +572,19 @@ export function registerGraphTools(
     const paramSchema: Record<string, z.ZodTypeAny> = {};
     if (tool.parameters && tool.parameters.length > 0) {
       for (const param of tool.parameters) {
-        paramSchema[param.name] = param.schema || z.any();
+        // Make startDateTime and endDateTime optional for calendar tools and add default behavior description
+        if (
+          (param.name === 'startDateTime' || param.name === 'endDateTime') &&
+          tool.path.includes('calendar')
+        ) {
+          const defaultDescription =
+            param.name === 'startDateTime'
+              ? 'The start date and time in ISO 8601 format. If not provided, defaults to current date/time.'
+              : 'The end date and time in ISO 8601 format. If not provided, defaults to tomorrow end of day (23:59:59).';
+          paramSchema[param.name] = z.string().describe(defaultDescription).optional();
+        } else {
+          paramSchema[param.name] = param.schema || z.any();
+        }
       }
     }
 
