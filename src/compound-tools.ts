@@ -1025,6 +1025,785 @@ export function registerCompoundTools(
     },
   };
 
+  // Intent classification for intelligent routing
+  type Intent = 'email' | 'calendar' | 'files' | 'people' | 'teams' | 'tasks' | 'search' | 'mixed';
+
+  interface IntentResult {
+    primary: Intent;
+    secondary: Intent | null;
+    confidence: number;
+    extractedEntities: {
+      person?: string;
+      topic?: string;
+      timeframe?: string;
+      filter?: string;
+    };
+  }
+
+  // Intent keywords (EN + DE)
+  const INTENT_PATTERNS: Record<Intent, { en: string[]; de: string[] }> = {
+    email: {
+      en: [
+        'email',
+        'emails',
+        'mail',
+        'mails',
+        'inbox',
+        'message',
+        'messages',
+        'sent',
+        'received',
+        'unread',
+        'attachment',
+        'reply',
+        'forward',
+      ],
+      de: [
+        'email',
+        'emails',
+        'e-mail',
+        'e-mails',
+        'mail',
+        'mails',
+        'posteingang',
+        'postfach',
+        'nachricht',
+        'nachrichten',
+        'gesendet',
+        'empfangen',
+        'ungelesen',
+        'anhang',
+        'anhänge',
+        'antwort',
+        'weiterleiten',
+      ],
+    },
+    calendar: {
+      en: [
+        'calendar',
+        'meeting',
+        'meetings',
+        'appointment',
+        'appointments',
+        'schedule',
+        'event',
+        'events',
+        'today',
+        'tomorrow',
+        'week',
+        'month',
+        'busy',
+        'free',
+        'available',
+      ],
+      de: [
+        'kalender',
+        'termin',
+        'termine',
+        'meeting',
+        'meetings',
+        'besprechung',
+        'besprechungen',
+        'veranstaltung',
+        'heute',
+        'morgen',
+        'woche',
+        'monat',
+        'beschäftigt',
+        'frei',
+        'verfügbar',
+      ],
+    },
+    files: {
+      en: [
+        'file',
+        'files',
+        'document',
+        'documents',
+        'folder',
+        'folders',
+        'onedrive',
+        'sharepoint',
+        'excel',
+        'word',
+        'powerpoint',
+        'pdf',
+        'spreadsheet',
+        'presentation',
+        'download',
+        'upload',
+        'shared',
+      ],
+      de: [
+        'datei',
+        'dateien',
+        'dokument',
+        'dokumente',
+        'ordner',
+        'onedrive',
+        'sharepoint',
+        'excel',
+        'word',
+        'powerpoint',
+        'pdf',
+        'tabelle',
+        'präsentation',
+        'herunterladen',
+        'hochladen',
+        'geteilt',
+        'freigegeben',
+      ],
+    },
+    people: {
+      en: [
+        'contact',
+        'contacts',
+        'person',
+        'people',
+        'user',
+        'users',
+        'colleague',
+        'colleagues',
+        'manager',
+        'team',
+        'phone',
+        'email address',
+        'who is',
+      ],
+      de: [
+        'kontakt',
+        'kontakte',
+        'person',
+        'personen',
+        'benutzer',
+        'kollege',
+        'kollegen',
+        'manager',
+        'team',
+        'telefon',
+        'wer ist',
+        'mitarbeiter',
+      ],
+    },
+    teams: {
+      en: [
+        'teams',
+        'chat',
+        'chats',
+        'channel',
+        'channels',
+        'conversation',
+        'conversations',
+        'teams message',
+        'teams chat',
+      ],
+      de: [
+        'teams',
+        'chat',
+        'chats',
+        'kanal',
+        'kanäle',
+        'unterhaltung',
+        'unterhaltungen',
+        'teams nachricht',
+        'teams chat',
+      ],
+    },
+    tasks: {
+      en: ['task', 'tasks', 'todo', 'to-do', 'to do', 'planner', 'reminder', 'reminders', 'due'],
+      de: [
+        'aufgabe',
+        'aufgaben',
+        'todo',
+        'to-do',
+        'planner',
+        'erinnerung',
+        'erinnerungen',
+        'fällig',
+      ],
+    },
+    search: {
+      en: ['search', 'find', 'look for', 'where is', 'locate'],
+      de: ['suche', 'suchen', 'finde', 'finden', 'wo ist', 'lokalisieren'],
+    },
+    mixed: { en: [], de: [] },
+  };
+
+  // Time expressions for extraction (extended)
+  const TIME_PATTERNS: Record<'en' | 'de', Record<string, string[]>> = {
+    en: {
+      today: ['today', 'this day', 'todays'],
+      yesterday: ['yesterday', 'yesterdays'],
+      tomorrow: ['tomorrow', 'tomorrows'],
+      thisWeek: ['this week', 'current week', 'the week'],
+      lastWeek: ['last week', 'previous week', 'past week'],
+      nextWeek: ['next week', 'coming week', 'upcoming week'],
+      thisMonth: ['this month', 'current month'],
+      lastMonth: ['last month', 'previous month', 'past month'],
+      nextMonth: ['next month', 'coming month'],
+      last7Days: ['last 7 days', 'past 7 days', 'last seven days', 'past week'],
+      last30Days: ['last 30 days', 'past 30 days', 'last thirty days', 'past month'],
+      last90Days: ['last 90 days', 'past 90 days', 'last quarter', 'past quarter'],
+      thisYear: ['this year', 'current year'],
+      lastYear: ['last year', 'previous year', 'past year'],
+    },
+    de: {
+      today: ['heute', 'diesen tag', 'heutigen'],
+      yesterday: ['gestern', 'gestrigen'],
+      tomorrow: ['morgen', 'morgigen'],
+      thisWeek: ['diese woche', 'aktuelle woche', 'der woche', 'dieser woche'],
+      lastWeek: ['letzte woche', 'vorige woche', 'vergangene woche', 'letzten woche'],
+      nextWeek: ['nächste woche', 'kommende woche'],
+      thisMonth: ['diesen monat', 'aktueller monat', 'diesem monat'],
+      lastMonth: ['letzten monat', 'voriger monat', 'vergangenen monat'],
+      nextMonth: ['nächsten monat', 'kommenden monat'],
+      last7Days: ['letzten 7 tage', 'vergangenen 7 tage', 'letzte woche'],
+      last30Days: ['letzten 30 tage', 'vergangenen 30 tage', 'letzter monat'],
+      last90Days: ['letzten 90 tage', 'letztes quartal', 'vergangenes quartal'],
+      thisYear: ['dieses jahr', 'aktuelles jahr'],
+      lastYear: ['letztes jahr', 'voriges jahr', 'vergangenes jahr'],
+    },
+  };
+
+  // Convert timeframe to date range
+  function getDateRangeFromTimeframe(timeframe: string): { start: Date; end: Date } {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let start: Date;
+    let end: Date;
+
+    switch (timeframe) {
+      case 'today':
+        start = today;
+        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        break;
+      case 'yesterday':
+        start = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+        end = today;
+        break;
+      case 'tomorrow':
+        start = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        end = new Date(today.getTime() + 48 * 60 * 60 * 1000);
+        break;
+      case 'thisWeek': {
+        const dayOfWeek = today.getDay();
+        start = new Date(today.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
+        end = new Date(start.getTime() + 7 * 24 * 60 * 60 * 1000);
+        break;
+      }
+      case 'lastWeek': {
+        const lastWeekStart = new Date(
+          today.getTime() - (today.getDay() + 7) * 24 * 60 * 60 * 1000
+        );
+        start = lastWeekStart;
+        end = new Date(lastWeekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+        break;
+      }
+      case 'nextWeek': {
+        const nextWeekStart = new Date(
+          today.getTime() + (7 - today.getDay()) * 24 * 60 * 60 * 1000
+        );
+        start = nextWeekStart;
+        end = new Date(nextWeekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+        break;
+      }
+      case 'thisMonth':
+        start = new Date(now.getFullYear(), now.getMonth(), 1);
+        end = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        break;
+      case 'lastMonth':
+        start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+        end = new Date(now.getFullYear(), now.getMonth(), 1);
+        break;
+      case 'nextMonth':
+        start = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        end = new Date(now.getFullYear(), now.getMonth() + 2, 1);
+        break;
+      case 'last7Days':
+        start = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        break;
+      case 'last30Days':
+        start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        break;
+      case 'last90Days':
+        start = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
+        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+        break;
+      case 'thisYear':
+        start = new Date(now.getFullYear(), 0, 1);
+        end = new Date(now.getFullYear() + 1, 0, 1);
+        break;
+      case 'lastYear':
+        start = new Date(now.getFullYear() - 1, 0, 1);
+        end = new Date(now.getFullYear(), 0, 1);
+        break;
+      default:
+        // Default to last 14 days
+        start = new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000);
+        end = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+    }
+
+    return { start, end };
+  }
+
+  // Required scopes for each intent
+  const INTENT_REQUIRED_SCOPES: Record<Intent, { scopes: string[]; workScopes: string[] }> = {
+    email: { scopes: ['Mail.Read'], workScopes: [] },
+    calendar: { scopes: ['Calendars.Read'], workScopes: [] },
+    files: { scopes: ['Files.Read'], workScopes: ['Sites.Read.All'] },
+    people: { scopes: ['People.Read', 'User.Read'], workScopes: ['User.Read.All'] },
+    teams: { scopes: [], workScopes: ['Chat.Read', 'ChatMessage.Read'] },
+    tasks: { scopes: ['Tasks.Read'], workScopes: [] },
+    search: { scopes: ['Mail.Read', 'Files.Read'], workScopes: ['Sites.Read.All'] },
+    mixed: { scopes: ['Mail.Read', 'Calendars.Read', 'Files.Read'], workScopes: [] },
+  };
+
+  // Check if user likely has permissions (based on common errors)
+  function getPermissionWarning(intent: Intent, lang: 'de' | 'en'): string | null {
+    const teamsWarning = {
+      en: '⚠️ Teams/Chat access requires organization mode (--org-mode) and work account permissions.',
+      de: '⚠️ Teams/Chat-Zugriff erfordert den Organisationsmodus (--org-mode) und Arbeitskontoberechtigungen.',
+    };
+
+    const filesWarning = {
+      en: '⚠️ SharePoint access may require organization mode for full functionality.',
+      de: '⚠️ SharePoint-Zugriff kann den Organisationsmodus für volle Funktionalität erfordern.',
+    };
+
+    if (intent === 'teams') {
+      return teamsWarning[lang];
+    }
+
+    if (intent === 'files') {
+      return filesWarning[lang];
+    }
+
+    return null;
+  }
+
+  // Classify intent from question
+  function classifyIntent(question: string, lang: 'en' | 'de'): IntentResult {
+    const lowerQuestion = question.toLowerCase();
+    const scores: Record<Intent, number> = {
+      email: 0,
+      calendar: 0,
+      files: 0,
+      people: 0,
+      teams: 0,
+      tasks: 0,
+      search: 0,
+      mixed: 0,
+    };
+
+    // Score each intent based on keyword matches
+    for (const [intent, patterns] of Object.entries(INTENT_PATTERNS) as [
+      Intent,
+      { en: string[]; de: string[] },
+    ][]) {
+      const allPatterns = [...patterns.en, ...patterns.de];
+      for (const pattern of allPatterns) {
+        if (lowerQuestion.includes(pattern)) {
+          scores[intent] += pattern.split(' ').length; // Multi-word patterns score higher
+        }
+      }
+    }
+
+    // Find primary and secondary intents
+    const sortedIntents = (Object.entries(scores) as [Intent, number][])
+      .filter(([intent]) => intent !== 'mixed')
+      .sort((a, b) => b[1] - a[1]);
+
+    const primary = sortedIntents[0][1] > 0 ? sortedIntents[0][0] : 'search';
+    const secondary =
+      sortedIntents[1][1] > 0 && sortedIntents[1][1] >= sortedIntents[0][1] * 0.5
+        ? sortedIntents[1][0]
+        : null;
+    const maxScore = Math.max(...Object.values(scores));
+    const confidence = maxScore > 0 ? Math.min(maxScore / 3, 1) : 0.3;
+
+    // Extract entities
+    const extractedEntities: IntentResult['extractedEntities'] = {};
+
+    // Extract timeframe
+    const timePatterns = TIME_PATTERNS[lang];
+    for (const [timeKey, patterns] of Object.entries(timePatterns)) {
+      for (const pattern of patterns) {
+        if (lowerQuestion.includes(pattern)) {
+          extractedEntities.timeframe = timeKey;
+          break;
+        }
+      }
+      if (extractedEntities.timeframe) break;
+    }
+
+    // Extract person (simple heuristic: words after "from", "with", "von", "mit")
+    const personPatterns = lang === 'de' ? ['von ', 'mit ', 'an '] : ['from ', 'with ', 'to '];
+    for (const pattern of personPatterns) {
+      const idx = lowerQuestion.indexOf(pattern);
+      if (idx !== -1) {
+        const afterPattern = question.substring(idx + pattern.length).split(/[,.\s]/)[0];
+        if (afterPattern && afterPattern.length > 2) {
+          extractedEntities.person = afterPattern;
+          break;
+        }
+      }
+    }
+
+    // Extract topic (remaining significant words)
+    const topicWords = question
+      .replace(/[?!.,;:'"„"«»]/g, '')
+      .split(' ')
+      .filter((word) => word.length > 3 && !ALL_STOPWORDS.has(word.toLowerCase()))
+      .slice(0, 3);
+    if (topicWords.length > 0) {
+      extractedEntities.topic = topicWords.join(' ');
+    }
+
+    return { primary, secondary, confidence, extractedEntities };
+  }
+
+  // Execute intent-specific queries with permission awareness
+  async function executeIntentQuery(
+    intent: Intent,
+    entities: IntentResult['extractedEntities'],
+    lang: 'de' | 'en'
+  ): Promise<{
+    data: unknown;
+    source: string;
+    count: number;
+    permissionWarning?: string;
+    error?: string;
+  }> {
+    const results: {
+      data: unknown;
+      source: string;
+      count: number;
+      permissionWarning?: string;
+      error?: string;
+    } = {
+      data: null,
+      source: intent,
+      count: 0,
+    };
+
+    // Check for permission warnings
+    const permissionWarning = getPermissionWarning(intent, lang);
+    if (permissionWarning) {
+      results.permissionWarning = permissionWarning;
+    }
+
+    try {
+      switch (intent) {
+        case 'email': {
+          const queryParams: Record<string, string> = {
+            $top: '25',
+            $select:
+              'id,subject,bodyPreview,receivedDateTime,from,importance,isRead,hasAttachments',
+            $orderby: 'receivedDateTime desc',
+          };
+
+          // Apply timeframe filter using extended date range
+          if (entities.timeframe) {
+            const dateRange = getDateRangeFromTimeframe(entities.timeframe);
+            queryParams.$filter = `receivedDateTime ge ${dateRange.start.toISOString()} and receivedDateTime lt ${dateRange.end.toISOString()}`;
+            logger.info(
+              `Email timeframe filter: ${entities.timeframe} -> ${dateRange.start.toISOString()} to ${dateRange.end.toISOString()}`
+            );
+          }
+
+          if (entities.person) {
+            queryParams.$search = `"from:${entities.person}"`;
+            delete queryParams.$orderby;
+            // Cannot combine $search with $filter in Graph API
+            delete queryParams.$filter;
+          } else if (entities.topic) {
+            queryParams.$search = `"${entities.topic}"`;
+            delete queryParams.$orderby;
+            delete queryParams.$filter;
+          }
+
+          const response = await graphClient.makeRequest('/me/messages', {
+            method: 'GET',
+            queryParams,
+          });
+
+          if (response && typeof response === 'object' && 'value' in response) {
+            const emails = (response as { value: unknown[] }).value || [];
+            results.data = emails.map((e: unknown) => {
+              const email = e as {
+                subject?: string;
+                bodyPreview?: string;
+                receivedDateTime?: string;
+                from?: { emailAddress?: { name?: string; address?: string } };
+                importance?: string;
+                isRead?: boolean;
+                hasAttachments?: boolean;
+              };
+              return {
+                subject: email.subject || (lang === 'de' ? '(Kein Betreff)' : '(No subject)'),
+                preview: email.bodyPreview?.substring(0, 150),
+                from: email.from?.emailAddress?.name || email.from?.emailAddress?.address,
+                date: email.receivedDateTime,
+                importance: email.importance,
+                isRead: email.isRead,
+                hasAttachments: email.hasAttachments,
+              };
+            });
+            results.count = emails.length;
+          }
+          break;
+        }
+
+        case 'calendar': {
+          // Use extended timeframe or default to next 14 days
+          const dateRange = entities.timeframe
+            ? getDateRangeFromTimeframe(entities.timeframe)
+            : getDateRangeFromTimeframe('default');
+
+          logger.info(
+            `Calendar timeframe: ${entities.timeframe || 'default'} -> ${dateRange.start.toISOString()} to ${dateRange.end.toISOString()}`
+          );
+
+          // Use the extracted dateRange
+          const startDate = dateRange.start;
+          const endDate = dateRange.end;
+
+          const response = await graphClient.makeRequest(
+            `/me/calendarView?startDateTime=${startDate.toISOString()}&endDateTime=${endDate.toISOString()}`,
+            {
+              method: 'GET',
+              queryParams: {
+                $top: '25',
+                $select: 'subject,start,end,location,organizer,isAllDay,isCancelled',
+                $orderby: 'start/dateTime',
+              },
+            }
+          );
+
+          if (response && typeof response === 'object' && 'value' in response) {
+            const events = (response as { value: unknown[] }).value || [];
+            results.data = events.map((e: unknown) => {
+              const event = e as {
+                subject?: string;
+                start?: { dateTime?: string };
+                end?: { dateTime?: string };
+                location?: { displayName?: string };
+                organizer?: { emailAddress?: { name?: string } };
+                isAllDay?: boolean;
+                isCancelled?: boolean;
+              };
+              return {
+                subject: event.subject,
+                start: event.start?.dateTime,
+                end: event.end?.dateTime,
+                location: event.location?.displayName,
+                organizer: event.organizer?.emailAddress?.name,
+                isAllDay: event.isAllDay,
+                isCancelled: event.isCancelled,
+              };
+            });
+            results.count = events.length;
+          }
+          break;
+        }
+
+        case 'files': {
+          const searchQuery = entities.topic || 'recent';
+          const response = await graphClient.makeRequest('/search/query', {
+            method: 'POST',
+            body: JSON.stringify({
+              requests: [
+                {
+                  entityTypes: ['driveItem'],
+                  query: { queryString: searchQuery },
+                  from: 0,
+                  size: 25,
+                },
+              ],
+            }),
+          });
+
+          if (response && typeof response === 'object' && 'value' in response) {
+            const items: unknown[] = [];
+            const searchValues = (response as { value: unknown[] }).value as Array<{
+              hitsContainers?: Array<{
+                hits?: Array<{
+                  resource?: { name?: string; webUrl?: string; lastModifiedDateTime?: string };
+                }>;
+              }>;
+            }>;
+
+            for (const container of searchValues) {
+              if (container.hitsContainers) {
+                for (const hitsContainer of container.hitsContainers) {
+                  if (hitsContainer.hits) {
+                    for (const hit of hitsContainer.hits) {
+                      if (hit.resource) {
+                        items.push({
+                          name: hit.resource.name,
+                          webUrl: hit.resource.webUrl,
+                          lastModified: hit.resource.lastModifiedDateTime,
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            results.data = items;
+            results.count = items.length;
+          }
+          break;
+        }
+
+        case 'people': {
+          const searchQuery = entities.person || entities.topic;
+          if (searchQuery) {
+            const response = await graphClient.makeRequest('/me/people', {
+              method: 'GET',
+              queryParams: {
+                $search: `"${searchQuery}"`,
+                $top: '10',
+              },
+            });
+
+            if (response && typeof response === 'object' && 'value' in response) {
+              const people = (response as { value: unknown[] }).value || [];
+              results.data = people.map((p: unknown) => {
+                const person = p as {
+                  displayName?: string;
+                  emailAddresses?: Array<{ address?: string }>;
+                  phones?: Array<{ number?: string }>;
+                  department?: string;
+                  jobTitle?: string;
+                };
+                return {
+                  name: person.displayName,
+                  email: person.emailAddresses?.[0]?.address,
+                  phone: person.phones?.[0]?.number,
+                  department: person.department,
+                  jobTitle: person.jobTitle,
+                };
+              });
+              results.count = people.length;
+            }
+          }
+          break;
+        }
+
+        case 'tasks': {
+          const response = await graphClient.makeRequest('/me/todo/lists', {
+            method: 'GET',
+          });
+
+          if (response && typeof response === 'object' && 'value' in response) {
+            const lists = (response as { value: Array<{ id: string; displayName?: string }> })
+              .value;
+            const allTasks: unknown[] = [];
+
+            for (const list of lists.slice(0, 3)) {
+              const tasksResponse = await graphClient.makeRequest(
+                `/me/todo/lists/${list.id}/tasks`,
+                {
+                  method: 'GET',
+                  queryParams: { $top: '10' },
+                }
+              );
+
+              if (tasksResponse && typeof tasksResponse === 'object' && 'value' in tasksResponse) {
+                const tasks = (tasksResponse as { value: unknown[] }).value || [];
+                for (const t of tasks) {
+                  const task = t as {
+                    title?: string;
+                    status?: string;
+                    dueDateTime?: { dateTime?: string };
+                    importance?: string;
+                  };
+                  allTasks.push({
+                    list: list.displayName,
+                    title: task.title,
+                    status: task.status,
+                    dueDate: task.dueDateTime?.dateTime,
+                    importance: task.importance,
+                  });
+                }
+              }
+            }
+            results.data = allTasks;
+            results.count = allTasks.length;
+          }
+          break;
+        }
+
+        case 'teams':
+        case 'search':
+        case 'mixed':
+        default: {
+          // Fallback to universal search
+          const searchResult = await executeUniversalSearch(
+            graphClient,
+            entities.topic || 'recent',
+            25
+          );
+          results.data = searchResult.results;
+          results.count = searchResult.totalResults;
+          break;
+        }
+      }
+    } catch (error) {
+      const errorMessage = (error as Error).message || String(error);
+      logger.error(`Intent query failed for ${intent}: ${errorMessage}`);
+
+      // Check for permission-related errors
+      const isPermissionError =
+        errorMessage.includes('403') ||
+        errorMessage.includes('401') ||
+        errorMessage.includes('Forbidden') ||
+        errorMessage.includes('Unauthorized') ||
+        errorMessage.includes('Access denied') ||
+        errorMessage.includes('insufficient') ||
+        errorMessage.includes('Zugriff verweigert');
+
+      if (isPermissionError) {
+        const requiredScopes = INTENT_REQUIRED_SCOPES[intent];
+        const scopeInfo = requiredScopes.scopes.join(', ') || requiredScopes.workScopes.join(', ');
+
+        results.error =
+          lang === 'de'
+            ? `⛔ **Berechtigung erforderlich**: Der Zugriff auf ${intent}-Daten wurde verweigert.\n\n` +
+              `**Erforderliche Berechtigungen:** ${scopeInfo}\n\n` +
+              `**Lösung:**\n` +
+              `1. Melden Sie sich ab und wieder an (erneute Authentifizierung)\n` +
+              `2. Für Teams/Chat: Starten Sie mit --org-mode\n` +
+              `3. Prüfen Sie, ob Ihr Konto die nötigen Lizenzen hat`
+            : `⛔ **Permission Required**: Access to ${intent} data was denied.\n\n` +
+              `**Required scopes:** ${scopeInfo}\n\n` +
+              `**Solution:**\n` +
+              `1. Sign out and sign in again (re-authenticate)\n` +
+              `2. For Teams/Chat: Start with --org-mode\n` +
+              `3. Verify your account has the necessary licenses`;
+
+        results.data = {
+          error: 'permission_denied',
+          requiredScopes: requiredScopes.scopes,
+          workScopes: requiredScopes.workScopes,
+          message: results.error,
+        };
+      } else {
+        results.error =
+          lang === 'de'
+            ? `⚠️ Fehler bei der Abfrage: ${errorMessage}`
+            : `⚠️ Query error: ${errorMessage}`;
+        results.data = { error: errorMessage };
+      }
+      results.count = 0;
+    }
+
+    return results;
+  }
+
   server.tool(
     'ask-microsoft-365',
     `🧠 **INTELLIGENT MICROSOFT 365 ASSISTANT** - THE SMARTEST WAY TO QUERY MS365!
@@ -1042,6 +1821,20 @@ Dieses Tool bietet INTELLIGENTE Anfrageverarbeitung mit diesen Funktionen:
 4. 📊 **Comprehensive results / Umfassende Ergebnisse** - searches across all data sources
 5. 💡 **Helpful suggestions / Hilfreiche Vorschläge** - provides next steps if no results found
 6. 🌍 **Bilingual / Zweisprachig** - responds in your language (English or German)
+7. 📅 **Time-aware / Zeitraum-bewusst** - understands time ranges (today, last week, this month, etc.)
+8. 🔐 **Permission-aware / Berechtigungs-bewusst** - explains when permissions are missing
+
+**Time Range Examples / Zeitraum-Beispiele:**
+🇬🇧 "Show me emails from today" | "Meetings this week" | "Files from last month"
+🇬🇧 "What happened last 7 days?" | "Calendar for next week" | "Emails from yesterday"
+🇩🇪 "Zeige mir E-Mails von heute" | "Termine diese Woche" | "Dateien vom letzten Monat"
+🇩🇪 "Was passierte in den letzten 7 Tagen?" | "Kalender für nächste Woche" | "E-Mails von gestern"
+
+**Supported Timeframes / Unterstützte Zeiträume:**
+today/heute, yesterday/gestern, tomorrow/morgen,
+this week/diese Woche, last week/letzte Woche, next week/nächste Woche,
+this month/diesen Monat, last month/letzten Monat, next month/nächsten Monat,
+last 7/30/90 days, this year/dieses Jahr, last year/letztes Jahr
 
 **Examples / Beispiele:**
 🇬🇧 "What do you know about Project Alpha?"
@@ -1057,6 +1850,12 @@ Dieses Tool bietet INTELLIGENTE Anfrageverarbeitung mit diesen Funktionen:
 - 📧 Emails / E-Mails
 - 📁 Files (OneDrive, SharePoint) / Dateien
 - 📅 Calendar events / Kalendertermine
+- ✅ Tasks / Aufgaben
+
+**Permission Notes / Berechtigungshinweise:**
+- Teams/Chat requires --org-mode / Teams/Chat erfordert --org-mode
+- Some features require work/school accounts / Einige Funktionen erfordern Geschäftskonten
+- Missing permissions are clearly explained / Fehlende Berechtigungen werden erklärt
 
 **GUARANTEE / GARANTIE: This tool will ALWAYS provide a response! / Dieses Tool liefert IMMER eine Antwort!**`,
     {
@@ -1089,69 +1888,150 @@ Dieses Tool bietet INTELLIGENTE Anfrageverarbeitung mit diesen Funktionen:
       const msg = messages[detectedLang];
       logger.info(`Detected language: ${detectedLang}`);
 
-      // Combine question and context for search
-      const searchQuery = context ? `${question} ${context}` : question;
+      // Combine question and context for full text
+      const fullQuestion = context ? `${question} ${context}` : question;
 
-      // Track what we've tried
-      const attempts: string[] = [];
-      let finalResults: Record<string, unknown> = {};
-      let foundResults = false;
+      // Step 1: Classify the intent
+      const intentResult = classifyIntent(fullQuestion, detectedLang);
+      logger.info(
+        `Intent classified: ${intentResult.primary} (confidence: ${intentResult.confidence.toFixed(2)}), ` +
+          `entities: ${JSON.stringify(intentResult.extractedEntities)}`
+      );
 
-      // Attempt 1: Full search with original query
-      attempts.push(`${msg.searchingFor}: "${searchQuery}"`);
-      const searchResult = await executeUniversalSearch(graphClient, searchQuery, 25);
+      // Track processing steps
+      const processingSteps: string[] = [];
+      const results: Record<string, unknown> = {};
+      let totalCount = 0;
 
-      if (searchResult.totalResults > 0) {
-        foundResults = true;
-        finalResults = searchResult.results;
+      // Intent labels for display
+      const intentLabels: Record<Intent, { en: string; de: string }> = {
+        email: { en: 'Emails', de: 'E-Mails' },
+        calendar: { en: 'Calendar', de: 'Kalender' },
+        files: { en: 'Files', de: 'Dateien' },
+        people: { en: 'People', de: 'Personen' },
+        teams: { en: 'Teams', de: 'Teams' },
+        tasks: { en: 'Tasks', de: 'Aufgaben' },
+        search: { en: 'Search', de: 'Suche' },
+        mixed: { en: 'Mixed', de: 'Gemischt' },
+      };
+
+      // Step 2: Execute primary intent query
+      processingSteps.push(
+        detectedLang === 'de'
+          ? `🎯 Intent erkannt: ${intentLabels[intentResult.primary].de} (Konfidenz: ${Math.round(intentResult.confidence * 100)}%)`
+          : `🎯 Intent detected: ${intentLabels[intentResult.primary].en} (confidence: ${Math.round(intentResult.confidence * 100)}%)`
+      );
+
+      if (intentResult.extractedEntities.topic) {
+        processingSteps.push(
+          detectedLang === 'de'
+            ? `📝 Thema extrahiert: "${intentResult.extractedEntities.topic}"`
+            : `📝 Topic extracted: "${intentResult.extractedEntities.topic}"`
+        );
       }
 
-      // Attempt 2: If no results, try with just the main keywords (bilingual stopword removal)
-      if (!foundResults && question.split(' ').length > 2) {
-        const keywords = question
-          .replace(/[?!.,;:'"„"«»]/g, '')
-          .split(' ')
-          .filter((word) => word.length > 2 && !ALL_STOPWORDS.has(word.toLowerCase()))
-          .slice(0, 4)
-          .join(' ');
+      if (intentResult.extractedEntities.person) {
+        processingSteps.push(
+          detectedLang === 'de'
+            ? `👤 Person extrahiert: "${intentResult.extractedEntities.person}"`
+            : `👤 Person extracted: "${intentResult.extractedEntities.person}"`
+        );
+      }
 
-        if (keywords && keywords.toLowerCase() !== searchQuery.toLowerCase()) {
-          attempts.push(`${msg.tryingKeywords}: "${keywords}"`);
-          const keywordResult = await executeUniversalSearch(graphClient, keywords, 25);
+      if (intentResult.extractedEntities.timeframe) {
+        processingSteps.push(
+          detectedLang === 'de'
+            ? `📅 Zeitraum: ${intentResult.extractedEntities.timeframe}`
+            : `📅 Timeframe: ${intentResult.extractedEntities.timeframe}`
+        );
+      }
 
-          if (keywordResult.totalResults > 0) {
-            foundResults = true;
-            finalResults = keywordResult.results;
-          }
+      // Execute primary intent
+      const primaryResult = await executeIntentQuery(
+        intentResult.primary,
+        intentResult.extractedEntities,
+        detectedLang
+      );
+
+      // Track permission warnings
+      const permissionWarnings: string[] = [];
+
+      if (primaryResult.count > 0) {
+        results[intentResult.primary] = primaryResult.data;
+        totalCount += primaryResult.count;
+        processingSteps.push(
+          detectedLang === 'de'
+            ? `✅ ${intentLabels[intentResult.primary].de}: ${primaryResult.count} Ergebnisse`
+            : `✅ ${intentLabels[intentResult.primary].en}: ${primaryResult.count} results`
+        );
+      } else if (primaryResult.error) {
+        // Handle permission errors
+        processingSteps.push(
+          detectedLang === 'de'
+            ? `⚠️ ${intentLabels[intentResult.primary].de}: Zugriffsproblem`
+            : `⚠️ ${intentLabels[intentResult.primary].en}: Access issue`
+        );
+        permissionWarnings.push(primaryResult.error);
+      }
+
+      // Add permission warning if applicable
+      if (primaryResult.permissionWarning) {
+        permissionWarnings.push(primaryResult.permissionWarning);
+      }
+
+      // Step 3: Execute secondary intent if present and confidence is high enough
+      if (intentResult.secondary && intentResult.confidence >= 0.5) {
+        processingSteps.push(
+          detectedLang === 'de'
+            ? `🔄 Zusätzliche Suche: ${intentLabels[intentResult.secondary].de}`
+            : `🔄 Additional search: ${intentLabels[intentResult.secondary].en}`
+        );
+
+        const secondaryResult = await executeIntentQuery(
+          intentResult.secondary,
+          intentResult.extractedEntities,
+          detectedLang
+        );
+
+        if (secondaryResult.count > 0) {
+          results[intentResult.secondary] = secondaryResult.data;
+          totalCount += secondaryResult.count;
+          processingSteps.push(
+            detectedLang === 'de'
+              ? `✅ ${intentLabels[intentResult.secondary].de}: ${secondaryResult.count} Ergebnisse`
+              : `✅ ${intentLabels[intentResult.secondary].en}: ${secondaryResult.count} results`
+          );
+        } else if (secondaryResult.error) {
+          permissionWarnings.push(secondaryResult.error);
+        }
+
+        if (secondaryResult.permissionWarning) {
+          permissionWarnings.push(secondaryResult.permissionWarning);
         }
       }
 
-      // Attempt 3: If still no results and context provided, search just context
-      if (!foundResults && context) {
-        attempts.push(`${msg.searchingContext}: "${context}"`);
-        const contextResult = await executeUniversalSearch(graphClient, context, 25);
+      // Step 4: Fallback to universal search if no results
+      if (totalCount === 0) {
+        processingSteps.push(
+          detectedLang === 'de'
+            ? `🔍 Fallback: Universelle Suche...`
+            : `🔍 Fallback: Universal search...`
+        );
 
-        if (contextResult.totalResults > 0) {
-          foundResults = true;
-          finalResults = contextResult.results;
-        }
-      }
+        const fallbackResult = await executeUniversalSearch(
+          graphClient,
+          intentResult.extractedEntities.topic || question,
+          25
+        );
 
-      // Attempt 4: Try individual important words as separate searches
-      if (!foundResults) {
-        const importantWords = question
-          .replace(/[?!.,;:'"„"«»]/g, '')
-          .split(' ')
-          .filter((word) => word.length > 4 && !ALL_STOPWORDS.has(word.toLowerCase()));
-
-        for (const word of importantWords.slice(0, 2)) {
-          attempts.push(`${msg.tryingKeywords}: "${word}"`);
-          const wordResult = await executeUniversalSearch(graphClient, word, 15);
-          if (wordResult.totalResults > 0) {
-            foundResults = true;
-            finalResults = wordResult.results;
-            break;
-          }
+        if (fallbackResult.totalResults > 0) {
+          results.universalSearch = fallbackResult.results;
+          totalCount = fallbackResult.totalResults;
+          processingSteps.push(
+            detectedLang === 'de'
+              ? `✅ Universelle Suche: ${totalCount} Ergebnisse`
+              : `✅ Universal search: ${totalCount} results`
+          );
         }
       }
 
@@ -1160,55 +2040,47 @@ Dieses Tool bietet INTELLIGENTE Anfrageverarbeitung mit diesen Funktionen:
         question,
         language: detectedLang,
         searchedAt: new Date().toISOString(),
-        searchAttempts: attempts,
-        resultsFound: foundResults,
+        intent: {
+          primary: intentResult.primary,
+          secondary: intentResult.secondary,
+          confidence: Math.round(intentResult.confidence * 100),
+          extractedEntities: intentResult.extractedEntities,
+        },
+        processingSteps,
+        resultsFound: totalCount > 0,
+        totalResults: totalCount,
       };
 
-      if (foundResults) {
-        response.status = 'SUCCESS';
-        response.message = msg.successMessage;
-        response.results = finalResults;
+      // Add permission warnings if any
+      if (permissionWarnings.length > 0) {
+        response.permissionWarnings = [...new Set(permissionWarnings)]; // Remove duplicates
+      }
 
-        // Count results with bilingual labels
-        let totalCount = 0;
-        const sources: string[] = [];
-        if (
-          finalResults.emails &&
-          typeof finalResults.emails === 'object' &&
-          'count' in finalResults.emails
-        ) {
-          const count = (finalResults.emails as { count: number }).count;
-          if (count > 0) {
-            totalCount += count;
-            sources.push(`${count} ${msg.emails}`);
+      if (totalCount > 0) {
+        response.status = 'SUCCESS';
+        response.message =
+          detectedLang === 'de'
+            ? `${totalCount} Ergebnis(se) für Ihre Anfrage gefunden.`
+            : `Found ${totalCount} result(s) for your query.`;
+        response.results = results;
+
+        // Generate summary based on what was found
+        const summaryParts: string[] = [];
+        for (const [key, value] of Object.entries(results)) {
+          if (Array.isArray(value)) {
+            const label = intentLabels[key as Intent]?.[detectedLang] || key;
+            summaryParts.push(`${value.length} ${label}`);
           }
         }
-        if (
-          finalResults.files &&
-          typeof finalResults.files === 'object' &&
-          'count' in finalResults.files
-        ) {
-          const count = (finalResults.files as { count: number }).count;
-          if (count > 0) {
-            totalCount += count;
-            sources.push(`${count} ${msg.files}`);
-          }
-        }
-        if (
-          finalResults.calendar &&
-          typeof finalResults.calendar === 'object' &&
-          'count' in finalResults.calendar
-        ) {
-          const count = (finalResults.calendar as { count: number }).count;
-          if (count > 0) {
-            totalCount += count;
-            sources.push(`${count} ${msg.calendarEvents}`);
-          }
-        }
-        response.summary = msg.foundResults(totalCount, sources);
+        response.summary = summaryParts.join(', ');
       } else {
-        response.status = 'NO_RESULTS';
-        response.message = msg.noResultsMessage(question);
+        response.status = permissionWarnings.length > 0 ? 'PERMISSION_ERROR' : 'NO_RESULTS';
+        response.message =
+          permissionWarnings.length > 0
+            ? detectedLang === 'de'
+              ? 'Zugriff auf einige Daten wurde verweigert. Siehe Berechtigungswarnungen unten.'
+              : 'Access to some data was denied. See permission warnings below.'
+            : msg.noResultsMessage(question);
         response.explanation = msg.explanation;
         response.suggestions = msg.suggestions;
         response.searchCoverage = msg.searchCoverage;
