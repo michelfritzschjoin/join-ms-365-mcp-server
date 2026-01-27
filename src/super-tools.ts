@@ -529,6 +529,11 @@ const teamsSchema = z.object({
   channelId: z.string().optional().describe('Channel ID'),
   chatId: z.string().optional().describe('Chat ID'),
   messageId: z.string().optional().describe('Message ID'),
+  // Options
+  includeMessages: z
+    .boolean()
+    .optional()
+    .describe('Include last messages for each chat (default: true for chats action)'),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -570,23 +575,158 @@ async function handleTeams(
         throw new Error('teamId and channelId are required for channel-messages');
       }
       thinking.push(`Listing messages in channel: ${input.channelId}`);
-      const params: Record<string, string> = { $top: String(input.top || 25) };
+      const params: Record<string, string> = {
+        $top: String(input.top || 25),
+        $orderby: 'createdDateTime desc',
+      };
       const result = await callGraph(graphClient, 'GET', `/teams/${input.teamId}/channels/${input.channelId}/messages`, params);
+      const messagesData = JSON.parse(result);
+      
+      // Format messages for better readability
+      if (messagesData.value && Array.isArray(messagesData.value)) {
+        const formattedMessages = messagesData.value.map((msg: any) => ({
+          id: msg.id,
+          from: msg.from?.user?.displayName || msg.from?.application?.displayName || 'Unknown',
+          fromEmail: msg.from?.user?.userPrincipalName,
+          content: msg.body?.content || '',
+          contentType: msg.body?.contentType || 'text',
+          createdDateTime: msg.createdDateTime,
+          importance: msg.importance,
+          subject: msg.subject,
+          attachments: msg.attachments?.map((att: any) => ({
+            id: att.id,
+            name: att.name,
+            contentType: att.contentType,
+            size: att.size,
+          })),
+        }));
+        
+        const output = {
+          teamId: input.teamId,
+          channelId: input.channelId,
+          totalMessages: formattedMessages.length,
+          messages: formattedMessages,
+        };
+        
+        thinking.push(`Retrieved ${formattedMessages.length} channel messages with content`);
+        return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
+      }
+      
       return addThinkingToResponse(result, thinking);
     }
 
     case 'chats': {
       thinking.push('Listing chats');
       const params: Record<string, string> = { $top: String(input.top || 25) };
-      const result = await callGraph(graphClient, 'GET', '/me/chats', params);
-      return addThinkingToResponse(result, thinking);
+      const chatsResult = await callGraph(graphClient, 'GET', '/me/chats', params);
+      const chatsData = JSON.parse(chatsResult);
+      
+      // Default: include messages for chats action (unless explicitly disabled)
+      const includeMessages = input.includeMessages !== false;
+      
+      if (includeMessages && chatsData.value && Array.isArray(chatsData.value)) {
+        thinking.push(`Fetching last messages for ${chatsData.value.length} chats...`);
+        
+        // Fetch last messages for each chat (limit to avoid too many requests)
+        const chatsWithMessages = await Promise.allSettled(
+          chatsData.value.slice(0, 10).map(async (chat: { id: string }) => {
+            try {
+              const messagesResult = await callGraph(
+                graphClient,
+                'GET',
+                `/me/chats/${chat.id}/messages`,
+                { $top: '5', $orderby: 'createdDateTime desc' }
+              );
+              const messagesData = JSON.parse(messagesResult);
+              return {
+                ...chat,
+                lastMessages: messagesData.value || [],
+              };
+            } catch (error) {
+              logger.warn(`Failed to fetch messages for chat ${chat.id}: ${error}`);
+              return {
+                ...chat,
+                lastMessages: [],
+              };
+            }
+          })
+        );
+        
+        // Format results
+        const formattedChats = chatsWithMessages.map((result) => {
+          if (result.status === 'fulfilled') {
+            const chat = result.value;
+            return {
+              id: chat.id,
+              topic: chat.topic,
+              chatType: chat.chatType,
+              createdDateTime: chat.createdDateTime,
+              lastUpdatedDateTime: chat.lastUpdatedDateTime,
+              webUrl: chat.webUrl,
+              lastMessages: (chat.lastMessages || []).map((msg: any) => ({
+                id: msg.id,
+                from: msg.from?.user?.displayName || 'Unknown',
+                content: msg.body?.content || '',
+                contentType: msg.body?.contentType || 'text',
+                createdDateTime: msg.createdDateTime,
+                importance: msg.importance,
+              })),
+            };
+          }
+          return null;
+        }).filter(Boolean);
+        
+        const output = {
+          totalChats: formattedChats.length,
+          chats: formattedChats,
+        };
+        
+        thinking.push(`Retrieved last messages for ${formattedChats.length} chats`);
+        return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
+      }
+      
+      return addThinkingToResponse(chatsResult, thinking);
     }
 
     case 'chat-messages': {
       if (!input.chatId) throw new Error('chatId is required for chat-messages');
       thinking.push(`Listing messages in chat: ${input.chatId}`);
-      const params: Record<string, string> = { $top: String(input.top || 25) };
+      const params: Record<string, string> = {
+        $top: String(input.top || 25),
+        $orderby: 'createdDateTime desc',
+      };
       const result = await callGraph(graphClient, 'GET', `/me/chats/${input.chatId}/messages`, params);
+      const messagesData = JSON.parse(result);
+      
+      // Format messages for better readability
+      if (messagesData.value && Array.isArray(messagesData.value)) {
+        const formattedMessages = messagesData.value.map((msg: any) => ({
+          id: msg.id,
+          from: msg.from?.user?.displayName || msg.from?.user?.userPrincipalName || 'Unknown',
+          fromEmail: msg.from?.user?.userPrincipalName,
+          content: msg.body?.content || '',
+          contentType: msg.body?.contentType || 'text',
+          createdDateTime: msg.createdDateTime,
+          importance: msg.importance,
+          subject: msg.subject,
+          attachments: msg.attachments?.map((att: any) => ({
+            id: att.id,
+            name: att.name,
+            contentType: att.contentType,
+            size: att.size,
+          })),
+        }));
+        
+        const output = {
+          chatId: input.chatId,
+          totalMessages: formattedMessages.length,
+          messages: formattedMessages,
+        };
+        
+        thinking.push(`Retrieved ${formattedMessages.length} messages with content`);
+        return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
+      }
+      
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1297,6 +1437,83 @@ async function handleSearch(
       `Found ${totalHits} results across ${Object.keys(formattedResults).length} entity types`
     );
 
+    // If chatMessage results found, fetch full message content for better context
+    const chatMessageResults = formattedResults['#microsoft.graph.chatMessage'] || formattedResults['chatMessage'] || [];
+    const chatIds = new Set<string>();
+    
+    // Extract chat IDs from chatMessage results
+    for (const msg of chatMessageResults) {
+      const msgAny = msg as any;
+      if (msgAny.id) {
+        let chatId: string | null = null;
+        
+        // Try different ID formats
+        // Format 1: "19:chatId_messageId@thread.v2"
+        if (msgAny.id.includes(':')) {
+          const parts = msgAny.id.split(':');
+          if (parts.length > 1) {
+            const afterColon = parts[1];
+            if (afterColon.includes('_')) {
+              chatId = afterColon.split('_')[0];
+            } else if (afterColon.includes('@')) {
+              chatId = afterColon.split('@')[0];
+            }
+          }
+        }
+        // Format 2: "chatId/messageId" or similar path format
+        else if (msgAny.id.includes('/')) {
+          const parts = msgAny.id.split('/');
+          if (parts.length > 1) {
+            chatId = parts[0];
+          }
+        }
+        // Format 3: Check if chatId is in the resource itself
+        else if (msgAny.chatId) {
+          chatId = msgAny.chatId;
+        }
+        
+        if (chatId) {
+          chatIds.add(chatId);
+        }
+      }
+    }
+    
+    // Fetch full messages for found chats (limit to avoid too many requests)
+    const chatMessagesWithContent: Record<string, unknown[]> = {};
+    if (chatIds.size > 0 && chatMessageResults.length > 0) {
+      thinking.push(`Fetching full message content for ${Math.min(chatIds.size, 5)} chats...`);
+      
+      for (const chatId of Array.from(chatIds).slice(0, 5)) {
+        try {
+          const messagesResult = await callGraph(
+            graphClient,
+            'GET',
+            `/me/chats/${chatId}/messages`,
+            { $top: '10', $orderby: 'createdDateTime desc' }
+          );
+          const messagesData = JSON.parse(messagesResult);
+          
+          if (messagesData.value && Array.isArray(messagesData.value)) {
+            chatMessagesWithContent[chatId] = messagesData.value.map((msg: any) => ({
+              id: msg.id,
+              from: msg.from?.user?.displayName || msg.from?.user?.userPrincipalName || 'Unknown',
+              fromEmail: msg.from?.user?.userPrincipalName,
+              content: msg.body?.content || '',
+              contentType: msg.body?.contentType || 'text',
+              createdDateTime: msg.createdDateTime,
+              importance: msg.importance,
+            }));
+          }
+        } catch (error) {
+          logger.warn(`Failed to fetch messages for chat ${chatId}: ${error}`);
+        }
+      }
+      
+      if (Object.keys(chatMessagesWithContent).length > 0) {
+        thinking.push(`Retrieved full message content for ${Object.keys(chatMessagesWithContent).length} chats`);
+      }
+    }
+
     // Use personName and hasTeamsKeywords from earlier detection
 
     // Provide guidance on which tools to use based on results
@@ -1308,7 +1525,7 @@ async function handleSearch(
         toolSuggestions.push(
           '💡 Try compound tool "find-messages-with-person" for Teams chats with a specific person'
         );
-        toolSuggestions.push('💡 Try "teams" tool with action "chats" to list all chats');
+        toolSuggestions.push('💡 Try "teams" tool with action "chats" (includes last messages) to list all chats');
       }
       if (personName) {
         toolSuggestions.push(
@@ -1359,13 +1576,19 @@ async function handleSearch(
       );
     }
 
-    const output = {
+    const output: Record<string, unknown> = {
       query: input.query,
       totalHits,
       entityTypes: Object.keys(formattedResults),
       results: formattedResults,
       suggestions: [...new Set(toolSuggestions)],
     };
+    
+    // Add full chat messages if fetched
+    if (Object.keys(chatMessagesWithContent).length > 0) {
+      output.chatMessagesWithContent = chatMessagesWithContent;
+      output.note = 'Full message content has been fetched for the chats found in search results. Use "teams" tool with action "chat-messages" and the chatId to get more messages.';
+    }
 
     return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
   } catch (error) {
