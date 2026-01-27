@@ -792,6 +792,68 @@ docker run -d -p 3000:3000 \
 - **GDPR/DSGVO** - Data protection by design
 - **OWASP** - Security best practices
 
+---
+
+## 📊 Query Dashboard
+
+The Query Dashboard provides a secure web interface to view and analyze all user queries. This feature enables auditing, analytics, and debugging of MCP tool usage.
+
+### Features
+
+- 📈 **Real-time Statistics** - Total queries, unique users, success rates
+- 🔍 **Query Search & Filtering** - Filter by tool, user, date, status
+- 📉 **Hourly Activity Charts** - Visual query distribution over 24 hours
+- 🔒 **Password Protected** - Secure access via environment variable
+- 📥 **GDPR Data Export** - Export user data for data portability
+- 🗑️ **GDPR Erasure** - Delete user data (Right to be Forgotten)
+
+### Enabling the Dashboard
+
+1. Set the `DASHBOARD_PASSWORD` environment variable:
+
+```bash
+# In stack.env or docker-compose environment
+DASHBOARD_PASSWORD=your-secure-password-here
+```
+
+2. Access the dashboard at: `https://your-server.com/dashboard`
+
+3. Log in with the password you set.
+
+### Configuration Options
+
+| Variable                     | Description                             | Default   |
+| ---------------------------- | --------------------------------------- | --------- |
+| `DASHBOARD_PASSWORD`         | Password to access dashboard (required) | _not set_ |
+| `QUERY_STORE_DIR`            | Directory for query storage             | `./data`  |
+| `QUERY_STORE_MAX_QUERIES`    | Maximum queries to retain               | `100000`  |
+| `QUERY_STORE_RETENTION_DAYS` | Days to keep queries (GDPR)             | `90`      |
+
+### Security Notes
+
+- Dashboard is **disabled by default** until password is set
+- Sessions expire after 8 hours
+- Rate limiting on login attempts (5 attempts, 15 min lockout)
+- All stored user IDs are hashed for pseudonymization
+- IP addresses are anonymized (first 2 octets only)
+- Sensitive data (tokens, passwords) is never stored
+
+### API Endpoints
+
+| Endpoint                            | Method | Description               |
+| ----------------------------------- | ------ | ------------------------- |
+| `/dashboard/login`                  | GET    | Login page                |
+| `/dashboard/login`                  | POST   | Authenticate              |
+| `/dashboard/logout`                 | POST   | End session               |
+| `/dashboard`                        | GET    | Main dashboard            |
+| `/dashboard/api/queries`            | GET    | List queries with filters |
+| `/dashboard/api/stats`              | GET    | Query statistics          |
+| `/dashboard/api/tools`              | GET    | List of used tools        |
+| `/dashboard/api/export/:userIdHash` | GET    | Export user data (GDPR)   |
+| `/dashboard/api/user/:userIdHash`   | DELETE | Delete user data (GDPR)   |
+
+---
+
 ### Required Permissions (Scopes)
 
 #### Personal Account

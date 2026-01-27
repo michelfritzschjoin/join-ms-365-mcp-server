@@ -1,5 +1,27 @@
 import { Request, Response, NextFunction } from 'express';
 import logger from '../logger.js';
+import { getQueryStore } from '../query-store.js';
+
+/**
+ * Extract user ID from request for query logging
+ */
+function extractUserIdForLogging(req: Request): string {
+  // Try to get from microsoftAuth
+  const microsoftAuth = (req as Request & { microsoftAuth?: { accessToken?: string } })
+    .microsoftAuth;
+  if (microsoftAuth?.accessToken) {
+    try {
+      const parts = microsoftAuth.accessToken.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+        return payload.oid || payload.sub || payload.unique_name || 'authenticated';
+      }
+    } catch {
+      return 'authenticated';
+    }
+  }
+  return 'anonymous';
+}
 
 /**
  * Middleware to log all HTTP requests for debugging purposes.
@@ -102,6 +124,99 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
 }
 
 /**
+ * Check if this is an MCP tool call request and log it to QueryStore
+ */
+function logMcpToolCall(
+  req: Request,
+  res: Response,
+  startTime: number,
+  responseBody: unknown
+): void {
+  try {
+    // Only process MCP requests
+    if (!req.path.includes('/mcp') || req.method !== 'POST') {
+      return;
+    }
+
+    const body = req.body;
+    if (!body || body.jsonrpc !== '2.0') {
+      return;
+    }
+
+    // Check if this is a tools/call request
+    if (body.method !== 'tools/call') {
+      return;
+    }
+
+    const queryStore = getQueryStore();
+    const toolName = body.params?.name || 'unknown';
+    const toolParams = body.params?.arguments || {};
+    const userId = extractUserIdForLogging(req);
+    const durationMs = Date.now() - startTime;
+
+    // Determine success from response
+    let success = true;
+    let errorMessage: string | undefined;
+    let responseSummary: string | undefined;
+
+    if (responseBody && typeof responseBody === 'object') {
+      const respObj = responseBody as Record<string, unknown>;
+      if (respObj.error) {
+        success = false;
+        errorMessage =
+          typeof respObj.error === 'object'
+            ? (respObj.error as Record<string, unknown>).message?.toString()
+            : respObj.error?.toString();
+      } else if (respObj.result) {
+        const result = respObj.result as Record<string, unknown>;
+        if (result.isError === true) {
+          success = false;
+          errorMessage = 'Tool returned error';
+        }
+        // Extract summary from content
+        if (Array.isArray(result.content)) {
+          const textContent = result.content.find(
+            (c: Record<string, unknown>) => c.type === 'text'
+          );
+          if (textContent && typeof textContent.text === 'string') {
+            responseSummary = textContent.text.substring(0, 500);
+          }
+        }
+      }
+    }
+
+    // Extract chat ID from headers
+    const chatId =
+      req.get('X-OpenWebUI-Chat-ID') ||
+      req.get('X-Chat-ID') ||
+      req.get('X-Conversation-ID') ||
+      req.get('X-Session-ID');
+
+    queryStore.storeQuery({
+      userIdHash: queryStore.hashUserId(userId),
+      chatId: chatId || undefined,
+      toolName,
+      parameters: toolParams,
+      responseSummary,
+      success,
+      errorMessage,
+      durationMs,
+      ipAnonymized: req.ip ? queryStore.anonymizeIp(req.ip) : undefined,
+      userAgent: req.get('User-Agent'),
+    });
+
+    logger.debug('MCP tool call logged to QueryStore', {
+      toolName,
+      success,
+      durationMs,
+    });
+  } catch (error) {
+    // Don't let logging errors break the request
+    logger.error('Error logging MCP tool call:', error);
+  }
+}
+
+/**
  * Helper function to log response details
  */
 function logResponse(
@@ -190,6 +305,9 @@ function logResponse(
   }
 
   logger.info(`[${requestId}] Response ${res.statusCode} ${req.method} ${req.path}`, responseInfo);
+
+  // Log MCP tool calls to QueryStore for analytics
+  logMcpToolCall(req, res, startTime, body);
 }
 
 /**

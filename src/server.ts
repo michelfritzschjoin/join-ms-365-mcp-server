@@ -22,6 +22,7 @@ import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext, createTokenHash } from './request-context.js';
 import { randomUUID } from 'crypto';
+import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
 
 /**
  * Extract chat ID from request headers
@@ -1741,6 +1742,16 @@ class MicrosoftGraphServer {
         }
       );
 
+      // Query Dashboard (password protected)
+      if (isDashboardEnabled()) {
+        logger.info('Query Dashboard enabled - access at /dashboard');
+        app.use('/dashboard', createDashboardRouter());
+      } else {
+        logger.info(
+          'Query Dashboard disabled - set DASHBOARD_PASSWORD environment variable to enable'
+        );
+      }
+
       // Health check endpoint
       app.get('/', (req, res) => {
         res.json({
@@ -1753,6 +1764,7 @@ class MicrosoftGraphServer {
             token: '/token',
             oauthDiscovery: '/.well-known/oauth-authorization-server',
             protectedResourceDiscovery: '/.well-known/oauth-protected-resource',
+            ...(isDashboardEnabled() ? { dashboard: '/dashboard' } : {}),
           },
         });
       });
