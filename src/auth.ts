@@ -263,14 +263,9 @@ class AuthManager {
       if (selectedAccountData) {
         const parsed = JSON.parse(selectedAccountData);
         this.selectedAccountId = parsed.accountId;
-        // SECURITY: Don't log full account ID - use redacted prefix for correlation
+        // SECURITY: Don't log any part of account ID - just indicate it was loaded
         if (this.selectedAccountId) {
-          // Use first 4 chars + length indicator for correlation (no crypto needed)
-          const redacted =
-            this.selectedAccountId.length > 4
-              ? `${this.selectedAccountId.substring(0, 4)}...[${this.selectedAccountId.length}]`
-              : '[redacted]';
-          logger.info(`Loaded selected account: ${redacted}`);
+          logger.info('Loaded selected account from storage');
         }
       }
     } catch (error) {
@@ -375,15 +370,11 @@ class AuthManager {
       if (selectedAccount) {
         return selectedAccount;
       }
-      // SECURITY: Don't log full account ID - use redacted prefix for correlation
+      // SECURITY: Don't log any part of account ID - just indicate the issue
       if (this.selectedAccountId) {
-        const redacted =
-          this.selectedAccountId.length > 4
-            ? `${this.selectedAccountId.substring(0, 4)}...[${this.selectedAccountId.length}]`
-            : '[redacted]';
-        logger.warn(`Selected account ${redacted} not found, falling back to first account`);
+        logger.warn('Previously selected account not found, falling back to first account');
       } else {
-        logger.warn('Selected account not found, falling back to first account');
+        logger.warn('No selected account configured, falling back to first account');
       }
     }
 

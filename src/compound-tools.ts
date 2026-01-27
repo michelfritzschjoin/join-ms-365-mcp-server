@@ -33,61 +33,58 @@ function sanitizeHtml(html: string): string {
     return '';
   }
 
-  let sanitized = html;
-  let previousLength: number;
-  let iterations = 0;
-  const maxIterations = 10; // Prevent infinite loops
+  // SECURITY: Use a simple, safe approach - remove ALL HTML by extracting text content only
+  // This avoids complex regex patterns that could be exploited or incomplete
+  let result = html;
 
-  // SECURITY: Iterative sanitization to handle nested/malformed tags
-  // Continue until no more changes are made or max iterations reached
-  do {
-    previousLength = sanitized.length;
-    iterations++;
+  // Step 1: Remove all content between dangerous tag pairs using indexOf (no regex)
+  // This is safer than regex as it handles the full content removal
+  const dangerousTags = ['script', 'style', 'iframe', 'object', 'form', 'textarea', 'select'];
+  for (const tag of dangerousTags) {
+    let idx = 0;
+    let maxLoops = 100; // Prevent infinite loops
+    while (maxLoops-- > 0) {
+      const openTag = result.toLowerCase().indexOf('<' + tag, idx);
+      if (openTag === -1) break;
 
-    // SECURITY: Remove dangerous tags - use simple patterns without complex regex
-    // Remove script tags (case insensitive, handles attributes)
-    sanitized = sanitized.replace(/<script[^]*?<\/script>/gi, '');
-    sanitized = sanitized.replace(/<script[^>]*>/gi, '');
+      const closeTag = result.toLowerCase().indexOf('</' + tag, openTag);
+      if (closeTag === -1) {
+        // No closing tag found - remove just the opening tag
+        const tagEnd = result.indexOf('>', openTag);
+        if (tagEnd !== -1) {
+          result = result.substring(0, openTag) + result.substring(tagEnd + 1);
+        } else {
+          break;
+        }
+      } else {
+        // Find the end of the closing tag
+        const closeEnd = result.indexOf('>', closeTag);
+        if (closeEnd !== -1) {
+          result = result.substring(0, openTag) + result.substring(closeEnd + 1);
+        } else {
+          result = result.substring(0, openTag) + result.substring(closeTag);
+        }
+      }
+    }
+  }
 
-    // Remove style tags
-    sanitized = sanitized.replace(/<style[^]*?<\/style>/gi, '');
-    sanitized = sanitized.replace(/<style[^>]*>/gi, '');
+  // Step 2: Remove all remaining HTML tags using a simple character-by-character approach
+  let output = '';
+  let inTag = false;
+  for (let i = 0; i < result.length; i++) {
+    const char = result[i];
+    if (char === '<') {
+      inTag = true;
+      output += ' '; // Replace tag with space
+    } else if (char === '>') {
+      inTag = false;
+    } else if (!inTag) {
+      output += char;
+    }
+  }
+  result = output;
 
-    // Remove iframe tags
-    sanitized = sanitized.replace(/<iframe[^]*?<\/iframe>/gi, '');
-    sanitized = sanitized.replace(/<iframe[^>]*>/gi, '');
-
-    // Remove object tags
-    sanitized = sanitized.replace(/<object[^]*?<\/object>/gi, '');
-    sanitized = sanitized.replace(/<object[^>]*>/gi, '');
-
-    // Remove other dangerous self-closing or void tags
-    sanitized = sanitized.replace(/<embed[^>]*\/?>/gi, '');
-    sanitized = sanitized.replace(/<link[^>]*\/?>/gi, '');
-    sanitized = sanitized.replace(/<meta[^>]*\/?>/gi, '');
-    sanitized = sanitized.replace(/<base[^>]*\/?>/gi, '');
-
-    // Remove form-related tags
-    sanitized = sanitized.replace(/<form[^]*?<\/form>/gi, '');
-    sanitized = sanitized.replace(/<form[^>]*>/gi, '');
-    sanitized = sanitized.replace(/<input[^>]*\/?>/gi, '');
-    sanitized = sanitized.replace(/<button[^]*?<\/button>/gi, '');
-    sanitized = sanitized.replace(/<button[^>]*>/gi, '');
-    sanitized = sanitized.replace(/<textarea[^]*?<\/textarea>/gi, '');
-    sanitized = sanitized.replace(/<select[^]*?<\/select>/gi, '');
-
-    // Remove event handlers from any remaining tags (onclick, onerror, etc.)
-    sanitized = sanitized.replace(/\s+on\w+\s*=\s*["'][^"']*["']/gi, '');
-    sanitized = sanitized.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
-  } while (sanitized.length !== previousLength && iterations < maxIterations);
-
-  // SECURITY: Remove all remaining HTML tags
-  sanitized = sanitized.replace(/<\/?[a-zA-Z][^>]*>/g, ' ');
-
-  // SECURITY: Remove any remaining angle brackets that might be part of malformed tags
-  sanitized = sanitized.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-  // SECURITY: Decode common HTML entities (single pass, specific entities only)
+  // Step 3: Decode common HTML entities using split/join (safe, no regex)
   const entityReplacements: [string, string][] = [
     ['&nbsp;', ' '],
     ['&amp;', '&'],
@@ -102,28 +99,25 @@ function sanitizeHtml(html: string): string {
   ];
 
   for (const [entity, replacement] of entityReplacements) {
-    // Use split/join for safe replacement without regex
-    sanitized = sanitized.split(entity).join(replacement);
+    result = result.split(entity).join(replacement);
   }
 
-  // Decode numeric entities (decimal) - only safe ASCII range, limited length
-  sanitized = sanitized.replace(/&#(\d{1,4});/g, (match, dec) => {
+  // Step 4: Decode numeric entities (decimal) - only safe ASCII range
+  result = result.replace(/&#(\d{1,4});/g, (match, dec) => {
     const code = parseInt(dec, 10);
-    // Only decode safe printable ASCII (32-126)
     return code >= 32 && code <= 126 ? String.fromCharCode(code) : match;
   });
 
-  // Decode hex entities - only safe ASCII range, limited length
-  sanitized = sanitized.replace(/&#x([0-9a-fA-F]{1,4});/g, (match, hex) => {
+  // Step 5: Decode hex entities - only safe ASCII range
+  result = result.replace(/&#x([0-9a-fA-F]{1,4});/g, (match, hex) => {
     const code = parseInt(hex, 16);
-    // Only decode safe printable ASCII (32-126)
     return code >= 32 && code <= 126 ? String.fromCharCode(code) : match;
   });
 
-  // Normalize whitespace (single pass)
-  sanitized = sanitized.replace(/\s+/g, ' ').trim();
+  // Step 6: Normalize whitespace
+  result = result.replace(/\s+/g, ' ').trim();
 
-  return sanitized;
+  return result;
 }
 
 /**

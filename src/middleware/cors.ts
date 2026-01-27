@@ -36,18 +36,18 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction):
   }
 
   // Set CORS headers
-  // SECURITY: Never allow credentials with wildcard origin (CORS spec violation)
-  // Only set headers if we have a valid origin
-  if (allowedOrigin) {
+  // SECURITY: Handle wildcard and specific origins in completely separate branches
+  // to prevent any possibility of credentials being set with wildcard
+  if (allowedOrigin === '*') {
+    // WILDCARD BRANCH: Never set credentials with wildcard origin (CORS spec violation)
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Explicitly do NOT set Access-Control-Allow-Credentials here
+  } else if (allowedOrigin) {
+    // SPECIFIC ORIGIN BRANCH: Safe to set credentials with specific origin
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-    // SECURITY: Credentials are ONLY allowed with specific origins, never with wildcard
-    // This is enforced by checking allowedOrigin !== '*' before setting credentials
-    const isSpecificOrigin = allowedOrigin !== '*';
-    if (isSpecificOrigin) {
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
-    // Note: When allowedOrigin === '*', credentials header is intentionally NOT set
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
+  // If allowedOrigin is undefined/null, no CORS headers are set
 
   // Set allowed methods
   const allowedMethods = process.env.MS365_MCP_CORS_METHODS || 'GET, POST, PUT, DELETE, OPTIONS';
