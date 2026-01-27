@@ -615,15 +615,16 @@ class MicrosoftGraphServer {
           });
 
           // SECURITY: Validate and sanitize OAuth callback parameters to prevent type confusion
+          // Note: redirect_uri can be URLs, URNs (urn:ietf:wg:oauth:2.0:oob), or custom schemes
           const oauthCallbackSchema = z.object({
             code: z.string().max(2000).optional(),
             error: z.string().max(200).optional(),
-            error_description: z.string().max(1000).optional(),
-            state: z.string().max(2000).optional(),
+            error_description: z.string().max(2000).optional(), // Increased for verbose MS error descriptions
+            state: z.string().max(4000).optional(), // Increased for base64-encoded state with client info
             format: z.enum(['html', 'json']).optional(),
             exchange_token: z.enum(['true', '1', 'false', '0']).optional(),
             code_verifier: z.string().max(200).optional(),
-            redirect_uri: z.string().url().max(2000).optional(),
+            redirect_uri: z.string().max(2000).optional(), // Removed .url() - can be URN or custom scheme
           });
 
           let validatedParams: z.infer<typeof oauthCallbackSchema>;
@@ -639,7 +640,15 @@ class MicrosoftGraphServer {
               redirect_uri: req.query.redirect_uri,
             });
           } catch (validationError) {
-            logger.warn('Invalid OAuth callback parameters', { error: validationError });
+            logger.warn('Invalid OAuth callback parameters', {
+              error: validationError,
+              query: {
+                hasCode: !!req.query.code,
+                hasError: !!req.query.error,
+                hasState: !!req.query.state,
+                stateLength: typeof req.query.state === 'string' ? req.query.state.length : 0,
+              },
+            });
             return res.status(400).json({
               error: 'invalid_request',
               error_description: 'Invalid request parameters',

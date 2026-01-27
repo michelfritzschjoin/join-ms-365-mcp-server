@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* allow unsafe-inline scripts for dashboard routes in csp ([98c063e](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/98c063eeec16f5db38835570f8c4884e56410139))
+- allow unsafe-inline scripts for dashboard routes in csp ([98c063e](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/98c063eeec16f5db38835570f8c4884e56410139))
 
 ## [1.2.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.2.0...v1.2.1) (2026-01-27)
 
