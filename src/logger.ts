@@ -42,13 +42,31 @@ const logger = winston.createLogger({
   ],
 });
 
-export const enableConsoleLogging = (): void => {
+// Enable console logging by default unless SILENT is set
+// This ensures LOG_LEVEL=debug works without requiring -v flag
+const isSilent = process.env.SILENT === 'true' || process.env.SILENT === '1';
+if (!isSilent) {
   logger.add(
     new winston.transports.Console({
       format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
-      silent: process.env.SILENT === 'true' || process.env.SILENT === '1',
     })
   );
+}
+
+export const enableConsoleLogging = (): void => {
+  // Check if console transport already exists
+  const hasConsoleTransport = logger.transports.some(
+    (transport) => transport instanceof winston.transports.Console
+  );
+
+  if (!hasConsoleTransport) {
+    logger.add(
+      new winston.transports.Console({
+        format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
+        silent: process.env.SILENT === 'true' || process.env.SILENT === '1',
+      })
+    );
+  }
 };
 
 export default logger;

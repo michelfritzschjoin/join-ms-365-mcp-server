@@ -207,7 +207,9 @@ class MicrosoftGraphServer {
       };
 
       const originalTool = mcpServer.tool.bind(mcpServer);
+      const originalRegisterTool = mcpServer.registerTool.bind(mcpServer);
 
+      // Helper functions for schema validation
       const isPlainObject = (value: unknown): value is Record<string, unknown> =>
         typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -215,7 +217,91 @@ class MicrosoftGraphServer {
         isPlainObject(value) &&
         (typeof (value as any).parse === 'function' ||
           (value as any)._def != null ||
-          (value as any)._zod != null);
+          ((value as any)._zod != null && (value as any)._zod !== undefined));
+
+      const isValidZodSchema = (value: unknown): boolean => {
+        if (!looksLikeZodSchema(value)) {
+          return false;
+        }
+        // Additional validation: ensure _zod is not undefined if present
+        const schema = value as any;
+        if (schema._zod !== undefined && schema._zod === null) {
+          return false; // _zod is explicitly null, not valid
+        }
+        return true;
+      };
+
+      // Wrap registerTool to sanitize schemas before registration
+      mcpServer.registerTool = (name: string, config: any, cb: any) => {
+        try {
+          // Sanitize inputSchema if present
+          if (config.inputSchema) {
+            const schema = config.inputSchema;
+            // Check for malformed Zod v4 schemas with undefined _zod
+            if (looksLikeZodSchema(schema)) {
+              const schemaAny = schema as any;
+              if ('_zod' in schemaAny && schemaAny._zod === undefined) {
+                logger.warn(
+                  `Tool ${name} registered with malformed Zod schema (_zod is undefined), using safe fallback`
+                );
+                config.inputSchema = z.object({});
+              } else {
+                // Try to extract and sanitize the shape if it's a z.object()
+                try {
+                  // Handle both v3 (shape) and v4 (_zod.def.shape) schemas
+                  let shape: Record<string, unknown> | undefined;
+                  if (schemaAny._zod?.def?.shape) {
+                    shape = schemaAny._zod.def.shape;
+                  } else if (schemaAny.shape) {
+                    shape =
+                      typeof schemaAny.shape === 'function' ? schemaAny.shape() : schemaAny.shape;
+                  }
+
+                  if (shape && typeof shape === 'object' && !Array.isArray(shape)) {
+                    const sanitizedShape: Record<string, z.ZodTypeAny> = {};
+                    for (const [key, value] of Object.entries(shape)) {
+                      if (value === undefined) {
+                        continue; // Skip undefined values
+                      }
+                      if (isValidZodSchema(value)) {
+                        sanitizedShape[key] = value as z.ZodTypeAny;
+                      } else {
+                        sanitizedShape[key] = z.any().optional();
+                      }
+                    }
+                    config.inputSchema = z.object(sanitizedShape);
+                  }
+                } catch (error) {
+                  // If shape extraction fails, use safe fallback
+                  logger.warn(
+                    `Tool ${name} schema shape extraction failed, using safe fallback: ${(error as Error).message}`
+                  );
+                  config.inputSchema = z.object({});
+                }
+              }
+            }
+          } else {
+            // Ensure we always have a schema (even if empty)
+            config.inputSchema = z.object({});
+          }
+          return originalRegisterTool(name, config, cb);
+        } catch (error) {
+          logger.error(
+            `Failed to register tool ${name}, using minimal safe schema: ${(error as Error).message}`
+          );
+          // Last resort: register with empty schema
+          return originalRegisterTool(
+            name,
+            {
+              title: config.title || name,
+              description: config.description || '',
+              inputSchema: z.object({}),
+              annotations: config.annotations || {},
+            },
+            cb
+          );
+        }
+      };
 
       mcpServer.tool = (name: string, ...rest: unknown[]) => {
         // Match the SDK's legacy overloads (name, [description], [shape], [annotations], cb)
@@ -259,8 +345,57 @@ class MicrosoftGraphServer {
           annotations = first;
         }
 
-        // Only apply the shim when we have a raw shape. Otherwise, preserve original behavior.
+        // If we have a raw shape, sanitize it. Otherwise, check if first arg is a Zod schema
+        // that might have issues (e.g., _zod property exists but is undefined).
         if (!rawShape) {
+          // Check if first arg is a Zod schema that might be malformed
+          if (looksLikeZodSchema(first)) {
+            const schema = first as any;
+            // Check if _zod property exists but is undefined (this causes crashes in MCP SDK)
+            if ('_zod' in schema && schema._zod === undefined) {
+              logger.warn(
+                `Tool ${name} has malformed Zod schema with undefined _zod, wrapping safely`
+              );
+              const annotationsObj =
+                second && typeof second === 'object' && !Array.isArray(second)
+                  ? (second as Record<string, unknown>)
+                  : {};
+              return mcpServer.registerTool(
+                name,
+                {
+                  title: (annotationsObj.title as string) || name,
+                  description,
+                  inputSchema: z.object({}), // Safe fallback
+                  annotations: annotationsObj,
+                },
+                callback as any
+              );
+            }
+          }
+          // Otherwise, preserve original behavior but validate schema if present
+          // Check if first arg is a Zod schema that needs validation
+          if (looksLikeZodSchema(first)) {
+            const schemaAny = first as any;
+            if ('_zod' in schemaAny && schemaAny._zod === undefined) {
+              logger.warn(
+                `Tool ${name} has malformed Zod schema (_zod is undefined), wrapping safely`
+              );
+              const annotationsObj =
+                second && typeof second === 'object' && !Array.isArray(second)
+                  ? (second as Record<string, unknown>)
+                  : {};
+              return mcpServer.registerTool(
+                name,
+                {
+                  title: (annotationsObj.title as string) || name,
+                  description,
+                  inputSchema: z.object({}),
+                  annotations: annotationsObj,
+                },
+                callback as any
+              );
+            }
+          }
           return originalTool(name, ...(rest as any));
         }
 
@@ -275,7 +410,12 @@ class MicrosoftGraphServer {
         // checking schema versions).
         const sanitizedShape: Record<string, z.ZodTypeAny> = {};
         for (const [key, value] of Object.entries(rawShape)) {
-          if (looksLikeZodSchema(value)) {
+          if (value === undefined) {
+            // Skip undefined values entirely - they cause crashes in MCP SDK
+            continue;
+          }
+
+          if (isValidZodSchema(value)) {
             sanitizedShape[key] = value as z.ZodTypeAny;
             continue;
           }
