@@ -21,7 +21,13 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import { getQueryStore, type QueryFilter } from './query-store.js';
 import logger from './logger.js';
-import { rateLimitMiddleware } from './middleware/rate-limit.js';
+import { rateLimitMiddleware, createRateLimitMiddleware } from './middleware/rate-limit.js';
+
+// SECURITY: Strict rate limiter for login endpoints (5 attempts per 15 minutes)
+const loginRateLimiter = createRateLimitMiddleware(
+  15 * 60 * 1000, // 15 minutes
+  5 // Only 5 attempts
+);
 
 /**
  * Session store for dashboard authentication
@@ -270,8 +276,9 @@ export function createDashboardRouter(): Router {
     res.send(getLoginPageHtml());
   });
 
-  // Login API with rate limiting middleware
-  router.post('/login', rateLimitMiddleware, async (req, res) => {
+  // Login API with strict rate limiting middleware
+  // SECURITY: Using strict login rate limiter (5 attempts per 15 minutes)
+  router.post('/login', loginRateLimiter, async (req, res) => {
     const ipAddress = req.ip || req.socket.remoteAddress || 'unknown';
 
     // Check rate limiting (additional layer)
