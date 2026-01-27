@@ -11,10 +11,17 @@ import logger from './logger.js';
 export interface FormattedCalendarEvent {
   id: string;
   subject: string;
+  // Server local time (primary display)
   startDate: string;
   startTime: string;
   endDate: string;
   endTime: string;
+  // UTC time (for reference)
+  startDateTimeUTC: string;
+  endDateTimeUTC: string;
+  // Combined display string: "10:30 (UTC: 09:30)"
+  startTimeDisplay: string;
+  endTimeDisplay: string;
   duration: string;
   isAllDay: boolean;
   location?: string;
@@ -51,10 +58,17 @@ export interface FormattedCalendarResponse {
 export interface FormattedMailMessage {
   id: string;
   subject: string;
+  // Server local time (primary display)
   receivedDate: string;
   receivedTime: string;
   sentDate: string;
   sentTime: string;
+  // UTC time (for reference)
+  receivedDateTimeUTC: string;
+  sentDateTimeUTC: string;
+  // Combined display string: "10:30 (UTC: 09:30)"
+  receivedTimeDisplay: string;
+  sentTimeDisplay: string;
   from: {
     name: string;
     email: string;
@@ -179,6 +193,45 @@ export function formatLocalTime(date: Date): string {
 }
 
 /**
+ * Format time to UTC time string (HH:MM)
+ */
+export function formatUTCTime(date: Date): string {
+  const hours = date.getUTCHours().toString().padStart(2, '0');
+  const minutes = date.getUTCMinutes().toString().padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+/**
+ * Format date to UTC date string (DD.MM.YYYY)
+ */
+export function formatUTCDate(date: Date): string {
+  const day = date.getUTCDate().toString().padStart(2, '0');
+  const month = (date.getUTCMonth() + 1).toString().padStart(2, '0');
+  const year = date.getUTCFullYear();
+  return `${day}.${month}.${year}`;
+}
+
+/**
+ * Format date and time to UTC datetime string (ISO format)
+ */
+export function formatUTCDateTime(date: Date): string {
+  return date.toISOString();
+}
+
+/**
+ * Format time with both local and UTC display
+ * Example: "10:30 (UTC: 09:30)"
+ */
+export function formatTimeWithUTC(date: Date): string {
+  const localTime = formatLocalTime(date);
+  const utcTime = formatUTCTime(date);
+  if (localTime === utcTime) {
+    return localTime;
+  }
+  return `${localTime} (UTC: ${utcTime})`;
+}
+
+/**
  * Format date and time to local datetime string
  */
 export function formatLocalDateTime(date: Date): string {
@@ -279,10 +332,17 @@ export function formatCalendarEvent(event: Record<string, unknown>): FormattedCa
   return {
     id: (event.id as string) || '',
     subject: (event.subject as string) || '(Kein Betreff)',
+    // Server local time
     startDate: formatLocalDate(startDateTime),
     startTime: formatLocalTime(startDateTime),
     endDate: formatLocalDate(endDateTime),
     endTime: formatLocalTime(endDateTime),
+    // UTC time
+    startDateTimeUTC: formatUTCDateTime(startDateTime),
+    endDateTimeUTC: formatUTCDateTime(endDateTime),
+    // Combined display: "10:30 (UTC: 09:30)"
+    startTimeDisplay: formatTimeWithUTC(startDateTime),
+    endTimeDisplay: formatTimeWithUTC(endDateTime),
     duration: calculateDuration(startDateTime, endDateTime),
     isAllDay: (event.isAllDay as boolean) || false,
     location: locationObj?.displayName || undefined,
@@ -361,11 +421,11 @@ export function calendarResponseToText(response: FormattedCalendarResponse): str
 
   // Header
   lines.push('📅 KALENDERÜBERSICHT');
-  lines.push('═'.repeat(50));
+  lines.push('═'.repeat(60));
   lines.push(`📊 Anzahl Termine: ${response.summary.totalEvents}`);
   lines.push(`📆 Zeitraum: ${response.summary.dateRange}`);
   lines.push(`🌍 Zeitzone: ${response.summary.timezone}`);
-  lines.push('═'.repeat(50));
+  lines.push('═'.repeat(60));
   lines.push('');
 
   if (response.summary.totalEvents === 0) {
@@ -373,7 +433,34 @@ export function calendarResponseToText(response: FormattedCalendarResponse): str
     return lines.join('\n');
   }
 
-  // Events grouped by date
+  // ============================================================
+  // QUICK SUMMARY LIST (so no event is overlooked)
+  // ============================================================
+  lines.push('📋 SCHNELLÜBERSICHT ALLER TERMINE:');
+  lines.push('─'.repeat(60));
+
+  // Sort all events by date and time
+  const allEventsSorted = [...response.events].sort((a, b) => {
+    const aDateStr = a.startDate.split('.').reverse().join('-') + 'T' + a.startTime;
+    const bDateStr = b.startDate.split('.').reverse().join('-') + 'T' + b.startTime;
+    return aDateStr.localeCompare(bDateStr);
+  });
+
+  for (let i = 0; i < allEventsSorted.length; i++) {
+    const event = allEventsSorted[i];
+    const statusIcon = event.isCancelled ? '❌' : event.isOnlineMeeting ? '💻' : '📍';
+    const timeStr = event.isAllDay ? 'Ganztägig' : event.startTimeDisplay;
+    const dateStr = event.startDate;
+    lines.push(`${i + 1}. ${statusIcon} ${dateStr} ${timeStr} | ${event.subject}`);
+  }
+
+  lines.push('');
+  lines.push('═'.repeat(60));
+  lines.push('📖 DETAILANSICHT:');
+  lines.push('═'.repeat(60));
+  lines.push('');
+
+  // Events grouped by date (detailed view)
   const sortedDates = Object.keys(response.groupedByDate).sort((a, b) => {
     const aDate = new Date(a.split('.').reverse().join('-'));
     const bDate = new Date(b.split('.').reverse().join('-'));
@@ -392,7 +479,7 @@ export function calendarResponseToText(response: FormattedCalendarResponse): str
       const statusIcon = event.isCancelled ? '❌' : event.isOnlineMeeting ? '💻' : '📍';
       const timeStr = event.isAllDay
         ? 'Ganztägig'
-        : `${event.startTime} - ${event.endTime} (${event.duration})`;
+        : `${event.startTimeDisplay} - ${event.endTimeDisplay} (${event.duration})`;
 
       lines.push(`${statusIcon} ${event.subject}`);
       lines.push(`   ⏰ ${timeStr}`);
@@ -512,10 +599,17 @@ export function formatMailMessage(message: Record<string, unknown>): FormattedMa
   return {
     id: (message.id as string) || '',
     subject: (message.subject as string) || '(Kein Betreff)',
+    // Server local time
     receivedDate: formatLocalDate(receivedDateTime),
     receivedTime: formatLocalTime(receivedDateTime),
     sentDate: formatLocalDate(sentDateTime),
     sentTime: formatLocalTime(sentDateTime),
+    // UTC time
+    receivedDateTimeUTC: formatUTCDateTime(receivedDateTime),
+    sentDateTimeUTC: formatUTCDateTime(sentDateTime),
+    // Combined display: "10:30 (UTC: 09:30)"
+    receivedTimeDisplay: formatTimeWithUTC(receivedDateTime),
+    sentTimeDisplay: formatTimeWithUTC(sentDateTime),
     from: {
       name: fromObj?.emailAddress?.name || fromObj?.emailAddress?.address || 'Unknown',
       email: fromObj?.emailAddress?.address || '',
@@ -590,12 +684,12 @@ export function mailResponseToText(response: FormattedMailResponse): string {
 
   // Header
   lines.push('📧 E-MAIL ÜBERSICHT');
-  lines.push('═'.repeat(50));
+  lines.push('═'.repeat(60));
   lines.push(`📊 Anzahl E-Mails: ${response.summary.totalMessages}`);
   lines.push(`📬 Ungelesen: ${response.summary.unreadCount}`);
   lines.push(`📆 Zeitraum: ${response.summary.dateRange}`);
   lines.push(`🌍 Zeitzone: ${response.summary.timezone}`);
-  lines.push('═'.repeat(50));
+  lines.push('═'.repeat(60));
   lines.push('');
 
   if (response.summary.totalMessages === 0) {
@@ -603,7 +697,35 @@ export function mailResponseToText(response: FormattedMailResponse): string {
     return lines.join('\n');
   }
 
-  // Messages grouped by date
+  // ============================================================
+  // QUICK SUMMARY LIST (so no email is overlooked)
+  // ============================================================
+  lines.push('📋 SCHNELLÜBERSICHT ALLER E-MAILS:');
+  lines.push('─'.repeat(60));
+
+  // Sort by date/time (newest first)
+  const allMessagesSorted = [...response.messages].sort((a, b) => {
+    const aDateStr = a.receivedDate.split('.').reverse().join('-') + 'T' + a.receivedTime;
+    const bDateStr = b.receivedDate.split('.').reverse().join('-') + 'T' + b.receivedTime;
+    return bDateStr.localeCompare(aDateStr); // Newest first
+  });
+
+  for (let i = 0; i < allMessagesSorted.length; i++) {
+    const msg = allMessagesSorted[i];
+    const readIcon = msg.isRead ? '📭' : '📬';
+    const attachIcon = msg.hasAttachments ? '📎' : '';
+    const flagIcon = msg.flag?.flagStatus === 'flagged' ? '🚩' : '';
+    const subjectShort = msg.subject.length > 40 ? msg.subject.substring(0, 40) + '...' : msg.subject;
+    lines.push(`${i + 1}. ${readIcon}${attachIcon}${flagIcon} ${msg.receivedDate} ${msg.receivedTimeDisplay} | ${msg.from.name} | ${subjectShort}`);
+  }
+
+  lines.push('');
+  lines.push('═'.repeat(60));
+  lines.push('📖 DETAILANSICHT:');
+  lines.push('═'.repeat(60));
+  lines.push('');
+
+  // Messages grouped by date (detailed view)
   const sortedDates = Object.keys(response.groupedByDate).sort((a, b) => {
     const aDate = new Date(a.split('.').reverse().join('-'));
     const bDate = new Date(b.split('.').reverse().join('-'));
@@ -628,7 +750,7 @@ export function mailResponseToText(response: FormattedMailResponse): string {
       const flagIcon = message.flag?.flagStatus === 'flagged' ? ' 🚩' : '';
 
       lines.push(`${readIcon}${attachmentIcon}${importanceIcon}${flagIcon} ${message.subject}`);
-      lines.push(`   ⏰ ${message.receivedTime} Uhr`);
+      lines.push(`   ⏰ ${message.receivedTimeDisplay}`);
       lines.push(`   👤 Von: ${message.from.name} <${message.from.email}>`);
 
       if (message.to.length > 0) {

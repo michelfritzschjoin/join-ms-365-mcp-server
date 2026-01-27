@@ -24,15 +24,22 @@ import { addThinkingToResponse, isThinkingEnabled } from './thinking-process.js'
  */
 async function callGraph(
   graphClient: GraphClient,
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE' | '',
   endpoint: string,
   queryParams?: Record<string, string>,
-  body?: unknown
+  body?: unknown,
+  headers?: Record<string, string>
 ): Promise<string> {
+  // Handle empty method (shouldn't happen but fail gracefully)
+  if (!method || !endpoint) {
+    throw new Error('Invalid callGraph: method and endpoint are required');
+  }
+
   const options: {
     method: string;
     queryParams?: Record<string, string>;
     body?: string;
+    headers?: Record<string, string>;
   } = { method };
 
   if (queryParams && Object.keys(queryParams).length > 0) {
@@ -41,6 +48,10 @@ async function callGraph(
 
   if (body) {
     options.body = JSON.stringify(body);
+  }
+
+  if (headers && Object.keys(headers).length > 0) {
+    options.headers = headers;
   }
 
   const result = await graphClient.makeRequest(endpoint, options);
@@ -378,7 +389,7 @@ async function handleCalendar(
 
     case 'calendars': {
       thinking.push('Listing all calendars');
-      const result = await callGraph(graphClient, '', '');
+      const result = await callGraph(graphClient, 'GET', '/me/calendars');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -492,7 +503,7 @@ async function handleTeams(
   switch (input.action) {
     case 'list-teams': {
       thinking.push('Listing joined teams');
-      const result = await callGraph(graphClient, '', '');
+      const result = await callGraph(graphClient, 'GET', '/me/joinedTeams');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -576,7 +587,7 @@ async function handleFiles(
   switch (input.action) {
     case 'drives': {
       thinking.push('Listing drives');
-      const result = await callGraph(graphClient, '', '');
+      const result = await callGraph(graphClient, 'GET', '/me/drives');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -691,7 +702,7 @@ async function handleTasks(
   switch (input.action) {
     case 'todo-lists': {
       thinking.push('Listing To-Do task lists');
-      const result = await callGraph(graphClient, '', '');
+      const result = await callGraph(graphClient, 'GET', '/me/todo/lists');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -715,7 +726,7 @@ async function handleTasks(
 
     case 'planner-tasks': {
       thinking.push('Listing Planner tasks assigned to me');
-      const result = await callGraph(graphClient, '', '');
+      const result = await callGraph(graphClient, 'GET', '/me/planner/tasks');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -837,7 +848,7 @@ async function handleContacts(
 
     case 'current-user': {
       thinking.push('Getting current user info');
-      const result = await callGraph(graphClient, '', '');
+      const result = await callGraph(graphClient, 'GET', '/me');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1063,7 +1074,7 @@ async function handleNotes(
   switch (input.action) {
     case 'notebooks': {
       thinking.push('Listing OneNote notebooks');
-      const result = await callGraph(graphClient, '', '');
+      const result = await callGraph(graphClient, 'GET', '/me/onenote/notebooks');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1358,7 +1369,7 @@ async function handleAssistant(
       });
       results.weekEvents = JSON.parse(eventsResult);
 
-      const tasksResult = await callGraph(graphClient, '', '');
+      const tasksResult = await callGraph(graphClient, 'GET', '/me/todo/lists');
       results.tasks = JSON.parse(tasksResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1402,7 +1413,7 @@ async function handleAssistant(
       });
       results.flaggedEmails = JSON.parse(flaggedEmails);
 
-      const tasks = await callGraph(graphClient, '', '');
+      const tasks = await callGraph(graphClient, 'GET', '/me/todo/lists');
       results.tasks = JSON.parse(tasks);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
