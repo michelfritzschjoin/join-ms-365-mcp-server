@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.7.1...v1.8.0) (2026-01-27)
+
+### Features
+
+* improve search function for Teams/person queries ([479be5f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/479be5f2bfe3ef9b2ef85455240b86c33b9e2991))
+
 ## [1.7.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.7.0...v1.7.1) (2026-01-27)
 
 ### Bug Fixes
