@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.2](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.6.1...v1.6.2) (2026-01-27)
+
+### Bug Fixes
+
+* replace callEndpoint with callGraph wrapper for GraphClient compatibility ([e113d38](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/e113d38eb778f1a07f194564209e7cfea5ac01da))
+
 ## [1.6.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.6.0...v1.6.1) (2026-01-27)
 
 ### Bug Fixes
