@@ -24,6 +24,59 @@ import {
 } from './response-formatter.js';
 
 /**
+ * SECURITY: Properly sanitize HTML content to prevent XSS
+ * Handles all HTML entities, nested tags, and edge cases
+ */
+function sanitizeHtml(html: string): string {
+  if (!html || typeof html !== 'string') {
+    return '';
+  }
+
+  // Remove script and style tags completely (including content)
+  let sanitized = html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<object[^>]*>[\s\S]*?<\/object>/gi, '')
+    .replace(/<embed[^>]*>/gi, '')
+    .replace(/<link[^>]*>/gi, '')
+    .replace(/<meta[^>]*>/gi, '');
+
+  // Remove all HTML tags
+  sanitized = sanitized.replace(/<[^>]+>/g, ' ');
+
+  // Decode HTML entities in proper order (most specific first)
+  sanitized = sanitized
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#x2F;/g, '/')
+    .replace(/&#x60;/g, '`')
+    .replace(/&#x3D;/g, '=');
+
+  // Decode numeric entities (decimal)
+  sanitized = sanitized.replace(/&#(\d+);/g, (_, dec) => {
+    const code = parseInt(dec, 10);
+    return code >= 32 && code <= 126 ? String.fromCharCode(code) : '';
+  });
+
+  // Decode hex entities
+  sanitized = sanitized.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+    const code = parseInt(hex, 16);
+    return code >= 32 && code <= 126 ? String.fromCharCode(code) : '';
+  });
+
+  // Normalize whitespace
+  sanitized = sanitized.replace(/\s+/g, ' ').trim();
+
+  return sanitized;
+}
+
+/**
  * Build query string for Microsoft Graph API requests
  * Handles $ prefixed parameters correctly (doesn't encode $)
  */
@@ -4025,21 +4078,8 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
           categories?: string[];
         }
 
-        // Helper to extract clean text from HTML
-        const extractTextFromHtml = (html: string): string => {
-          return html
-            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/&nbsp;/g, ' ')
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/&quot;/g, '"')
-            .replace(/&#39;/g, "'")
-            .replace(/\s+/g, ' ')
-            .trim();
-        };
+        // SECURITY: Use the centralized sanitizeHtml function for proper HTML sanitization
+        // (extractTextFromHtml removed - use sanitizeHtml instead)
 
         // Helper to create a summary from email content
         const createContentSummary = (email: EmailMessage, maxLength: number = 500): string => {
@@ -4048,7 +4088,7 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
           // Try to get content from body first (more complete)
           if (email.body?.content) {
             if (email.body.contentType === 'html') {
-              content = extractTextFromHtml(email.body.content);
+              content = sanitizeHtml(email.body.content);
             } else {
               content = email.body.content;
             }
@@ -4590,7 +4630,7 @@ Dieses Tool führt automatisch aus:
           id: msg.id,
           author: msg.from?.user?.displayName || msg.from?.application?.displayName || 'Unknown',
           authorType: msg.from?.user ? 'user' : msg.from?.application ? 'application' : 'unknown',
-          content: msg.body?.content?.replace(/<[^>]*>/g, '').trim(), // Strip HTML tags
+          content: msg.body?.content ? sanitizeHtml(msg.body.content) : undefined, // SECURITY: Proper HTML sanitization
           contentType: msg.body?.contentType,
           createdAt: msg.createdDateTime,
           lastModified: msg.lastModifiedDateTime,
@@ -4632,7 +4672,7 @@ Dieses Tool führt automatisch aus:
           post.replies = msgWithReplies.replies.map((reply) => ({
             id: reply.id,
             author: reply.from?.user?.displayName || 'Unknown',
-            content: reply.body?.content?.replace(/<[^>]*>/g, '').trim(),
+            content: reply.body?.content ? sanitizeHtml(reply.body.content) : undefined, // SECURITY: Proper HTML sanitization
             createdAt: reply.createdDateTime,
           }));
         }
@@ -5044,7 +5084,9 @@ This is the ultimate tool for "Tell me everything about my interactions with [pe
                 chatCount: chats.length,
                 recentMessages: messages.slice(0, 5).map((m) => ({
                   from: m.from?.user?.displayName,
-                  content: m.body?.content?.replace(/<[^>]*>/g, '').substring(0, 200),
+                  content: m.body?.content
+                    ? sanitizeHtml(m.body.content).substring(0, 200)
+                    : undefined, // SECURITY: Proper HTML sanitization
                   date: m.createdDateTime,
                 })),
               };

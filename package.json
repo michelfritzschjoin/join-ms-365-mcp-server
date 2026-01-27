@@ -42,6 +42,8 @@
     "@azure/msal-node": "^5.0.2",
     "@modelcontextprotocol/sdk": "^1.25.3",
     "@toon-format/toon": "^2.1.0",
+    "@types/bcrypt": "^6.0.0",
+    "bcrypt": "^6.0.0",
     "commander": "^14.0.2",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",

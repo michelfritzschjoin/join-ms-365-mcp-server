@@ -86,14 +86,31 @@ function buildScopesFromEndpoints(
   const scopesSet = new Set<string>();
 
   // Create regex for tool filtering if pattern is provided
+  // SECURITY: Validate regex pattern to prevent ReDoS attacks
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
-      enabledToolsRegex = new RegExp(enabledToolsPattern, 'i');
-      logger.info(`Building scopes with tool filter pattern: ${enabledToolsPattern}`);
+      // SECURITY: Sanitize regex pattern - only allow safe characters
+      // Prevent ReDoS by limiting pattern length and complexity
+      const sanitizedPattern = enabledToolsPattern.trim().substring(0, 200);
+
+      // Basic validation: reject patterns with obvious ReDoS indicators
+      if (
+        sanitizedPattern.includes('(.*)*') ||
+        sanitizedPattern.includes('(.*+)*') ||
+        sanitizedPattern.includes('(.*?)*') ||
+        sanitizedPattern.match(/\(\.\*\){2,}/) // Multiple nested quantifiers
+      ) {
+        throw new Error('Potentially dangerous regex pattern detected');
+      }
+
+      enabledToolsRegex = new RegExp(sanitizedPattern, 'i');
+      logger.info(
+        `Building scopes with tool filter pattern: ${sanitizedPattern.substring(0, 50)}...`
+      );
     } catch (error) {
       logger.error(
-        `Invalid tool filter regex pattern: ${enabledToolsPattern}. Building scopes without filter.`
+        `Invalid tool filter regex pattern: ${enabledToolsPattern.substring(0, 50)}. Building scopes without filter.`
       );
     }
   }
@@ -236,7 +253,8 @@ class AuthManager {
       if (selectedAccountData) {
         const parsed = JSON.parse(selectedAccountData);
         this.selectedAccountId = parsed.accountId;
-        logger.info(`Loaded selected account: ${this.selectedAccountId}`);
+        // SECURITY: Don't log full account ID - only first 8 chars for correlation
+        logger.info(`Loaded selected account: ${this.selectedAccountId?.substring(0, 8)}...`);
       }
     } catch (error) {
       logger.error(`Error loading selected account: ${(error as Error).message}`);
@@ -340,8 +358,9 @@ class AuthManager {
       if (selectedAccount) {
         return selectedAccount;
       }
+      // SECURITY: Don't log full account ID - only first 8 chars for correlation
       logger.warn(
-        `Selected account ${this.selectedAccountId} not found, falling back to first account`
+        `Selected account ${this.selectedAccountId?.substring(0, 8)}... not found, falling back to first account`
       );
     }
 

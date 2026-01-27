@@ -23,6 +23,7 @@ import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext, createTokenHash } from './request-context.js';
 import { randomUUID } from 'crypto';
 import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
+import { z } from 'zod';
 
 /**
  * Extract chat ID from request headers
@@ -613,10 +614,42 @@ class MicrosoftGraphServer {
             state: req.query.state,
           });
 
-          const code = req.query.code as string | undefined;
-          const error = req.query.error as string | undefined;
-          const errorDescription = req.query.error_description as string | undefined;
-          const state = req.query.state as string | undefined;
+          // SECURITY: Validate and sanitize OAuth callback parameters to prevent type confusion
+          const oauthCallbackSchema = z.object({
+            code: z.string().max(2000).optional(),
+            error: z.string().max(200).optional(),
+            error_description: z.string().max(1000).optional(),
+            state: z.string().max(2000).optional(),
+            format: z.enum(['html', 'json']).optional(),
+            exchange_token: z.enum(['true', '1', 'false', '0']).optional(),
+            code_verifier: z.string().max(200).optional(),
+            redirect_uri: z.string().url().max(2000).optional(),
+          });
+
+          let validatedParams: z.infer<typeof oauthCallbackSchema>;
+          try {
+            validatedParams = oauthCallbackSchema.parse({
+              code: req.query.code,
+              error: req.query.error,
+              error_description: req.query.error_description,
+              state: req.query.state,
+              format: req.query.format,
+              exchange_token: req.query.exchange_token,
+              code_verifier: req.query.code_verifier,
+              redirect_uri: req.query.redirect_uri,
+            });
+          } catch (validationError) {
+            logger.warn('Invalid OAuth callback parameters', { error: validationError });
+            return res.status(400).json({
+              error: 'invalid_request',
+              error_description: 'Invalid request parameters',
+            });
+          }
+
+          const code = validatedParams.code;
+          const error = validatedParams.error;
+          const errorDescription = validatedParams.error_description;
+          const state = validatedParams.state;
 
           // Handle OAuth errors from Microsoft
           if (error) {
@@ -697,7 +730,7 @@ class MicrosoftGraphServer {
             // Default to JSON for programmatic clients (MCP protocol expects structured responses)
             // Only return HTML if explicitly requested (browsers with text/html Accept header)
             const acceptHeader = req.get('Accept') || '';
-            const formatParam = req.query.format as string | undefined;
+            const formatParam = validatedParams.format;
             // Only return HTML if:
             // 1. format=html is explicitly set, OR
             // 2. Accept header includes text/html AND doesn't include application/json
@@ -738,13 +771,13 @@ class MicrosoftGraphServer {
 
             // Check if client explicitly requests token exchange (via query parameter)
             const requestToken =
-              req.query.exchange_token === 'true' || req.query.exchange_token === '1';
+              validatedParams.exchange_token === 'true' || validatedParams.exchange_token === '1';
 
             // Try to automatically exchange code for token ONLY if:
             // 1. Client explicitly requests it (exchange_token=true), AND
             // 2. We have a code_verifier (for PKCE flows) OR client_secret (for confidential clients)
             // Otherwise, return the code and let the MCP client (like OpenWebUI) handle the exchange
-            const codeVerifier = req.query.code_verifier as string | undefined;
+            const codeVerifier = validatedParams.code_verifier;
             const hasCodeVerifier = !!codeVerifier;
             const hasClientSecret = !!this.secrets?.clientSecret;
 
@@ -754,7 +787,8 @@ class MicrosoftGraphServer {
             if (shouldAttemptAutoExchange) {
               const protocol = req.secure ? 'https' : 'http';
               const baseUrl = `${protocol}://${req.get('host')}`;
-              const redirectUri = (req.query.redirect_uri as string) || `${baseUrl}/callback`;
+              // SECURITY: Use validated redirect_uri or fallback to our callback
+              const redirectUri = validatedParams.redirect_uri || `${baseUrl}/callback`;
 
               // Attempt automatic token exchange for MCP clients
               try {
@@ -901,7 +935,7 @@ class MicrosoftGraphServer {
                   }
 
                   logger.info('Redirecting to MCP client redirect_uri with authorization code', {
-                    redirectUri: originalRedirectUri,
+                    redirectUri: originalRedirectUri.substring(0, 100), // SECURITY: Truncate in logs
                     codeLength: code.length,
                     stateIncluded: originalState !== null,
                     stateLength: originalState?.length ?? 0,
@@ -933,7 +967,7 @@ class MicrosoftGraphServer {
                 }
 
                 logger.info('Redirecting to MCP client (from Referer) with authorization code', {
-                  clientUrl: redirectUrl.toString(),
+                  clientUrl: redirectUrl.toString().substring(0, 100), // SECURITY: Truncate in logs
                   codeLength: code.length,
                   stateIncluded: originalState !== null,
                 });
@@ -962,7 +996,7 @@ class MicrosoftGraphServer {
               'No redirect_uri provided, returning authorization code via HTML page with postMessage',
               {
                 codeLength: code.length,
-                state,
+                stateLength: state?.length ?? 0, // SECURITY: Log length, not content
               }
             );
 

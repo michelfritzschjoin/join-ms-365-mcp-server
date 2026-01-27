@@ -18,9 +18,10 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { createHash, randomBytes, timingSafeEqual } from 'crypto';
+import { randomBytes, timingSafeEqual } from 'crypto';
 import { getQueryStore, type QueryFilter } from './query-store.js';
 import logger from './logger.js';
+import { rateLimitMiddleware } from './middleware/rate-limit.js';
 
 /**
  * Session store for dashboard authentication
@@ -40,36 +41,54 @@ const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
 // Track login attempts for rate limiting
 const loginAttempts: Map<string, { count: number; lastAttempt: Date }> = new Map();
 
+// Cache for hashed password (hashed once on first access)
+let cachedPasswordHash: string | null = null;
+
 /**
- * Get dashboard password from environment
+ * Get dashboard password hash from environment
+ * SECURITY: Hash is computed once and cached for performance
  */
-function getDashboardPassword(): string | null {
-  return process.env.DASHBOARD_PASSWORD || null;
+async function getDashboardPasswordHash(): Promise<string | null> {
+  const password = process.env.DASHBOARD_PASSWORD;
+  if (!password) {
+    return null;
+  }
+
+  // Cache the hash to avoid re-hashing on every request
+  if (!cachedPasswordHash) {
+    cachedPasswordHash = await hashPassword(password);
+  }
+
+  return cachedPasswordHash;
 }
 
 /**
  * Check if dashboard is enabled
  */
 export function isDashboardEnabled(): boolean {
-  return !!getDashboardPassword();
+  return !!process.env.DASHBOARD_PASSWORD;
 }
 
 /**
- * Hash password for comparison
+ * Hash password for comparison using bcrypt (secure, slow hashing)
+ * SECURITY: Use bcrypt with proper cost factor to prevent brute force attacks
  */
-function hashPassword(password: string): string {
-  return createHash('sha256').update(password).digest('hex');
+async function hashPassword(password: string): Promise<string> {
+  // Dynamic import to avoid requiring bcrypt as a hard dependency
+  // bcrypt will be added as a dependency
+  const bcrypt = await import('bcrypt');
+  const saltRounds = 12; // OWASP recommended minimum: 10-12 rounds
+  return await bcrypt.hash(password, saltRounds);
 }
 
 /**
- * Secure password comparison (timing-safe)
+ * Secure password comparison using bcrypt (timing-safe)
+ * SECURITY: Use bcrypt.compare which is timing-safe and handles salt automatically
  */
-function verifyPassword(input: string, expected: string): boolean {
-  const inputHash = hashPassword(input);
-  const expectedHash = hashPassword(expected);
-
+async function verifyPassword(input: string, expectedHash: string): Promise<boolean> {
   try {
-    return timingSafeEqual(Buffer.from(inputHash), Buffer.from(expectedHash));
+    const bcrypt = await import('bcrypt');
+    return await bcrypt.compare(input, expectedHash);
   } catch {
     return false;
   }
@@ -251,11 +270,11 @@ export function createDashboardRouter(): Router {
     res.send(getLoginPageHtml());
   });
 
-  // Login API
-  router.post('/login', (req, res) => {
+  // Login API with rate limiting middleware
+  router.post('/login', rateLimitMiddleware, async (req, res) => {
     const ipAddress = req.ip || req.socket.remoteAddress || 'unknown';
 
-    // Check rate limiting
+    // Check rate limiting (additional layer)
     if (isLoginRateLimited(ipAddress)) {
       logger.warn('Dashboard login rate limited', { ip: ipAddress });
       return res.status(429).json({
@@ -265,16 +284,17 @@ export function createDashboardRouter(): Router {
     }
 
     const password = req.body?.password;
-    const expectedPassword = getDashboardPassword();
+    const expectedPasswordHash = await getDashboardPasswordHash();
 
-    if (!expectedPassword) {
+    if (!expectedPasswordHash) {
       return res.status(503).json({
         error: 'Dashboard not configured',
         message: 'DASHBOARD_PASSWORD environment variable is not set',
       });
     }
 
-    if (!password || !verifyPassword(password, expectedPassword)) {
+    // SECURITY: Verify password using bcrypt (async)
+    if (!password || !(await verifyPassword(password, expectedPasswordHash))) {
       recordLoginAttempt(ipAddress, false);
       logger.warn('Dashboard login failed', { ip: ipAddress });
 

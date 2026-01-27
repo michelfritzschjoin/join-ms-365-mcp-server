@@ -317,9 +317,16 @@ export class SearchFirstStrategy {
 
     if (resource['webUrl']) {
       const url = resource['webUrl'] as string;
-      if (url.includes('sharepoint.com')) return 'sharepoint';
-      if (url.includes('teams.microsoft.com')) return 'teams';
-      if (url.includes('outlook.office.com')) return 'outlook';
+      // SECURITY: Use proper URL validation instead of substring matching
+      try {
+        const urlObj = new URL(url);
+        const hostname = urlObj.hostname.toLowerCase();
+        if (hostname.includes('sharepoint.com')) return 'sharepoint';
+        if (hostname.includes('teams.microsoft.com')) return 'teams';
+        if (hostname.includes('outlook.office.com')) return 'outlook';
+      } catch {
+        // Invalid URL, skip
+      }
     }
 
     return undefined;

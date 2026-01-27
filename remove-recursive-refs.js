@@ -271,9 +271,14 @@ async function removeRecursiveRefs() {
     }
 
     const remainingRefTypes = new Set();
+    // SECURITY: Properly escape and sanitize string operations
     cleanedString.match(/"#\/definitions\/[^"]+"/g)?.forEach((ref) => {
-      const defName = ref.split('/').pop()?.replace('"', '');
-      if (defName) remainingRefTypes.add(defName);
+      // SECURITY: Use replaceAll or proper regex to remove all quotes, not just first
+      const defName = ref.split('/').pop()?.replace(/"/g, '');
+      if (defName && defName.length > 0 && defName.length < 200) {
+        // SECURITY: Validate length to prevent DoS
+        remainingRefTypes.add(defName);
+      }
     });
 
     console.log(`\n🔗 Remaining reference types: ${remainingRefTypes.size}`);

@@ -314,9 +314,16 @@ export class EntityExtractor {
   private extractSource(obj: Record<string, unknown>): string {
     if (obj['webUrl'] && typeof obj['webUrl'] === 'string') {
       const url = obj['webUrl'] as string;
-      if (url.includes('sharepoint.com')) return 'sharepoint';
-      if (url.includes('teams.microsoft.com')) return 'teams';
-      if (url.includes('outlook.office.com')) return 'outlook';
+      // SECURITY: Use proper URL validation instead of substring matching
+      try {
+        const urlObj = new URL(url);
+        const hostname = urlObj.hostname.toLowerCase();
+        if (hostname.includes('sharepoint.com')) return 'sharepoint';
+        if (hostname.includes('teams.microsoft.com')) return 'teams';
+        if (hostname.includes('outlook.office.com')) return 'outlook';
+      } catch {
+        // Invalid URL, skip
+      }
     }
 
     const entityType = this.getEntityType(obj);

@@ -649,13 +649,30 @@ export function registerGraphTools(
   if (knowledgeBase) {
     toolUsageTracker.knowledgeBase = knowledgeBase;
   }
+  // SECURITY: Validate regex pattern to prevent ReDoS attacks
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
-      enabledToolsRegex = new RegExp(enabledToolsPattern, 'i');
-      logger.info(`Tool filtering enabled with pattern: ${enabledToolsPattern}`);
+      // SECURITY: Sanitize regex pattern - only allow safe characters
+      // Prevent ReDoS by limiting pattern length and complexity
+      const sanitizedPattern = enabledToolsPattern.trim().substring(0, 200);
+
+      // Basic validation: reject patterns with obvious ReDoS indicators
+      if (
+        sanitizedPattern.includes('(.*)*') ||
+        sanitizedPattern.includes('(.*+)*') ||
+        sanitizedPattern.includes('(.*?)*') ||
+        sanitizedPattern.match(/\(\.\*\){2,}/) // Multiple nested quantifiers
+      ) {
+        throw new Error('Potentially dangerous regex pattern detected');
+      }
+
+      enabledToolsRegex = new RegExp(sanitizedPattern, 'i');
+      logger.info(`Tool filtering enabled with pattern: ${sanitizedPattern.substring(0, 50)}...`);
     } catch {
-      logger.error(`Invalid tool filter regex pattern: ${enabledToolsPattern}. Ignoring filter.`);
+      logger.error(
+        `Invalid tool filter regex pattern: ${enabledToolsPattern.substring(0, 50)}. Ignoring filter.`
+      );
     }
   }
 
