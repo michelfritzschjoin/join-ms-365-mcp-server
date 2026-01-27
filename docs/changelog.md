@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.4](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.2.3...v1.2.4) (2026-01-27)
+
+### Bug Fixes
+
+* relax oauth callback parameter validation ([bd5fe85](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bd5fe85e85a5523dd9928a26d9f7e493b904c32b))
+
 ## [1.2.3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.2.2...v1.2.3) (2026-01-27)
 
 ### Bug Fixes
