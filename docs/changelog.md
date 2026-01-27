@@ -7,6 +7,18 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.4.0...v1.5.0) (2026-01-27)
+
+### Features
+
+* add thinking process for transparent reasoning in OpenWebUI ([4a334c3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/4a334c306dc801b6d2e87435171c0537d2c3900b))
+
+### Bug Fixes
+
+* improve OAuth flow and fix tools/list schema crash ([588fc89](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/588fc89a4798eb125d30681769ececa64a7e300c))
+* robust schema validation to prevent _zod crash in tools/list ([3d7eb8b](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3d7eb8b973b09b0c3013fd55a0c56df83145be3b))
+* update tests to support registertool wrapper ([31bbe74](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/31bbe74c35278b437b75e2666787dca590c12ba7))
+
 ## [1.4.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.3.0...v1.4.0) (2026-01-27)
 
 ### Features
