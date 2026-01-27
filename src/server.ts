@@ -23,6 +23,7 @@ import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext, createTokenHash } from './request-context.js';
 import { randomUUID } from 'crypto';
 import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
+import { getQueryStore } from './query-store.js';
 import { z } from 'zod';
 
 /**
@@ -109,6 +110,42 @@ function parseHttpOption(httpOption: string | boolean): { host: string | undefin
   // No colon, treat as port only
   const port = parseInt(httpString) || 3000;
   return { host: undefined, port };
+}
+
+/**
+ * Sanitize tool parameters to remove sensitive information before logging
+ * SECURITY: Never log passwords, tokens, or other secrets
+ */
+function sanitizeToolParams(params: Record<string, unknown>): Record<string, unknown> {
+  const sensitiveKeys = [
+    'password',
+    'token',
+    'secret',
+    'key',
+    'authorization',
+    'bearer',
+    'credential',
+    'apikey',
+    'api_key',
+    'access_token',
+    'refresh_token',
+    'client_secret',
+  ];
+
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(params)) {
+    const lowerKey = key.toLowerCase();
+    if (sensitiveKeys.some((sensitive) => lowerKey.includes(sensitive))) {
+      sanitized[key] = '[REDACTED]';
+    } else if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      sanitized[key] = sanitizeToolParams(value as Record<string, unknown>);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+
+  return sanitized;
 }
 
 class MicrosoftGraphServer {
@@ -1702,6 +1739,12 @@ class MicrosoftGraphServer {
             });
           }
 
+          // Log MCP tool calls to QueryStore for dashboard analytics
+          const startTime = Date.now();
+          const isToolCall = body?.method === 'tools/call';
+          const toolName = isToolCall ? body?.params?.name || 'unknown' : null;
+          const toolParams = isToolCall ? body?.params?.arguments || {} : null;
+
           const handler = async () => {
             const transport = new StreamableHTTPServerTransport({
               sessionIdGenerator: undefined, // Stateless mode
@@ -1725,6 +1768,37 @@ class MicrosoftGraphServer {
             // Extract chat ID and user ID for memory context
             const chatId = extractChatId(req);
             const userId = extractUserId(req);
+
+            // Log tool call to QueryStore when dashboard is enabled
+            if (isToolCall && isDashboardEnabled()) {
+              res.on('finish', () => {
+                try {
+                  const queryStore = getQueryStore();
+                  const durationMs = Date.now() - startTime;
+                  const success = res.statusCode >= 200 && res.statusCode < 400;
+
+                  queryStore.storeQuery({
+                    userIdHash: queryStore.hashUserId(userId || 'anonymous'),
+                    chatId: chatId || undefined,
+                    toolName: toolName || 'unknown',
+                    parameters: sanitizeToolParams(toolParams || {}),
+                    success,
+                    errorMessage: success ? undefined : `HTTP ${res.statusCode}`,
+                    durationMs,
+                    ipAnonymized: req.ip ? queryStore.anonymizeIp(req.ip) : undefined,
+                    userAgent: req.get('User-Agent'),
+                  });
+
+                  logger.debug('MCP tool call logged to QueryStore', {
+                    toolName,
+                    success,
+                    durationMs,
+                  });
+                } catch (logError) {
+                  logger.error('Failed to log MCP tool call:', logError);
+                }
+              });
+            }
 
             logger.debug('MCP POST request context', { chatId, userId: userId?.substring(0, 8) });
 
