@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.6.2...v1.7.0) (2026-01-27)
+
+### Features
+
+* improve calendar/email display with UTC times and quick summary lists ([8dbb573](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/8dbb57333e0213959b6010d9e42ec274fcce390d))
+
 ## [1.6.2](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.6.1...v1.6.2) (2026-01-27)
 
 ### Bug Fixes
