@@ -3,7 +3,19 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import express, { Request, Response } from 'express';
+import { appendFileSync } from 'fs';
 import logger, { enableConsoleLogging } from './logger.js';
+
+// #region agent log helper
+const DEBUG_LOG_PATH = process.env.DEBUG_LOG_PATH || '/app/debug.log';
+function debugLog(data: Record<string, unknown>): void {
+  try {
+    appendFileSync(DEBUG_LOG_PATH, JSON.stringify({ ...data, timestamp: Date.now() }) + '\n');
+  } catch {
+    // Silently ignore log failures
+  }
+}
+// #endregion
 import { registerAuthTools } from './auth-tools.js';
 import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
 import { registerDiscoveryTools as registerIntelligentDiscoveryTools } from './discovery-tools.js';
@@ -302,6 +314,22 @@ class MicrosoftGraphServer {
 
       // Wrap registerTool to sanitize schemas before registration
       mcpServer.registerTool = (name: string, config: any, cb: any) => {
+        // #region agent log
+        debugLog({
+          location: 'server.ts:registerTool',
+          message: 'registerTool called',
+          hypothesisId: 'A',
+          toolName: name,
+          hasInputSchema: !!config.inputSchema,
+          schemaType: config.inputSchema ? typeof config.inputSchema : 'none',
+          hasZodProperty: config.inputSchema ? '_zod' in config.inputSchema : false,
+          zodIsUndefined: config.inputSchema?._zod === undefined,
+          hasDefProperty: config.inputSchema ? '_def' in config.inputSchema : false,
+          hasParseMethod: config.inputSchema
+            ? typeof config.inputSchema?.parse === 'function'
+            : false,
+        });
+        // #endregion
         try {
           // Sanitize inputSchema if present
           if (config.inputSchema) {
@@ -328,6 +356,16 @@ class MicrosoftGraphServer {
 
                   if (shape && typeof shape === 'object' && !Array.isArray(shape)) {
                     const sanitizedShape: Record<string, z.ZodTypeAny> = {};
+                    // #region agent log
+                    debugLog({
+                      location: 'server.ts:shapeExtraction',
+                      message: 'Processing shape for tool',
+                      hypothesisId: 'B',
+                      toolName: name,
+                      shapeKeys: Object.keys(shape),
+                      shapeKeyCount: Object.keys(shape).length,
+                    });
+                    // #endregion
                     for (const [key, value] of Object.entries(shape)) {
                       if (value === undefined) {
                         continue; // Skip undefined values
@@ -350,6 +388,20 @@ class MicrosoftGraphServer {
             // Ensure we always have a schema (even if empty)
             config.inputSchema = z.object({});
           }
+          // #region agent log
+          const finalSchema = config.inputSchema as any;
+          debugLog({
+            location: 'server.ts:beforeOriginalRegister',
+            message: 'About to call originalRegisterTool',
+            hypothesisId: 'C',
+            toolName: name,
+            finalSchemaHasZod: '_zod' in finalSchema,
+            finalSchemaZodUndefined: finalSchema._zod === undefined,
+            finalSchemaHasDef: '_def' in finalSchema,
+            finalSchemaTypeName:
+              finalSchema._zod?.def?.typeName || finalSchema._def?.typeName || 'unknown',
+          });
+          // #endregion
           return originalRegisterTool(name, config, cb);
         } catch (error) {
           logger.error(
@@ -2236,8 +2288,41 @@ class MicrosoftGraphServer {
           // Log MCP tool calls to QueryStore for dashboard analytics
           const startTime = Date.now();
           const isToolCall = body?.method === 'tools/call';
+          const isToolsList = body?.method === 'tools/list';
           const toolName = isToolCall ? body?.params?.name || 'unknown' : null;
           const toolParams = isToolCall ? body?.params?.arguments || {} : null;
+
+          // #region agent log
+          if (isToolsList) {
+            // Inspect registered tools to find problematic schemas
+            const internalTools = (
+              this.server as unknown as { _registeredTools?: Record<string, any> }
+            )._registeredTools;
+            const toolCount = internalTools ? Object.keys(internalTools).length : 0;
+            const problematicTools: string[] = [];
+
+            if (internalTools) {
+              for (const [toolName, tool] of Object.entries(internalTools)) {
+                const schema = tool?.inputSchema;
+                if (schema && typeof schema === 'object') {
+                  // Check for _zod undefined
+                  if ('_zod' in schema && (schema as any)._zod === undefined) {
+                    problematicTools.push(toolName);
+                  }
+                }
+              }
+            }
+
+            debugLog({
+              location: 'server.ts:toolsListRequest',
+              message: 'tools/list request received',
+              hypothesisId: 'D',
+              toolCount,
+              problematicToolsCount: problematicTools.length,
+              problematicTools: problematicTools.slice(0, 10),
+            });
+          }
+          // #endregion
 
           const handler = async () => {
             const transport = new StreamableHTTPServerTransport({
@@ -2255,7 +2340,25 @@ class MicrosoftGraphServer {
               res.setHeader('Content-Type', 'application/json');
             }
 
-            await transport.handleRequest(req as any, res as any, req.body);
+            // #region agent log
+            try {
+              await transport.handleRequest(req as any, res as any, req.body);
+            } catch (transportError) {
+              debugLog({
+                location: 'server.ts:handleRequest',
+                message: 'Transport handleRequest error',
+                hypothesisId: 'E',
+                error: String(transportError),
+                errorMessage: transportError instanceof Error ? transportError.message : 'Unknown',
+                errorStack:
+                  transportError instanceof Error
+                    ? transportError.stack?.split('\n').slice(0, 5)
+                    : [],
+                method: req.body?.method,
+              });
+              throw transportError; // Re-throw to maintain original behavior
+            }
+            // #endregion
           };
 
           try {
