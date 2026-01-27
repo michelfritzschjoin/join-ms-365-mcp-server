@@ -74,15 +74,15 @@ Der **Join Microsoft 365 MCP Server** revolutioniert die Art, wie KI-Assistenten
 
 ### Why Choose This Server? / Warum diesen Server wählen?
 
-| Feature / Funktion | Traditional APIs / Traditionelle APIs | Join MS365 MCP Server |
-| ------------------ | ------------------------------------ | --------------------- |
-| Context Understanding / Kontextverständnis | ❌ None / Keines | ✅ Deep semantic understanding / Tiefes semantisches Verständnis |
-| Multi-step Operations / Multi-Step-Operationen | ❌ Manual orchestration / Manuelle Orchestrierung | ✅ Automatic chaining / Automatische Verkettung |
-| Learning System / Lernsystem | ❌ Static / Statisch | ✅ Adaptive learning from usage / Adaptives Lernen aus Nutzung |
-| Natural Language / Natürliche Sprache | ❌ Not supported / Nicht unterstützt | ✅ Ask questions naturally / Fragen natürlich stellen |
-| Tool Consolidation / Tool-Konsolidierung | ❌ 126+ individual tools / 126+ einzelne Tools | ✅ 11 Super-Tools / 11 Super-Tools |
-| Timezone Display / Zeitzonen-Anzeige | ❌ Single timezone / Einzelne Zeitzone | ✅ Local + UTC / Lokal + UTC |
-| Result Overview / Ergebnisübersicht | ❌ Detailed only / Nur detailliert | ✅ Quick summary + details / Schnellübersicht + Details |
+| Feature / Funktion                             | Traditional APIs / Traditionelle APIs             | Join MS365 MCP Server                                            |
+| ---------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------- |
+| Context Understanding / Kontextverständnis     | ❌ None / Keines                                  | ✅ Deep semantic understanding / Tiefes semantisches Verständnis |
+| Multi-step Operations / Multi-Step-Operationen | ❌ Manual orchestration / Manuelle Orchestrierung | ✅ Automatic chaining / Automatische Verkettung                  |
+| Learning System / Lernsystem                   | ❌ Static / Statisch                              | ✅ Adaptive learning from usage / Adaptives Lernen aus Nutzung   |
+| Natural Language / Natürliche Sprache          | ❌ Not supported / Nicht unterstützt              | ✅ Ask questions naturally / Fragen natürlich stellen            |
+| Tool Consolidation / Tool-Konsolidierung       | ❌ 126+ individual tools / 126+ einzelne Tools    | ✅ 11 Super-Tools / 11 Super-Tools                               |
+| Timezone Display / Zeitzonen-Anzeige           | ❌ Single timezone / Einzelne Zeitzone            | ✅ Local + UTC / Lokal + UTC                                     |
+| Result Overview / Ergebnisübersicht            | ❌ Detailed only / Nur detailliert                | ✅ Quick summary + details / Schnellübersicht + Details          |
 
 ---
 
@@ -91,11 +91,13 @@ Der **Join Microsoft 365 MCP Server** revolutioniert die Art, wie KI-Assistenten
 ### Prerequisites / Voraussetzungen
 
 **English:**
+
 - **Docker** and **Docker Compose**
 - A Microsoft 365 account (personal, work, or school)
 - Azure AD App Registration (for production use)
 
 **Deutsch:**
+
 - **Docker** und **Docker Compose**
 - Ein Microsoft 365-Konto (privat, geschäftlich oder Schulkonto)
 - Azure AD App-Registrierung (für Produktionseinsatz)
@@ -167,19 +169,19 @@ docker run -d \
 
 ### Core Capabilities / Kernfunktionen
 
-| Capability / Funktion | Description / Beschreibung |
-| --------------------- | -------------------------- |
-| **11 Super-Tools** | Consolidated interface replacing 126+ individual tools |
-| **Microsoft 365 Unified Search** | Primary search tool across all M365 content |
-| **90+ Individual Tools** | Comprehensive coverage of Microsoft 365 services (classic mode) |
-| **Intelligent Search** | Cross-product search with semantic understanding |
-| **Deep Research** | Multi-step reasoning for complex questions |
-| **Learning System** | Improves over time based on usage patterns |
-| **Dual Timezone Display** | Server local time + UTC for all dates/times |
-| **Quick Summary Lists** | Overview lists to ensure nothing is missed |
-| **Download Links** | Generate direct download links for files |
-| **Read-Only Mode** | Safe exploration without write operations |
-| **Preset Filtering** | Load only the tools you need |
+| Capability / Funktion            | Description / Beschreibung                                      |
+| -------------------------------- | --------------------------------------------------------------- |
+| **11 Super-Tools**               | Consolidated interface replacing 126+ individual tools          |
+| **Microsoft 365 Unified Search** | Primary search tool across all M365 content                     |
+| **90+ Individual Tools**         | Comprehensive coverage of Microsoft 365 services (classic mode) |
+| **Intelligent Search**           | Cross-product search with semantic understanding                |
+| **Deep Research**                | Multi-step reasoning for complex questions                      |
+| **Learning System**              | Improves over time based on usage patterns                      |
+| **Dual Timezone Display**        | Server local time + UTC for all dates/times                     |
+| **Quick Summary Lists**          | Overview lists to ensure nothing is missed                      |
+| **Download Links**               | Generate direct download links for files                        |
+| **Read-Only Mode**               | Safe exploration without write operations                       |
+| **Preset Filtering**             | Load only the tools you need                                    |
 
 ### Supported Microsoft 365 Services / Unterstützte Microsoft 365-Dienste
 
@@ -310,19 +312,19 @@ docker run -d \
 
 ### Super-Tools List / Super-Tools-Liste
 
-| # | Tool | Description / Beschreibung |
-|---|------|---------------------------|
-| **0** | `search` | 🔍 **PRIMARY** - Microsoft 365 Unified Search across emails, calendar, files, SharePoint, Teams. Returns results and suggests which specific tools to use next. |
-| 1 | `email` | 📧 Unified email operations: list, get, folders, attachments, search, send, reply, delete, move |
-| 2 | `calendar` | 📅 Calendar operations: list, get, view, calendars, create-event, update-event, delete-event |
-| 3 | `teams` | 💬 Teams, Channels, Chats: list-teams, get-team, channels, channel-messages, chats, chat-messages |
-| 4 | `files` | 📁 OneDrive files: drives, list, get, download, search, root |
-| 5 | `tasks` | ✅ To-Do & Planner: todo-lists, todo-tasks, planner-tasks, create-todo, update-todo, delete-todo |
-| 6 | `contacts` | 👥 Contacts & Users: list-contacts, get-contact, list-users, current-user |
-| 7 | `meetings` | 🎥 Online Meetings: list-meetings, get-meeting, transcripts, recordings |
-| 8 | `sharepoint` | 🌐 SharePoint: search-sites, get-site, site-drives, site-lists |
-| 9 | `notes` | 📔 OneNote: notebooks, sections, pages, page-content |
-| 10 | `assistant` | 🤖 Smart operations: ask, search, my-day, my-week, person-info, project-overview, follow-ups |
+| #     | Tool         | Description / Beschreibung                                                                                                                                      |
+| ----- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **0** | `search`     | 🔍 **PRIMARY** - Microsoft 365 Unified Search across emails, calendar, files, SharePoint, Teams. Returns results and suggests which specific tools to use next. |
+| 1     | `email`      | 📧 Unified email operations: list, get, folders, attachments, search, send, reply, delete, move                                                                 |
+| 2     | `calendar`   | 📅 Calendar operations: list, get, view, calendars, create-event, update-event, delete-event                                                                    |
+| 3     | `teams`      | 💬 Teams, Channels, Chats: list-teams, get-team, channels, channel-messages, chats, chat-messages                                                               |
+| 4     | `files`      | 📁 OneDrive files: drives, list, get, download, search, root                                                                                                    |
+| 5     | `tasks`      | ✅ To-Do & Planner: todo-lists, todo-tasks, planner-tasks, create-todo, update-todo, delete-todo                                                                |
+| 6     | `contacts`   | 👥 Contacts & Users: list-contacts, get-contact, list-users, current-user                                                                                       |
+| 7     | `meetings`   | 🎥 Online Meetings: list-meetings, get-meeting, transcripts, recordings                                                                                         |
+| 8     | `sharepoint` | 🌐 SharePoint: search-sites, get-site, site-drives, site-lists                                                                                                  |
+| 9     | `notes`      | 📔 OneNote: notebooks, sections, pages, page-content                                                                                                            |
+| 10    | `assistant`  | 🤖 Smart operations: ask, search, my-day, my-week, person-info, project-overview, follow-ups                                                                    |
 
 ### Example Usage / Beispielverwendung
 
@@ -378,6 +380,7 @@ All calendar events and emails now display **both server local time and UTC** fo
 ```
 
 **Features:**
+
 - Server local time (primary display)
 - UTC time (for reference)
 - Combined display format: `HH:MM (UTC: HH:MM)`
@@ -392,6 +395,7 @@ Alle Kalendertermine und E-Mails zeigen jetzt **sowohl Server-Lokalzeit als auch
 ```
 
 **Funktionen:**
+
 - Server-Lokalzeit (primäre Anzeige)
 - UTC-Zeit (zur Referenz)
 - Kombiniertes Anzeigeformat: `HH:MM (UTC: HH:MM)`
@@ -491,14 +495,14 @@ Um sicherzustellen, dass **kein Kalendertermin oder E-Mail übersehen wird**, en
 
 Secure authentication with multi-account support / Sichere Authentifizierung mit Multi-Account-Unterstützung.
 
-| Tool | Description / Beschreibung | Notes / Hinweise |
-| ---- | ------------------------- | ---------------- |
-| `login` | Authenticate via device code flow / Authentifizierung über Device-Code-Flow | Required before using other tools / Erforderlich vor Nutzung anderer Tools |
-| `logout` | Log out from Microsoft account / Von Microsoft-Konto abmelden | Clears cached tokens / Löscht gecachte Tokens |
-| `verify-login` | Check authentication status / Authentifizierungsstatus prüfen | Non-interactive verification / Nicht-interaktive Verifizierung |
-| `list-accounts` | List cached Microsoft accounts / Gecachte Microsoft-Konten auflisten | Multi-account support / Multi-Account-Unterstützung |
-| `select-account` | Switch between accounts / Zwischen Konten wechseln | Seamless account switching / Nahtloser Kontenwechsel |
-| `remove-account` | Remove account from cache / Konto aus Cache entfernen | Clean up stored credentials / Gespeicherte Anmeldedaten bereinigen |
+| Tool             | Description / Beschreibung                                                  | Notes / Hinweise                                                           |
+| ---------------- | --------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `login`          | Authenticate via device code flow / Authentifizierung über Device-Code-Flow | Required before using other tools / Erforderlich vor Nutzung anderer Tools |
+| `logout`         | Log out from Microsoft account / Von Microsoft-Konto abmelden               | Clears cached tokens / Löscht gecachte Tokens                              |
+| `verify-login`   | Check authentication status / Authentifizierungsstatus prüfen               | Non-interactive verification / Nicht-interaktive Verifizierung             |
+| `list-accounts`  | List cached Microsoft accounts / Gecachte Microsoft-Konten auflisten        | Multi-account support / Multi-Account-Unterstützung                        |
+| `select-account` | Switch between accounts / Zwischen Konten wechseln                          | Seamless account switching / Nahtloser Kontenwechsel                       |
+| `remove-account` | Remove account from cache / Konto aus Cache entfernen                       | Clean up stored credentials / Gespeicherte Anmeldedaten bereinigen         |
 
 ### 📧 Email & Communication Tools / E-Mail- & Kommunikations-Tools
 
@@ -506,16 +510,16 @@ Complete email management and shared mailbox support / Vollständige E-Mail-Verw
 
 #### Personal Email / Persönliche E-Mail
 
-| Tool | Description / Beschreibung | Parameters |
-| ---- | -------------------------- | ---------- |
-| `list-mail-messages` | List emails with filtering / E-Mails mit Filterung auflisten | `top`, `filter`, `search`, `orderby` |
-| `get-mail-message` | Get full email content / Vollständigen E-Mail-Inhalt abrufen | `messageId` |
-| `send-mail` | Send new email / Neue E-Mail senden | `to`, `subject`, `body`, `attachments` |
-| `create-draft-email` | Create email draft / E-Mail-Entwurf erstellen | `to`, `subject`, `body` |
-| `delete-mail-message` | Delete email / E-Mail löschen | `messageId` |
-| `move-mail-message` | Move email to folder / E-Mail in Ordner verschieben | `messageId`, `folderId` |
-| `list-mail-folders` | List all mail folders / Alle E-Mail-Ordner auflisten | - |
-| `list-mail-folder-messages` | List messages in folder / Nachrichten in Ordner auflisten | `folderId` |
+| Tool                        | Description / Beschreibung                                   | Parameters                             |
+| --------------------------- | ------------------------------------------------------------ | -------------------------------------- |
+| `list-mail-messages`        | List emails with filtering / E-Mails mit Filterung auflisten | `top`, `filter`, `search`, `orderby`   |
+| `get-mail-message`          | Get full email content / Vollständigen E-Mail-Inhalt abrufen | `messageId`                            |
+| `send-mail`                 | Send new email / Neue E-Mail senden                          | `to`, `subject`, `body`, `attachments` |
+| `create-draft-email`        | Create email draft / E-Mail-Entwurf erstellen                | `to`, `subject`, `body`                |
+| `delete-mail-message`       | Delete email / E-Mail löschen                                | `messageId`                            |
+| `move-mail-message`         | Move email to folder / E-Mail in Ordner verschieben          | `messageId`, `folderId`                |
+| `list-mail-folders`         | List all mail folders / Alle E-Mail-Ordner auflisten         | -                                      |
+| `list-mail-folder-messages` | List messages in folder / Nachrichten in Ordner auflisten    | `folderId`                             |
 
 #### Super-Tool: `email`
 
@@ -553,16 +557,16 @@ Complete email management and shared mailbox support / Vollständige E-Mail-Verw
 
 Full calendar management with meeting scheduling / Vollständige Kalenderverwaltung mit Besprechungsplanung.
 
-| Tool | Description / Beschreibung | Parameters |
-| ---- | -------------------------- | ---------- |
-| `list-calendars` | List all calendars / Alle Kalender auflisten | - |
-| `list-calendar-events` | List events / Termine auflisten | `top`, `filter`, `orderby` |
-| `get-calendar-event` | Get event details / Termindetails abrufen | `eventId` |
-| `create-calendar-event` | Create new event / Neuen Termin erstellen | `subject`, `start`, `end`, `attendees` |
-| `update-calendar-event` | Update event / Termin aktualisieren | `eventId`, `updates` |
-| `delete-calendar-event` | Delete event / Termin löschen | `eventId` |
-| `get-calendar-view` | Get calendar view / Kalenderansicht abrufen | `startDateTime`, `endDateTime` |
-| `find-meeting-times` | Find available slots / Verfügbare Zeitslots finden | `attendees`, `duration` |
+| Tool                    | Description / Beschreibung                         | Parameters                             |
+| ----------------------- | -------------------------------------------------- | -------------------------------------- |
+| `list-calendars`        | List all calendars / Alle Kalender auflisten       | -                                      |
+| `list-calendar-events`  | List events / Termine auflisten                    | `top`, `filter`, `orderby`             |
+| `get-calendar-event`    | Get event details / Termindetails abrufen          | `eventId`                              |
+| `create-calendar-event` | Create new event / Neuen Termin erstellen          | `subject`, `start`, `end`, `attendees` |
+| `update-calendar-event` | Update event / Termin aktualisieren                | `eventId`, `updates`                   |
+| `delete-calendar-event` | Delete event / Termin löschen                      | `eventId`                              |
+| `get-calendar-view`     | Get calendar view / Kalenderansicht abrufen        | `startDateTime`, `endDateTime`         |
+| `find-meeting-times`    | Find available slots / Verfügbare Zeitslots finden | `attendees`, `duration`                |
 
 #### Super-Tool: `calendar`
 
@@ -600,30 +604,30 @@ Full calendar management with meeting scheduling / Vollständige Kalenderverwalt
 
 OneDrive file management with upload/download capabilities / OneDrive-Dateiverwaltung mit Upload/Download-Funktionen.
 
-| Tool | Description / Beschreibung | Parameters |
-| ---- | -------------------------- | ---------- |
-| `list-drives` | List available drives / Verfügbare Laufwerke auflisten | - |
-| `get-drive-root-item` | Get drive root folder / Laufwerks-Stammordner abrufen | `driveId` |
-| `list-folder-files` | List files in folder / Dateien im Ordner auflisten | `folderId`, `top` |
-| `download-onedrive-file-content` | Download file content / Dateiinhalt herunterladen | `itemId` |
-| `upload-file-content` | Update file content / Dateiinhalt aktualisieren | `itemId`, `content` |
-| `upload-new-file` | Upload new file / Neue Datei hochladen | `folderId`, `fileName`, `content` |
-| `delete-onedrive-file` | Delete file / Datei löschen | `itemId` |
+| Tool                             | Description / Beschreibung                             | Parameters                        |
+| -------------------------------- | ------------------------------------------------------ | --------------------------------- |
+| `list-drives`                    | List available drives / Verfügbare Laufwerke auflisten | -                                 |
+| `get-drive-root-item`            | Get drive root folder / Laufwerks-Stammordner abrufen  | `driveId`                         |
+| `list-folder-files`              | List files in folder / Dateien im Ordner auflisten     | `folderId`, `top`                 |
+| `download-onedrive-file-content` | Download file content / Dateiinhalt herunterladen      | `itemId`                          |
+| `upload-file-content`            | Update file content / Dateiinhalt aktualisieren        | `itemId`, `content`               |
+| `upload-new-file`                | Upload new file / Neue Datei hochladen                 | `folderId`, `fileName`, `content` |
+| `delete-onedrive-file`           | Delete file / Datei löschen                            | `itemId`                          |
 
 ### 💬 Microsoft Teams Tools / Microsoft Teams-Tools
 
 > **Note / Hinweis:** Requires `--org-mode` flag (work/school accounts only) / Erfordert `--org-mode` Flag (nur Geschäfts-/Schulkonten)
 
-| Tool | Description / Beschreibung | Parameters |
-| ---- | -------------------------- | ---------- |
-| `list-chats` | List all chats / Alle Chats auflisten | `top` |
-| `get-chat` | Get chat details / Chat-Details abrufen | `chatId` |
-| `list-chat-messages` | List messages in chat / Nachrichten im Chat auflisten | `chatId`, `top` |
-| `send-chat-message` | Send chat message / Chat-Nachricht senden | `chatId`, `content` |
-| `list-joined-teams` | List teams you're in / Teams auflisten, in denen Sie sind | - |
-| `list-team-channels` | List team channels / Team-Kanäle auflisten | `teamId` |
-| `list-channel-messages` | List channel messages / Kanalnachrichten auflisten | `teamId`, `channelId` |
-| `send-channel-message` | Send channel message / Kanalnachricht senden | `teamId`, `channelId`, `content` |
+| Tool                    | Description / Beschreibung                                | Parameters                       |
+| ----------------------- | --------------------------------------------------------- | -------------------------------- |
+| `list-chats`            | List all chats / Alle Chats auflisten                     | `top`                            |
+| `get-chat`              | Get chat details / Chat-Details abrufen                   | `chatId`                         |
+| `list-chat-messages`    | List messages in chat / Nachrichten im Chat auflisten     | `chatId`, `top`                  |
+| `send-chat-message`     | Send chat message / Chat-Nachricht senden                 | `chatId`, `content`              |
+| `list-joined-teams`     | List teams you're in / Teams auflisten, in denen Sie sind | -                                |
+| `list-team-channels`    | List team channels / Team-Kanäle auflisten                | `teamId`                         |
+| `list-channel-messages` | List channel messages / Kanalnachrichten auflisten        | `teamId`, `channelId`            |
+| `send-channel-message`  | Send channel message / Kanalnachricht senden              | `teamId`, `channelId`, `content` |
 
 ### 🔍 Search & Discovery Tools / Such- & Discovery-Tools
 
@@ -649,6 +653,7 @@ Powerful cross-product search capabilities / Leistungsstarke produktübergreifen
 **Entity Types:** `message`, `event`, `driveItem`, `site`, `list`, `listItem`, `chatMessage`, `person`
 
 **Response includes:**
+
 - Search results grouped by entity type
 - Tool suggestions for next steps
 - Total hits count
@@ -658,14 +663,14 @@ Powerful cross-product search capabilities / Leistungsstarke produktübergreifen
 
 These **intelligent tools** automatically chain multiple API calls to answer complex contextual questions / Diese **intelligenten Tools** verkettet automatisch mehrere API-Aufrufe, um komplexe kontextuelle Fragen zu beantworten.
 
-| Tool | What It Does / Was es tut | Example Query / Beispielabfrage |
-| ---- | ------------------------- | ------------------------------- |
-| `find-messages-with-person` | Find all Teams chats with a person / Findet alle Teams-Chats mit einer Person | "What did I discuss with John?" / "Worüber habe ich mit John gesprochen?" |
-| `find-emails-with-person` | Find all email threads with a person / Findet alle E-Mail-Threads mit einer Person | "Show emails from Sarah" / "Zeige E-Mails von Sarah" |
-| `find-meetings-with-person` | Find past & future meetings / Findet vergangene & zukünftige Besprechungen | "When did I meet with Mike?" / "Wann habe ich mich mit Mike getroffen?" |
-| `discover-project` | Find all project-related content / Findet alle projektbezogenen Inhalte | "Everything about Project Apollo" / "Alles über Projekt Apollo" |
-| `discover-person` | Comprehensive person profile / Umfassendes Personenprofil | "Who is John Smith?" / "Wer ist John Smith?" |
-| `get-my-week-summary` | Weekly productivity digest / Wöchentliche Produktivitätszusammenfassung | "What did I accomplish this week?" / "Was habe ich diese Woche erreicht?" |
+| Tool                        | What It Does / Was es tut                                                          | Example Query / Beispielabfrage                                           |
+| --------------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `find-messages-with-person` | Find all Teams chats with a person / Findet alle Teams-Chats mit einer Person      | "What did I discuss with John?" / "Worüber habe ich mit John gesprochen?" |
+| `find-emails-with-person`   | Find all email threads with a person / Findet alle E-Mail-Threads mit einer Person | "Show emails from Sarah" / "Zeige E-Mails von Sarah"                      |
+| `find-meetings-with-person` | Find past & future meetings / Findet vergangene & zukünftige Besprechungen         | "When did I meet with Mike?" / "Wann habe ich mich mit Mike getroffen?"   |
+| `discover-project`          | Find all project-related content / Findet alle projektbezogenen Inhalte            | "Everything about Project Apollo" / "Alles über Projekt Apollo"           |
+| `discover-person`           | Comprehensive person profile / Umfassendes Personenprofil                          | "Who is John Smith?" / "Wer ist John Smith?"                              |
+| `get-my-week-summary`       | Weekly productivity digest / Wöchentliche Produktivitätszusammenfassung            | "What did I accomplish this week?" / "Was habe ich diese Woche erreicht?" |
 
 ---
 
@@ -771,34 +776,34 @@ Der Server verfügt über eine ausgeklügelte **Search-First-Strategie** mit meh
 
 ### Docker Command Options / Docker-Befehlsoptionen
 
-| Option | Description / Beschreibung | Example / Beispiel |
-| ------ | ------------------------- | ------------------ |
-| `--org-mode` | Enable organization mode (Teams, SharePoint) / Organisationsmodus aktivieren (Teams, SharePoint) | `--org-mode` |
-| `--read-only` | Disable write operations / Schreiboperationen deaktivieren | `--read-only` |
-| `--http [port]` | Start HTTP server (default: 3000) / HTTP-Server starten (Standard: 3000) | `--http 8080` |
-| `--preset <name>` | Load specific tool presets / Spezifische Tool-Presets laden | `--preset mail,calendar` |
-| `--enabled-tools <pattern>` | Filter tools by regex / Tools nach Regex filtern | `--enabled-tools "excel\|contact"` |
-| `--toon` | Enable TOON format (30-60% token savings) / TOON-Format aktivieren (30-60% Token-Ersparnis) | `--toon` |
-| `--discovery` | Start with discovery tools only / Nur mit Discovery-Tools starten | `--discovery` |
-| `--cloud <type>` | Cloud environment (global/china) / Cloud-Umgebung (global/china) | `--cloud china` |
-| `-v` | Enable verbose logging / Ausführliches Logging aktivieren | `-v` |
+| Option                      | Description / Beschreibung                                                                       | Example / Beispiel                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------- |
+| `--org-mode`                | Enable organization mode (Teams, SharePoint) / Organisationsmodus aktivieren (Teams, SharePoint) | `--org-mode`                       |
+| `--read-only`               | Disable write operations / Schreiboperationen deaktivieren                                       | `--read-only`                      |
+| `--http [port]`             | Start HTTP server (default: 3000) / HTTP-Server starten (Standard: 3000)                         | `--http 8080`                      |
+| `--preset <name>`           | Load specific tool presets / Spezifische Tool-Presets laden                                      | `--preset mail,calendar`           |
+| `--enabled-tools <pattern>` | Filter tools by regex / Tools nach Regex filtern                                                 | `--enabled-tools "excel\|contact"` |
+| `--toon`                    | Enable TOON format (30-60% token savings) / TOON-Format aktivieren (30-60% Token-Ersparnis)      | `--toon`                           |
+| `--discovery`               | Start with discovery tools only / Nur mit Discovery-Tools starten                                | `--discovery`                      |
+| `--cloud <type>`            | Cloud environment (global/china) / Cloud-Umgebung (global/china)                                 | `--cloud china`                    |
+| `-v`                        | Enable verbose logging / Ausführliches Logging aktivieren                                        | `-v`                               |
 
 ### Environment Variables / Umgebungsvariablen
 
-| Variable | Description / Beschreibung | Default |
-| -------- | -------------------------- | ------- |
-| `MS365_MCP_CLIENT_ID` | Azure AD app client ID | **Required / Erforderlich** |
-| `MS365_MCP_TENANT_ID` | Azure AD tenant ID | `common` |
-| `MS365_MCP_CLIENT_SECRET` | Client secret (confidential apps) / Client-Geheimnis (vertrauliche Apps) | - |
-| `MS365_MCP_USE_SUPER_TOOLS` | Enable Super-Tools mode / Super-Tools-Modus aktivieren | `false` |
-| `MS365_MCP_ORG_MODE` | Enable organization mode / Organisationsmodus aktivieren | `false` |
-| `MS365_MCP_OUTPUT_FORMAT` | Output format (`json`/`toon`) / Ausgabeformat (`json`/`toon`) | `json` |
-| `MS365_MCP_CLOUD_TYPE` | Cloud environment / Cloud-Umgebung | `global` |
-| `MS365_MCP_KEYVAULT_URL` | Azure Key Vault URL | - |
-| `MS365_MCP_MAX_RESULTS` | Maximum search results / Maximale Suchergebnisse | `500` |
-| `READ_ONLY` | Enable read-only mode / Read-Only-Modus aktivieren | `false` |
-| `LOG_LEVEL` | Logging level / Logging-Level | `info` |
-| `SILENT` | Disable console output / Konsolenausgabe deaktivieren | `false` |
+| Variable                    | Description / Beschreibung                                               | Default                     |
+| --------------------------- | ------------------------------------------------------------------------ | --------------------------- |
+| `MS365_MCP_CLIENT_ID`       | Azure AD app client ID                                                   | **Required / Erforderlich** |
+| `MS365_MCP_TENANT_ID`       | Azure AD tenant ID                                                       | `common`                    |
+| `MS365_MCP_CLIENT_SECRET`   | Client secret (confidential apps) / Client-Geheimnis (vertrauliche Apps) | -                           |
+| `MS365_MCP_USE_SUPER_TOOLS` | Enable Super-Tools mode / Super-Tools-Modus aktivieren                   | `false`                     |
+| `MS365_MCP_ORG_MODE`        | Enable organization mode / Organisationsmodus aktivieren                 | `false`                     |
+| `MS365_MCP_OUTPUT_FORMAT`   | Output format (`json`/`toon`) / Ausgabeformat (`json`/`toon`)            | `json`                      |
+| `MS365_MCP_CLOUD_TYPE`      | Cloud environment / Cloud-Umgebung                                       | `global`                    |
+| `MS365_MCP_KEYVAULT_URL`    | Azure Key Vault URL                                                      | -                           |
+| `MS365_MCP_MAX_RESULTS`     | Maximum search results / Maximale Suchergebnisse                         | `500`                       |
+| `READ_ONLY`                 | Enable read-only mode / Read-Only-Modus aktivieren                       | `false`                     |
+| `LOG_LEVEL`                 | Logging level / Logging-Level                                            | `info`                      |
+| `SILENT`                    | Disable console output / Konsolenausgabe deaktivieren                    | `false`                     |
 
 ### Docker Run Examples / Docker-Run-Beispiele
 
@@ -903,6 +908,7 @@ docker run -d -p 3000:3000 \
 The Query Dashboard provides a secure web interface to view and analyze all user queries. This feature enables auditing, analytics, and debugging of MCP tool usage.
 
 **Features:**
+
 - 📈 **Real-time Statistics** - Total queries, unique users, success rates
 - 🔍 **Query Search & Filtering** - Filter by tool, user, date, status
 - 📉 **Hourly Activity Charts** - Visual query distribution over 24 hours
@@ -915,6 +921,7 @@ The Query Dashboard provides a secure web interface to view and analyze all user
 Das Query Dashboard bietet eine sichere Weboberfläche zur Anzeige und Analyse aller Benutzerabfragen. Diese Funktion ermöglicht Auditierung, Analysen und Debugging der MCP-Tool-Nutzung.
 
 **Funktionen:**
+
 - 📈 **Echtzeit-Statistiken** - Gesamtabfragen, eindeutige Benutzer, Erfolgsraten
 - 🔍 **Abfrage-Suche & Filterung** - Nach Tool, Benutzer, Datum, Status filtern
 - 📉 **Stündliche Aktivitätsdiagramme** - Visuelle Abfrageverteilung über 24 Stunden
@@ -1031,6 +1038,7 @@ docker run -p 3000:3000 ms365-mcp-server --http 3000
 ## 🤝 Contributing / Beitragen
 
 **English:**
+
 1. Fork the repository
 2. Run `npm install`
 3. Generate client: `npm run generate`
@@ -1039,6 +1047,7 @@ docker run -p 3000:3000 ms365-mcp-server --http 3000
 6. Submit PR
 
 **Deutsch:**
+
 1. Repository forken
 2. `npm install` ausführen
 3. Client generieren: `npm run generate`

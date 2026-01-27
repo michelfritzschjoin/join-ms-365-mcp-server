@@ -403,7 +403,8 @@ export function addThinkingToResponse(result: string, thinkingSteps: string[]): 
     // Verbose: show with timestamps and full detail
     const timestamp = new Date().toISOString();
     thinkingOutput =
-      `🧠 Thinking Process (${timestamp}):\n` + thinkingSteps.map((step, i) => `  ${i + 1}. ${step}`).join('\n');
+      `🧠 Thinking Process (${timestamp}):\n` +
+      thinkingSteps.map((step, i) => `  ${i + 1}. ${step}`).join('\n');
   }
 
   // Combine thinking with result

@@ -17,42 +17,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* improve search function for Teams/person queries ([479be5f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/479be5f2bfe3ef9b2ef85455240b86c33b9e2991))
+- improve search function for Teams/person queries ([479be5f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/479be5f2bfe3ef9b2ef85455240b86c33b9e2991))
 
 ## [1.7.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.7.0...v1.7.1) (2026-01-27)
 
 ### Bug Fixes
 
-* add formatting with quick summary lists to Super-Tools calendar and email responses ([5f838c5](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/5f838c5ef66d6c81fe2d5d8bf5e6d458dd94aeea))
+- add formatting with quick summary lists to Super-Tools calendar and email responses ([5f838c5](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/5f838c5ef66d6c81fe2d5d8bf5e6d458dd94aeea))
 
 ### Documentation
 
-* comprehensive bilingual README update (EN/DE) ([c0b1ac7](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/c0b1ac7e9ae5385c8ca3306a617d27ef9e33b6b9))
+- comprehensive bilingual README update (EN/DE) ([c0b1ac7](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/c0b1ac7e9ae5385c8ca3306a617d27ef9e33b6b9))
 
 ## [1.7.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.6.2...v1.7.0) (2026-01-27)
 
 ### Features
 
-* improve calendar/email display with UTC times and quick summary lists ([8dbb573](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/8dbb57333e0213959b6010d9e42ec274fcce390d))
+- improve calendar/email display with UTC times and quick summary lists ([8dbb573](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/8dbb57333e0213959b6010d9e42ec274fcce390d))
 
 ## [1.6.2](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.6.1...v1.6.2) (2026-01-27)
 
 ### Bug Fixes
 
-* replace callEndpoint with callGraph wrapper for GraphClient compatibility ([e113d38](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/e113d38eb778f1a07f194564209e7cfea5ac01da))
+- replace callEndpoint with callGraph wrapper for GraphClient compatibility ([e113d38](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/e113d38eb778f1a07f194564209e7cfea5ac01da))
 
 ## [1.6.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.6.0...v1.6.1) (2026-01-27)
 
 ### Bug Fixes
 
-* add missing addThinkingToResponse export to thinking-process.ts ([52884fc](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/52884fcf9456b7d1136fa39a2911196511190566))
+- add missing addThinkingToResponse export to thinking-process.ts ([52884fc](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/52884fcf9456b7d1136fa39a2911196511190566))
 
 ## [1.6.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.5.1...v1.6.0) (2026-01-27)
 
 ### Features
 
-* add search super-tool and read-only mode support ([4a3216d](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/4a3216d6e0d60056f6b7a741868e7e66e9db2739))
-* add Super-Tools mode - consolidates 126+ tools into 10 unified tools ([d230300](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d23030088970a6db6586ca0838ec07f0dd969dce))
+- add search super-tool and read-only mode support ([4a3216d](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/4a3216d6e0d60056f6b7a741868e7e66e9db2739))
+- add Super-Tools mode - consolidates 126+ tools into 10 unified tools ([d230300](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d23030088970a6db6586ca0838ec07f0dd969dce))
 
 ## [1.5.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.5.0...v1.5.1) (2026-01-27)
 

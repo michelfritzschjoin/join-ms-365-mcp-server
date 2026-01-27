@@ -715,8 +715,11 @@ export function mailResponseToText(response: FormattedMailResponse): string {
     const readIcon = msg.isRead ? '📭' : '📬';
     const attachIcon = msg.hasAttachments ? '📎' : '';
     const flagIcon = msg.flag?.flagStatus === 'flagged' ? '🚩' : '';
-    const subjectShort = msg.subject.length > 40 ? msg.subject.substring(0, 40) + '...' : msg.subject;
-    lines.push(`${i + 1}. ${readIcon}${attachIcon}${flagIcon} ${msg.receivedDate} ${msg.receivedTimeDisplay} | ${msg.from.name} | ${subjectShort}`);
+    const subjectShort =
+      msg.subject.length > 40 ? msg.subject.substring(0, 40) + '...' : msg.subject;
+    lines.push(
+      `${i + 1}. ${readIcon}${attachIcon}${flagIcon} ${msg.receivedDate} ${msg.receivedTimeDisplay} | ${msg.from.name} | ${subjectShort}`
+    );
   }
 
   lines.push('');

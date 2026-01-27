@@ -27,6 +27,95 @@ import {
 } from './response-formatter.js';
 
 /**
+ * Format search query for Microsoft Graph API endpoints that require property:value format
+ * @param searchValue - The search query string
+ * @param defaultProperty - The default property to use if not already specified (e.g., 'displayName')
+ * @returns Formatted search query in property:value format, wrapped in double quotes
+ */
+function formatSearchQuery(searchValue: string, defaultProperty = 'displayName'): string {
+  if (!searchValue) return '';
+
+  // Check if search already contains a property prefix (e.g., "displayName:John")
+  const propertyValuePattern = /^[a-zA-Z]+:/i;
+  const trimmedValue = searchValue.trim();
+  const formattedSearch = propertyValuePattern.test(trimmedValue)
+    ? trimmedValue
+    : `${defaultProperty}:${trimmedValue}`;
+
+  return `"${formattedSearch}"`;
+}
+
+/**
+ * Format KQL query for Microsoft Graph Search API
+ * Handles property filters with spaces, OR/AND operators, and ensures proper KQL syntax
+ * @param query - The KQL query string
+ * @returns Formatted KQL query string
+ */
+function formatKQLQuery(query: string): string {
+  if (!query) return '';
+
+  const trimmedQuery = query.trim();
+
+  // Normalize whitespace around operators
+  let formattedQuery = trimmedQuery
+    .replace(/\s+\b(OR|AND|NOT)\b\s+/gi, (match) => ` ${match.trim().toUpperCase()} `)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Check if query contains property filters (e.g., from:, subject:, body:)
+  const propertyFilterPattern = /\b(\w+):/;
+  const hasPropertyFilters = propertyFilterPattern.test(formattedQuery);
+
+  if (!hasPropertyFilters) {
+    // No property filters, return as-is (but with normalized operators)
+    return formattedQuery;
+  }
+
+  // Step 1: Quote property values that contain spaces and aren't already quoted
+  // Pattern: property:value where value contains spaces
+  formattedQuery = formattedQuery.replace(
+    /(\w+):([^\s"()]+(?:\s+[^\s"()]+)+)(?=\s|$|AND|OR|NOT|\))/g,
+    (match, property, value) => {
+      // If value contains spaces and isn't already quoted, quote it
+      if (value.includes(' ') && !value.startsWith('"') && !value.endsWith('"')) {
+        return `${property}:"${value}"`;
+      }
+      return match;
+    }
+  );
+
+  // Step 2: Handle property filters followed by free text with OR/AND operators
+  // Pattern: property:"value" text1 OR text2 -> property:"value" AND (text1 OR text2)
+  // Pattern: property:value text1 OR text2 -> property:value AND (text1 OR text2)
+  const propertyAndFreeTextPattern = /^(\w+:"[^"]+"|\w+:[^\s"()]+)\s+([^()]+(?:OR|AND)[^()]+)$/i;
+  const propertyAndFreeTextMatch = formattedQuery.match(propertyAndFreeTextPattern);
+
+  if (propertyAndFreeTextMatch) {
+    const propertyPart = propertyAndFreeTextMatch[1];
+    let textPart = propertyAndFreeTextMatch[2].trim();
+
+    // Normalize operators in text part
+    textPart = textPart.replace(/\b(OR|AND|NOT)\b/gi, (match) => ` ${match.toUpperCase()} `).trim();
+
+    // If text part contains OR/AND but isn't already grouped, wrap it in parentheses
+    if (
+      (textPart.includes(' OR ') || textPart.includes(' AND ')) &&
+      !textPart.startsWith('(') &&
+      !textPart.endsWith(')')
+    ) {
+      formattedQuery = `${propertyPart} AND (${textPart})`;
+    } else if (!textPart.match(/^\w+:\S+$/)) {
+      // If text part is not a property filter, add AND between property and text
+      formattedQuery = `${propertyPart} AND ${textPart}`;
+    } else {
+      formattedQuery = `${propertyPart} ${textPart}`;
+    }
+  }
+
+  return formattedQuery.trim();
+}
+
+/**
  * Helper function to call Graph API endpoints
  * Wraps graphClient.makeRequest with a simpler interface
  */
@@ -200,14 +289,14 @@ async function handleEmail(
 
       const result = await callGraph(graphClient, 'GET', endpoint, params);
       const parsedResult = JSON.parse(result);
-      
+
       // Format mail response with quick summary
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
         const formattedText = mailResponseToText(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
-      
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -244,14 +333,14 @@ async function handleEmail(
       };
       const result = await callGraph(graphClient, 'GET', '/me/messages', params);
       const parsedResult = JSON.parse(result);
-      
+
       // Format mail response with quick summary
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
         const formattedText = mailResponseToText(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
-      
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -283,7 +372,12 @@ async function handleEmail(
       if (!input.messageId) throw new Error('messageId is required for action "reply"');
       if (!input.body) throw new Error('body is required for action "reply"');
       thinking.push(`Replying to email: ${input.messageId}`);
-      const result = await callGraph(graphClient, 'POST', `/me/messages/${input.messageId}/reply`, undefined, { comment: input.body }
+      const result = await callGraph(
+        graphClient,
+        'POST',
+        `/me/messages/${input.messageId}/reply`,
+        undefined,
+        { comment: input.body }
       );
       return addThinkingToResponse(
         result || JSON.stringify({ success: true, message: 'Reply sent' }),
@@ -305,7 +399,12 @@ async function handleEmail(
       if (!input.messageId) throw new Error('messageId is required for action "move"');
       if (!input.folderId) throw new Error('folderId (destination) is required for action "move"');
       thinking.push(`Moving email ${input.messageId} to folder ${input.folderId}`);
-      const result = await callGraph(graphClient, 'POST', `/me/messages/${input.messageId}/move`, undefined, { destinationId: input.folderId }
+      const result = await callGraph(
+        graphClient,
+        'POST',
+        `/me/messages/${input.messageId}/move`,
+        undefined,
+        { destinationId: input.folderId }
       );
       return addThinkingToResponse(result, thinking);
     }
@@ -380,21 +479,25 @@ async function handleCalendar(
       if (input.orderby) params.$orderby = input.orderby;
       const result = await callGraph(graphClient, 'GET', '/me/events', params, undefined, headers);
       const parsedResult = JSON.parse(result);
-      
+
       // Format calendar response with quick summary
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult);
         const formattedText = calendarResponseToText(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
-      
+
       return addThinkingToResponse(result, thinking);
     }
 
     case 'get': {
       if (!input.eventId) throw new Error('eventId is required for action "get"');
       thinking.push(`Getting event: ${input.eventId}`);
-      const result = await callGraph(graphClient, 'GET', `/me/events/${input.eventId}`, undefined,
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/events/${input.eventId}`,
+        undefined,
         undefined,
         headers
       );
@@ -412,16 +515,27 @@ async function handleCalendar(
         $top: String(input.top || 50),
       };
       if (input.orderby) params.$orderby = input.orderby;
-      const result = await callGraph(graphClient, 'GET', '/me/calendarView', params, undefined, headers);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        '/me/calendarView',
+        params,
+        undefined,
+        headers
+      );
       const parsedResult = JSON.parse(result);
-      
+
       // Format calendar response with quick summary
       if (isCalendarResponse(parsedResult)) {
-        const formatted = formatCalendarResponse(parsedResult, input.startDateTime, input.endDateTime);
+        const formatted = formatCalendarResponse(
+          parsedResult,
+          input.startDateTime,
+          input.endDateTime
+        );
         const formattedText = calendarResponseToText(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
-      
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -437,16 +551,23 @@ async function handleCalendar(
       thinking.push(`Listing events from calendar: ${input.calendarId}`);
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
-      const result = await callGraph(graphClient, 'GET', `/me/calendars/${input.calendarId}/events`, params, undefined, headers);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/calendars/${input.calendarId}/events`,
+        params,
+        undefined,
+        headers
+      );
       const parsedResult = JSON.parse(result);
-      
+
       // Format calendar response with quick summary
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult);
         const formattedText = calendarResponseToText(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
-      
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -470,10 +591,7 @@ async function handleCalendar(
           type: 'required',
         }));
       }
-      const result = await callGraph(graphClient, 'POST', '/me/events', undefined,
-        event,
-        headers
-      );
+      const result = await callGraph(graphClient, 'POST', '/me/events', undefined, event, headers);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -488,7 +606,11 @@ async function handleCalendar(
         updates.start = { dateTime: input.startDateTime, timeZone: input.timezone || 'UTC' };
       if (input.endDateTime)
         updates.end = { dateTime: input.endDateTime, timeZone: input.timezone || 'UTC' };
-      const result = await callGraph(graphClient, 'PATCH', `/me/events/${input.eventId}`, undefined,
+      const result = await callGraph(
+        graphClient,
+        'PATCH',
+        `/me/events/${input.eventId}`,
+        undefined,
         updates,
         headers
       );
@@ -525,9 +647,12 @@ const teamsActions = z.enum([
 const teamsSchema = z.object({
   action: teamsActions.describe('The Teams operation to perform'),
   // Identifiers
-  teamId: z.string().optional().describe('Team ID'),
-  channelId: z.string().optional().describe('Channel ID'),
-  chatId: z.string().optional().describe('Chat ID'),
+  teamId: z.string().optional().describe('Team ID (required for get-team, channels, channel-messages)'),
+  channelId: z.string().optional().describe('Channel ID (required for channel-messages)'),
+  chatId: z
+    .string()
+    .optional()
+    .describe('Chat ID (REQUIRED for chat-messages action - use "chats" action first to get chat IDs)'),
   messageId: z.string().optional().describe('Message ID'),
   // Options
   includeMessages: z
@@ -579,9 +704,14 @@ async function handleTeams(
         $top: String(input.top || 25),
         $orderby: 'createdDateTime desc',
       };
-      const result = await callGraph(graphClient, 'GET', `/teams/${input.teamId}/channels/${input.channelId}/messages`, params);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/teams/${input.teamId}/channels/${input.channelId}/messages`,
+        params
+      );
       const messagesData = JSON.parse(result);
-      
+
       // Format messages for better readability
       if (messagesData.value && Array.isArray(messagesData.value)) {
         const formattedMessages = messagesData.value.map((msg: any) => ({
@@ -600,18 +730,18 @@ async function handleTeams(
             size: att.size,
           })),
         }));
-        
+
         const output = {
           teamId: input.teamId,
           channelId: input.channelId,
           totalMessages: formattedMessages.length,
           messages: formattedMessages,
         };
-        
+
         thinking.push(`Retrieved ${formattedMessages.length} channel messages with content`);
         return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
       }
-      
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -620,13 +750,13 @@ async function handleTeams(
       const params: Record<string, string> = { $top: String(input.top || 25) };
       const chatsResult = await callGraph(graphClient, 'GET', '/me/chats', params);
       const chatsData = JSON.parse(chatsResult);
-      
+
       // Default: include messages for chats action (unless explicitly disabled)
       const includeMessages = input.includeMessages !== false;
-      
+
       if (includeMessages && chatsData.value && Array.isArray(chatsData.value)) {
         thinking.push(`Fetching last messages for ${chatsData.value.length} chats...`);
-        
+
         // Fetch last messages for each chat (limit to avoid too many requests)
         const chatsWithMessages = await Promise.allSettled(
           chatsData.value.slice(0, 10).map(async (chat: { id: string }) => {
@@ -651,53 +781,66 @@ async function handleTeams(
             }
           })
         );
-        
+
         // Format results
-        const formattedChats = chatsWithMessages.map((result) => {
-          if (result.status === 'fulfilled') {
-            const chat = result.value;
-            return {
-              id: chat.id,
-              topic: chat.topic,
-              chatType: chat.chatType,
-              createdDateTime: chat.createdDateTime,
-              lastUpdatedDateTime: chat.lastUpdatedDateTime,
-              webUrl: chat.webUrl,
-              lastMessages: (chat.lastMessages || []).map((msg: any) => ({
-                id: msg.id,
-                from: msg.from?.user?.displayName || 'Unknown',
-                content: msg.body?.content || '',
-                contentType: msg.body?.contentType || 'text',
-                createdDateTime: msg.createdDateTime,
-                importance: msg.importance,
-              })),
-            };
-          }
-          return null;
-        }).filter(Boolean);
-        
+        const formattedChats = chatsWithMessages
+          .map((result) => {
+            if (result.status === 'fulfilled') {
+              const chat = result.value;
+              return {
+                id: chat.id,
+                topic: chat.topic,
+                chatType: chat.chatType,
+                createdDateTime: chat.createdDateTime,
+                lastUpdatedDateTime: chat.lastUpdatedDateTime,
+                webUrl: chat.webUrl,
+                lastMessages: (chat.lastMessages || []).map((msg: any) => ({
+                  id: msg.id,
+                  from: msg.from?.user?.displayName || 'Unknown',
+                  content: msg.body?.content || '',
+                  contentType: msg.body?.contentType || 'text',
+                  createdDateTime: msg.createdDateTime,
+                  importance: msg.importance,
+                })),
+              };
+            }
+            return null;
+          })
+          .filter(Boolean);
+
         const output = {
           totalChats: formattedChats.length,
           chats: formattedChats,
         };
-        
+
         thinking.push(`Retrieved last messages for ${formattedChats.length} chats`);
         return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
       }
-      
+
       return addThinkingToResponse(chatsResult, thinking);
     }
 
     case 'chat-messages': {
-      if (!input.chatId) throw new Error('chatId is required for chat-messages');
+      if (!input.chatId) {
+        throw new Error(
+          'chatId is required for chat-messages action. ' +
+            'Use action "chats" first to list your chats and get chat IDs, ' +
+            'then use action "chat-messages" with a specific chatId.'
+        );
+      }
       thinking.push(`Listing messages in chat: ${input.chatId}`);
       const params: Record<string, string> = {
         $top: String(input.top || 25),
         $orderby: 'createdDateTime desc',
       };
-      const result = await callGraph(graphClient, 'GET', `/me/chats/${input.chatId}/messages`, params);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/chats/${input.chatId}/messages`,
+        params
+      );
       const messagesData = JSON.parse(result);
-      
+
       // Format messages for better readability
       if (messagesData.value && Array.isArray(messagesData.value)) {
         const formattedMessages = messagesData.value.map((msg: any) => ({
@@ -716,17 +859,17 @@ async function handleTeams(
             size: att.size,
           })),
         }));
-        
+
         const output = {
           chatId: input.chatId,
           totalMessages: formattedMessages.length,
           messages: formattedMessages,
         };
-        
+
         thinking.push(`Retrieved ${formattedMessages.length} messages with content`);
         return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
       }
-      
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -823,7 +966,11 @@ async function handleFiles(
     case 'search': {
       if (!input.search) throw new Error('search query is required');
       thinking.push(`Searching files for: ${input.search}`);
-      const result = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.search}')`);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/drive/root/search(q='${input.search}')`
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -895,7 +1042,12 @@ async function handleTasks(
       thinking.push(`Listing tasks in list: ${input.taskListId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
-      const result = await callGraph(graphClient, 'GET', `/me/todo/lists/${input.taskListId}/tasks`, params);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/todo/lists/${input.taskListId}/tasks`,
+        params
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -904,7 +1056,11 @@ async function handleTasks(
         throw new Error('taskListId and taskId are required');
       }
       thinking.push(`Getting task: ${input.taskId}`);
-      const result = await callGraph(graphClient, 'GET', `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -937,7 +1093,13 @@ async function handleTasks(
       if (input.dueDateTime) {
         task.dueDateTime = { dateTime: input.dueDateTime, timeZone: 'UTC' };
       }
-      const result = await callGraph(graphClient, 'POST', `/me/todo/lists/${input.taskListId}/tasks`, undefined, task);
+      const result = await callGraph(
+        graphClient,
+        'POST',
+        `/me/todo/lists/${input.taskListId}/tasks`,
+        undefined,
+        task
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -951,7 +1113,13 @@ async function handleTasks(
       if (input.isCompleted !== undefined) {
         updates.status = input.isCompleted ? 'completed' : 'notStarted';
       }
-      const result = await callGraph(graphClient, 'PATCH', `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`, undefined, updates);
+      const result = await callGraph(
+        graphClient,
+        'PATCH',
+        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`,
+        undefined,
+        updates
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -959,7 +1127,11 @@ async function handleTasks(
       if (!input.taskListId) throw new Error('taskListId is required for delete-todo');
       if (!input.taskId) throw new Error('taskId is required for delete-todo');
       thinking.push(`Deleting To-Do task: ${input.taskId}`);
-      const result = await callGraph(graphClient, 'DELETE', `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`);
+      const result = await callGraph(
+        graphClient,
+        'DELETE',
+        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`
+      );
       return addThinkingToResponse(
         result || JSON.stringify({ success: true, message: 'Task deleted' }),
         thinking
@@ -1023,7 +1195,10 @@ async function handleContacts(
       thinking.push('Listing organization users');
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
-      if (input.search) params.$search = `"${input.search}"`;
+      if (input.search) {
+        // Microsoft Graph API requires property:value format for $search on /users endpoint
+        params.$search = formatSearchQuery(input.search, 'displayName');
+      }
       const result = await callGraph(graphClient, 'GET', '/users', params, undefined, {
         ConsistencyLevel: 'eventual',
       });
@@ -1039,8 +1214,10 @@ async function handleContacts(
     case 'search': {
       if (!input.search) throw new Error('search query is required');
       thinking.push(`Searching for: ${input.search}`);
+
+      // Microsoft Graph API requires property:value format for $search on /users endpoint
       const params: Record<string, string> = {
-        $search: `"${input.search}"`,
+        $search: formatSearchQuery(input.search, 'displayName'),
         $top: String(input.top || 25),
       };
       const result = await callGraph(graphClient, 'GET', '/users', params, undefined, {
@@ -1127,7 +1304,11 @@ async function handleMeetings(
         throw new Error('meetingId and transcriptId are required');
       }
       thinking.push(`Getting transcript content: ${input.transcriptId}`);
-      const result = await callGraph(graphClient, 'GET', `/me/onlineMeetings/${input.meetingId}/transcripts/${input.transcriptId}/content`);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/onlineMeetings/${input.meetingId}/transcripts/${input.transcriptId}/content`
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1207,7 +1388,12 @@ async function handleSharePoint(
       thinking.push(`Listing items in list: ${input.listId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
-      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/lists/${input.listId}/items`, params);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/sites/${input.siteId}/lists/${input.listId}/items`,
+        params
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1265,7 +1451,11 @@ async function handleNotes(
     case 'sections': {
       if (!input.notebookId) throw new Error('notebookId is required');
       thinking.push(`Listing sections in notebook: ${input.notebookId}`);
-      const result = await callGraph(graphClient, 'GET', `/me/onenote/notebooks/${input.notebookId}/sections`);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/onenote/notebooks/${input.notebookId}/sections`
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1273,14 +1463,23 @@ async function handleNotes(
       if (!input.sectionId) throw new Error('sectionId is required');
       thinking.push(`Listing pages in section: ${input.sectionId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await callGraph(graphClient, 'GET', `/me/onenote/sections/${input.sectionId}/pages`, params);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/onenote/sections/${input.sectionId}/pages`,
+        params
+      );
       return addThinkingToResponse(result, thinking);
     }
 
     case 'page-content': {
       if (!input.pageId) throw new Error('pageId is required');
       thinking.push(`Getting page content: ${input.pageId}`);
-      const result = await callGraph(graphClient, 'GET', `/me/onenote/pages/${input.pageId}/content`);
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/onenote/pages/${input.pageId}/content`
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1351,35 +1550,43 @@ async function handleSearch(
     /\b([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b/, // Standalone names like "Ricardo"
     /\b(chat|nachricht|message|teams)\s+(mit|von|to|from|with)\s+([A-ZÄÖÜ][a-zäöüß]+)/i, // "Chat mit Ricardo"
   ];
-  const hasPersonQuery = personPatterns.some(pattern => pattern.test(input.query));
+  const hasPersonQuery = personPatterns.some((pattern) => pattern.test(input.query));
   const hasTeamsKeywords = /\b(teams|chat|nachricht|message)\b/i.test(input.query);
   const personMatch = input.query.match(personPatterns[0]) || input.query.match(personPatterns[1]);
-  const personName = personMatch ? (personMatch[2] || personMatch[1]) : null;
+  const personName = personMatch ? personMatch[2] || personMatch[1] : null;
 
   // Intelligent entity type detection based on query
   let entityTypes = input.entityTypes;
-  
+
   if (!entityTypes) {
     // Default: include all common types including chatMessage
     entityTypes = ['message', 'event', 'driveItem', 'site', 'chatMessage'];
-    
+
     if (hasPersonQuery || hasTeamsKeywords) {
       // Prioritize chatMessage and person for person/Teams queries
       entityTypes = ['chatMessage', 'message', 'person', 'event'];
       thinking.push('💡 Detected person/Teams query - prioritizing chatMessage and person');
     }
   }
-  
+
   thinking.push(`Searching in: ${entityTypes.join(', ')}`);
 
   // Improve query for better search results
   // Simplify query for Teams/person searches to just the person name
   let searchQuery = input.query;
-  
+
   if (personName && (hasTeamsKeywords || entityTypes.includes('chatMessage'))) {
     // For Teams/person queries, simplify to just the person name for better results
     searchQuery = personName;
-    thinking.push(`💡 Simplified query to person name: "${searchQuery}" for better Teams search results`);
+    thinking.push(
+      `💡 Simplified query to person name: "${searchQuery}" for better Teams search results`
+    );
+  }
+
+  // Format KQL query to ensure proper syntax (handles property filters with spaces, OR/AND operators)
+  searchQuery = formatKQLQuery(searchQuery);
+  if (searchQuery !== input.query) {
+    thinking.push(`💡 Formatted KQL query: "${input.query}" -> "${searchQuery}"`);
   }
 
   // Build the search request
@@ -1438,15 +1645,16 @@ async function handleSearch(
     );
 
     // If chatMessage results found, fetch full message content for better context
-    const chatMessageResults = formattedResults['#microsoft.graph.chatMessage'] || formattedResults['chatMessage'] || [];
+    const chatMessageResults =
+      formattedResults['#microsoft.graph.chatMessage'] || formattedResults['chatMessage'] || [];
     const chatIds = new Set<string>();
-    
+
     // Extract chat IDs from chatMessage results
     for (const msg of chatMessageResults) {
       const msgAny = msg as any;
       if (msgAny.id) {
         let chatId: string | null = null;
-        
+
         // Try different ID formats
         // Format 1: "19:chatId_messageId@thread.v2"
         if (msgAny.id.includes(':')) {
@@ -1471,18 +1679,18 @@ async function handleSearch(
         else if (msgAny.chatId) {
           chatId = msgAny.chatId;
         }
-        
+
         if (chatId) {
           chatIds.add(chatId);
         }
       }
     }
-    
+
     // Fetch full messages for found chats (limit to avoid too many requests)
     const chatMessagesWithContent: Record<string, unknown[]> = {};
     if (chatIds.size > 0 && chatMessageResults.length > 0) {
       thinking.push(`Fetching full message content for ${Math.min(chatIds.size, 5)} chats...`);
-      
+
       for (const chatId of Array.from(chatIds).slice(0, 5)) {
         try {
           const messagesResult = await callGraph(
@@ -1492,7 +1700,7 @@ async function handleSearch(
             { $top: '10', $orderby: 'createdDateTime desc' }
           );
           const messagesData = JSON.parse(messagesResult);
-          
+
           if (messagesData.value && Array.isArray(messagesData.value)) {
             chatMessagesWithContent[chatId] = messagesData.value.map((msg: any) => ({
               id: msg.id,
@@ -1508,9 +1716,11 @@ async function handleSearch(
           logger.warn(`Failed to fetch messages for chat ${chatId}: ${error}`);
         }
       }
-      
+
       if (Object.keys(chatMessagesWithContent).length > 0) {
-        thinking.push(`Retrieved full message content for ${Object.keys(chatMessagesWithContent).length} chats`);
+        thinking.push(
+          `Retrieved full message content for ${Object.keys(chatMessagesWithContent).length} chats`
+        );
       }
     }
 
@@ -1518,14 +1728,16 @@ async function handleSearch(
 
     // Provide guidance on which tools to use based on results
     const toolSuggestions: string[] = [];
-    
+
     // If no results found and searching for person/Teams, suggest compound tools
     if (totalHits === 0 && (personName || hasTeamsKeywords)) {
       if (hasTeamsKeywords || entityTypes.includes('chatMessage')) {
         toolSuggestions.push(
           '💡 Try compound tool "find-messages-with-person" for Teams chats with a specific person'
         );
-        toolSuggestions.push('💡 Try "teams" tool with action "chats" (includes last messages) to list all chats');
+        toolSuggestions.push(
+          '💡 Try "teams" tool with action "chats" (includes last messages) to list all chats'
+        );
       }
       if (personName) {
         toolSuggestions.push(
@@ -1536,7 +1748,7 @@ async function handleSearch(
         );
       }
     }
-    
+
     // Suggest tools based on found entity types
     for (const entityType of Object.keys(formattedResults)) {
       if (entityType.includes('message')) {
@@ -1583,11 +1795,12 @@ async function handleSearch(
       results: formattedResults,
       suggestions: [...new Set(toolSuggestions)],
     };
-    
+
     // Add full chat messages if fetched
     if (Object.keys(chatMessagesWithContent).length > 0) {
       output.chatMessagesWithContent = chatMessagesWithContent;
-      output.note = 'Full message content has been fetched for the chats found in search results. Use "teams" tool with action "chat-messages" and the chatId to get more messages.';
+      output.note =
+        'Full message content has been fetched for the chats found in search results. Use "teams" tool with action "chat-messages" and the chatId to get more messages.';
     }
 
     return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
@@ -1652,7 +1865,11 @@ async function handleAssistant(
       results.emails = JSON.parse(emailResult);
 
       // Search files
-      const filesResult = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.query}')`);
+      const filesResult = await callGraph(
+        graphClient,
+        'GET',
+        `/me/drive/root/search(q='${input.query}')`
+      );
       results.files = JSON.parse(filesResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1668,7 +1885,11 @@ async function handleAssistant(
       });
       results.emails = JSON.parse(emailResult);
 
-      const filesResult = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.query}')`);
+      const filesResult = await callGraph(
+        graphClient,
+        'GET',
+        `/me/drive/root/search(q='${input.query}')`
+      );
       results.files = JSON.parse(filesResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1736,7 +1957,11 @@ async function handleAssistant(
       });
       results.emails = JSON.parse(emailsResult);
 
-      const filesResult = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.topic}')`);
+      const filesResult = await callGraph(
+        graphClient,
+        'GET',
+        `/me/drive/root/search(q='${input.topic}')`
+      );
       results.files = JSON.parse(filesResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
