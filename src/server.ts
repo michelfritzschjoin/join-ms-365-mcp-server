@@ -20,6 +20,7 @@ import { registerAuthTools } from './auth-tools.js';
 import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
 import { registerDiscoveryTools as registerIntelligentDiscoveryTools } from './discovery-tools.js';
 import { registerCompoundTools } from './compound-tools.js';
+import { registerSuperTools } from './super-tools.js';
 import GraphClient from './graph-client.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import KnowledgeBase from './knowledge-base.js';
@@ -564,16 +565,37 @@ class MicrosoftGraphServer {
         this.options.orgMode
       );
     } else {
-      // Initialize knowledge base for tool usage learning
-      const knowledgeBase = new KnowledgeBase();
-      registerGraphTools(
-        this.server,
-        this.graphClient,
-        this.options.readOnly,
-        this.options.enabledTools,
-        this.options.orgMode,
-        knowledgeBase
-      );
+      // Check if Super-Tools mode is enabled (consolidated 10 tools instead of 126+)
+      const useSuperTools =
+        process.env.MS365_MCP_USE_SUPER_TOOLS === 'true' ||
+        process.env.MS365_MCP_USE_SUPER_TOOLS === '1';
+
+      if (useSuperTools) {
+        // Super-Tools mode: 10 consolidated tools instead of 126+
+        logger.info('Super-Tools mode enabled - registering 10 consolidated tools');
+        registerSuperTools(this.server, this.graphClient);
+      } else {
+        // Classic mode: register all individual tools
+        // Initialize knowledge base for tool usage learning
+        const knowledgeBase = new KnowledgeBase();
+        registerGraphTools(
+          this.server,
+          this.graphClient,
+          this.options.readOnly,
+          this.options.enabledTools,
+          this.options.orgMode,
+          knowledgeBase
+        );
+
+        // Register compound tools (multi-step contextual tools)
+        // These are always enabled as they provide essential functionality for natural language queries
+        const compoundToolCount = registerCompoundTools(
+          this.server,
+          this.graphClient,
+          this.options.readOnly
+        );
+        logger.info(`Registered ${compoundToolCount} compound tools (multi-step contextual tools)`);
+      }
     }
 
     // Register intelligent discovery tools if enabled
@@ -600,15 +622,6 @@ class MicrosoftGraphServer {
         );
       }
     }
-
-    // Register compound tools (multi-step contextual tools)
-    // These are always enabled as they provide essential functionality for natural language queries
-    const compoundToolCount = registerCompoundTools(
-      this.server,
-      this.graphClient,
-      this.options.readOnly
-    );
-    logger.info(`Registered ${compoundToolCount} compound tools (multi-step contextual tools)`);
 
     // Validate tool schemas early: OpenWebUI calls tools/list and the MCP SDK will
     // attempt to normalize schemas. If any raw-shape schema contains undefined

@@ -68,6 +68,7 @@ function displayEnvironmentVariables(): void {
     'MS365_MCP_ORG_MODE',
     'ENABLED_TOOLS',
     'MS365_MCP_OUTPUT_FORMAT',
+    'MS365_MCP_USE_SUPER_TOOLS',
     'MS365_MCP_ENABLE_DISCOVERY_TOOLS',
     'MS365_MCP_FORCE_WORK_SCOPES',
     // Performance & Limits

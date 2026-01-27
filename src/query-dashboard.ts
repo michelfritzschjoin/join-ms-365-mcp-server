@@ -449,6 +449,231 @@ export function createDashboardRouter(): Router {
     }
   });
 
+  // API: Get tool performance statistics with rate limiting
+  router.get('/api/tool-performance', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+      const toolStats: Record<
+        string,
+        {
+          tool: string;
+          totalQueries: number;
+          successfulQueries: number;
+          failedQueries: number;
+          successRate: number;
+          averageDuration: number;
+          totalDuration: number;
+        }
+      > = {};
+
+      for (const query of allQueries) {
+        if (!toolStats[query.toolName]) {
+          toolStats[query.toolName] = {
+            tool: query.toolName,
+            totalQueries: 0,
+            successfulQueries: 0,
+            failedQueries: 0,
+            successRate: 0,
+            averageDuration: 0,
+            totalDuration: 0,
+          };
+        }
+
+        const stat = toolStats[query.toolName];
+        stat.totalQueries++;
+        if (query.success) {
+          stat.successfulQueries++;
+        } else {
+          stat.failedQueries++;
+        }
+        if (query.durationMs) {
+          stat.totalDuration += query.durationMs;
+        }
+      }
+
+      // Calculate success rates and average durations
+      const toolPerformance = Object.values(toolStats).map((stat) => ({
+        ...stat,
+        successRate: stat.totalQueries > 0 ? (stat.successfulQueries / stat.totalQueries) * 100 : 0,
+        averageDuration:
+          stat.totalQueries > 0 ? Math.round(stat.totalDuration / stat.totalQueries) : 0,
+      }));
+
+      // Sort by total queries (most used first)
+      toolPerformance.sort((a, b) => b.totalQueries - a.totalQueries);
+
+      res.json({ toolPerformance });
+    } catch (error) {
+      logger.error('Error fetching tool performance:', error);
+      res.status(500).json({ error: 'Failed to fetch tool performance' });
+    }
+  });
+
+  // API: Get time series data for charts
+  router.get('/api/timeseries', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const days = parseInt((req.query.days as string) || '7', 10);
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+
+      // Group by day
+      const dailyData: Record<
+        string,
+        { date: string; total: number; successful: number; failed: number }
+      > = {};
+
+      const now = new Date();
+      for (let i = days - 1; i >= 0; i--) {
+        const date = new Date(now);
+        date.setDate(date.getDate() - i);
+        const dateKey = date.toISOString().split('T')[0];
+        dailyData[dateKey] = {
+          date: dateKey,
+          total: 0,
+          successful: 0,
+          failed: 0,
+        };
+      }
+
+      for (const query of allQueries) {
+        const queryDate = new Date(query.timestamp).toISOString().split('T')[0];
+        if (dailyData[queryDate]) {
+          dailyData[queryDate].total++;
+          if (query.success) {
+            dailyData[queryDate].successful++;
+          } else {
+            dailyData[queryDate].failed++;
+          }
+        }
+      }
+
+      const timeseries = Object.values(dailyData);
+      res.json({ timeseries });
+    } catch (error) {
+      logger.error('Error fetching time series data:', error);
+      res.status(500).json({ error: 'Failed to fetch time series data' });
+    }
+  });
+
+  // API: Get user statistics
+  router.get('/api/user-stats', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+      const userStats: Record<
+        string,
+        {
+          userIdHash: string;
+          totalQueries: number;
+          successfulQueries: number;
+          failedQueries: number;
+          successRate: number;
+          uniqueTools: Set<string>;
+          lastActivity: string;
+        }
+      > = {};
+
+      for (const query of allQueries) {
+        if (!userStats[query.userIdHash]) {
+          userStats[query.userIdHash] = {
+            userIdHash: query.userIdHash,
+            totalQueries: 0,
+            successfulQueries: 0,
+            failedQueries: 0,
+            successRate: 0,
+            uniqueTools: new Set(),
+            lastActivity: query.timestamp,
+          };
+        }
+
+        const stat = userStats[query.userIdHash];
+        stat.totalQueries++;
+        if (query.success) {
+          stat.successfulQueries++;
+        } else {
+          stat.failedQueries++;
+        }
+        stat.uniqueTools.add(query.toolName);
+        if (new Date(query.timestamp) > new Date(stat.lastActivity)) {
+          stat.lastActivity = query.timestamp;
+        }
+      }
+
+      const userStatsArray = Object.values(userStats).map((stat) => ({
+        userIdHash: stat.userIdHash,
+        totalQueries: stat.totalQueries,
+        successfulQueries: stat.successfulQueries,
+        failedQueries: stat.failedQueries,
+        successRate: stat.totalQueries > 0 ? (stat.successfulQueries / stat.totalQueries) * 100 : 0,
+        uniqueTools: stat.uniqueTools.size,
+        lastActivity: stat.lastActivity,
+      }));
+
+      // Sort by total queries (most active first)
+      userStatsArray.sort((a, b) => b.totalQueries - a.totalQueries);
+
+      res.json({ userStats: userStatsArray });
+    } catch (error) {
+      logger.error('Error fetching user statistics:', error);
+      res.status(500).json({ error: 'Failed to fetch user statistics' });
+    }
+  });
+
+  // API: Export all queries as CSV
+  router.get('/api/export/csv', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const filter: QueryFilter = {};
+      if (req.query.toolName) {
+        filter.toolName = req.query.toolName as string;
+      }
+      if (req.query.startDate) {
+        filter.startDate = new Date(req.query.startDate as string);
+      }
+      if (req.query.endDate) {
+        filter.endDate = new Date(req.query.endDate as string);
+      }
+
+      const queries = queryStore.getQueries({ ...filter, limit: 100000 });
+
+      // Generate CSV
+      const headers = [
+        'Timestamp',
+        'Tool Name',
+        'User ID Hash',
+        'Chat ID',
+        'Success',
+        'Duration (ms)',
+        'Parameters',
+        'Error Message',
+      ];
+      const csvRows = [headers.join(',')];
+
+      for (const query of queries) {
+        const row = [
+          query.timestamp,
+          query.toolName,
+          query.userIdHash,
+          query.chatId || '',
+          query.success ? 'true' : 'false',
+          query.durationMs?.toString() || '',
+          JSON.stringify(query.parameters).replace(/"/g, '""'),
+          query.errorMessage || '',
+        ];
+        csvRows.push(row.map((cell) => `"${cell}"`).join(','));
+      }
+
+      const csv = csvRows.join('\n');
+
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="queries-export-${new Date().toISOString().split('T')[0]}.csv"`
+      );
+      res.send(csv);
+    } catch (error) {
+      logger.error('Error exporting queries as CSV:', error);
+      res.status(500).json({ error: 'Failed to export queries' });
+    }
+  });
+
   // API: Export user data (GDPR) with rate limiting
   router.get('/api/export/:userIdHash', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
@@ -1107,6 +1332,152 @@ function getDashboardPageHtml(): string {
       margin-bottom: 16px;
     }
 
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      border-bottom: 2px solid var(--border);
+      margin-bottom: 24px;
+      background: var(--bg-secondary);
+      border-radius: 12px 12px 0 0;
+      padding: 8px 8px 0 8px;
+    }
+
+    .tab {
+      padding: 12px 24px;
+      font-size: 14px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      top: 2px;
+    }
+
+    .tab:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+      background: var(--bg-secondary);
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    /* Tool Performance Table */
+    .performance-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .performance-table th,
+    .performance-table td {
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .performance-table th {
+      background: var(--bg-tertiary);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .performance-table tr:hover td {
+      background: var(--bg-hover);
+    }
+
+    .progress-bar {
+      height: 8px;
+      background: var(--bg-tertiary);
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 4px;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 0.3s;
+    }
+
+    .progress-bar-fill.success {
+      background: var(--success);
+    }
+
+    .progress-bar-fill.error {
+      background: var(--error);
+    }
+
+    /* Line Chart */
+    .line-chart-container {
+      height: 300px;
+      position: relative;
+      margin-top: 20px;
+    }
+
+    .line-chart {
+      width: 100%;
+      height: 100%;
+      position: relative;
+    }
+
+    .chart-line {
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 2;
+    }
+
+    .chart-line.success {
+      stroke: var(--success);
+    }
+
+    .chart-line.error {
+      stroke: var(--error);
+    }
+
+    .chart-axis {
+      stroke: var(--border);
+      stroke-width: 1;
+    }
+
+    .chart-label {
+      font-size: 11px;
+      fill: var(--text-secondary);
+    }
+
+    /* Export Button */
+    .btn-export {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+
+    .btn-export:hover {
+      background: var(--bg-hover);
+      border-color: var(--accent);
+    }
+
     /* Responsive */
     @media (max-width: 768px) {
       .header {
@@ -1130,6 +1501,17 @@ function getDashboardPageHtml(): string {
         display: block;
         overflow-x: auto;
       }
+
+      .tabs {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+      }
+
+      .tab {
+        padding: 10px 16px;
+        font-size: 13px;
+        white-space: nowrap;
+      }
     }
   </style>
 </head>
@@ -1144,6 +1526,9 @@ function getDashboardPageHtml(): string {
     <div class="header-actions">
       <button class="btn btn-secondary" onclick="refreshData()">
         🔄 Aktualisieren
+      </button>
+      <button class="btn btn-secondary" onclick="exportData()">
+        📥 Export
       </button>
       <button class="btn btn-secondary" onclick="logout()">
         🚪 Abmelden
@@ -1172,71 +1557,170 @@ function getDashboardPageHtml(): string {
       </div>
     </div>
 
-    <!-- Chart -->
-    <div class="chart-section">
-      <h3>Queries der letzten 24 Stunden</h3>
-      <div class="chart-container" id="chartContainer"></div>
+    <!-- Tabs -->
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('overview')">Übersicht</button>
+      <button class="tab" onclick="switchTab('queries')">Queries</button>
+      <button class="tab" onclick="switchTab('tools')">Tools</button>
+      <button class="tab" onclick="switchTab('users')">Nutzer</button>
+      <button class="tab" onclick="switchTab('analytics')">Analytics</button>
     </div>
 
-    <!-- Filters -->
-    <div class="filters">
-      <div class="filter-group">
-        <label>Tool</label>
-        <select id="filterTool">
-          <option value="">Alle Tools</option>
-        </select>
+    <!-- Overview Tab -->
+    <div id="tab-overview" class="tab-content active">
+      <!-- Time Series Chart -->
+      <div class="chart-section">
+        <h3>Queries der letzten 7 Tage</h3>
+        <div class="line-chart-container">
+          <svg class="line-chart" id="timeSeriesChart"></svg>
+        </div>
       </div>
-      <div class="filter-group">
-        <label>Status</label>
-        <select id="filterStatus">
-          <option value="">Alle</option>
-          <option value="true">Erfolgreich</option>
-          <option value="false">Fehlgeschlagen</option>
-        </select>
+
+      <!-- Hourly Chart -->
+      <div class="chart-section">
+        <h3>Queries der letzten 24 Stunden</h3>
+        <div class="chart-container" id="chartContainer"></div>
       </div>
-      <div class="filter-group">
-        <label>Von</label>
-        <input type="date" id="filterStartDate">
-      </div>
-      <div class="filter-group">
-        <label>Bis</label>
-        <input type="date" id="filterEndDate">
-      </div>
-      <button class="btn btn-primary" onclick="applyFilters()">Filter anwenden</button>
     </div>
 
-    <!-- Queries Table -->
-    <div class="queries-section">
-      <div class="queries-header">
-        <h2>Queries</h2>
-        <span class="queries-count" id="queriesCount">0 von 0</span>
+    <!-- Queries Tab -->
+    <div id="tab-queries" class="tab-content">
+      <!-- Filters -->
+      <div class="filters">
+        <div class="filter-group">
+          <label>Tool</label>
+          <select id="filterTool">
+            <option value="">Alle Tools</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Status</label>
+          <select id="filterStatus">
+            <option value="">Alle</option>
+            <option value="true">Erfolgreich</option>
+            <option value="false">Fehlgeschlagen</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Von</label>
+          <input type="date" id="filterStartDate">
+        </div>
+        <div class="filter-group">
+          <label>Bis</label>
+          <input type="date" id="filterEndDate">
+        </div>
+        <button class="btn btn-primary" onclick="applyFilters()">Filter anwenden</button>
       </div>
-      <table class="queries-table">
-        <thead>
-          <tr>
-            <th>Zeitstempel</th>
-            <th>Tool</th>
-            <th>Nutzer</th>
-            <th>Status</th>
-            <th>Dauer</th>
-            <th>Parameter</th>
-          </tr>
-        </thead>
-        <tbody id="queriesBody">
-          <tr>
-            <td colspan="6">
-              <div class="loading">
-                <div class="loading-spinner"></div>
-                Lade Queries...
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <div class="pagination">
-        <button id="prevBtn" onclick="prevPage()" disabled>← Zurück</button>
-        <span class="page-info" id="pageInfo">Seite 1</span>
-        <button id="nextBtn" onclick="nextPage()">Weiter →</button>
+
+      <!-- Queries Table -->
+      <div class="queries-section">
+        <div class="queries-header">
+          <h2>Queries</h2>
+          <span class="queries-count" id="queriesCount">0 von 0</span>
+        </div>
+        <table class="queries-table">
+          <thead>
+            <tr>
+              <th>Zeitstempel</th>
+              <th>Tool</th>
+              <th>Nutzer</th>
+              <th>Status</th>
+              <th>Dauer</th>
+              <th>Parameter</th>
+            </tr>
+          </thead>
+          <tbody id="queriesBody">
+            <tr>
+              <td colspan="6">
+                <div class="loading">
+                  <div class="loading-spinner"></div>
+                  Lade Queries...
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="pagination">
+          <button id="prevBtn" onclick="prevPage()" disabled>← Zurück</button>
+          <span class="page-info" id="pageInfo">Seite 1</span>
+          <button id="nextBtn" onclick="nextPage()">Weiter →</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tools Tab -->
+    <div id="tab-tools" class="tab-content">
+      <div class="queries-section">
+        <div class="queries-header">
+          <h2>Tool Performance</h2>
+          <button class="btn-export" onclick="exportToolPerformance()">📥 CSV Export</button>
+        </div>
+        <table class="performance-table">
+          <thead>
+            <tr>
+              <th>Tool</th>
+              <th>Gesamt</th>
+              <th>Erfolgreich</th>
+              <th>Fehlgeschlagen</th>
+              <th>Erfolgsrate</th>
+              <th>Durchschn. Dauer</th>
+            </tr>
+          </thead>
+          <tbody id="toolPerformanceBody">
+            <tr>
+              <td colspan="6">
+                <div class="loading">
+                  <div class="loading-spinner"></div>
+                  Lade Tool-Performance...
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Users Tab -->
+    <div id="tab-users" class="tab-content">
+      <div class="queries-section">
+        <div class="queries-header">
+          <h2>Nutzer Statistiken</h2>
+        </div>
+        <table class="performance-table">
+          <thead>
+            <tr>
+              <th>Nutzer Hash</th>
+              <th>Gesamt Queries</th>
+              <th>Erfolgreich</th>
+              <th>Fehlgeschlagen</th>
+              <th>Erfolgsrate</th>
+              <th>Eindeutige Tools</th>
+              <th>Letzte Aktivität</th>
+            </tr>
+          </thead>
+          <tbody id="userStatsBody">
+            <tr>
+              <td colspan="7">
+                <div class="loading">
+                  <div class="loading-spinner"></div>
+                  Lade Nutzer-Statistiken...
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Analytics Tab -->
+    <div id="tab-analytics" class="tab-content">
+      <div class="chart-section">
+        <h3>Top Tools nach Nutzung</h3>
+        <div id="topToolsChart" style="height: 300px; margin-top: 20px;"></div>
+      </div>
+      <div class="chart-section">
+        <h3>Erfolgsrate nach Tool</h3>
+        <div id="toolSuccessChart" style="height: 300px; margin-top: 20px;"></div>
       </div>
     </div>
   </main>
@@ -1246,6 +1730,34 @@ function getDashboardPageHtml(): string {
     const pageSize = 50;
     let totalQueries = 0;
     let filters = {};
+    let currentTab = 'overview';
+
+    function switchTab(tabName) {
+      // Update tab buttons
+      document.querySelectorAll('.tab').forEach(tab => {
+        tab.classList.remove('active');
+      });
+      event.target.classList.add('active');
+
+      // Update tab content
+      document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.remove('active');
+      });
+      document.getElementById('tab-' + tabName).classList.add('active');
+
+      currentTab = tabName;
+
+      // Load tab-specific data
+      if (tabName === 'tools') {
+        fetchToolPerformance();
+      } else if (tabName === 'users') {
+        fetchUserStats();
+      } else if (tabName === 'analytics') {
+        fetchAnalytics();
+      } else if (tabName === 'overview') {
+        fetchTimeSeries();
+      }
+    }
 
     async function fetchStats() {
       try {
@@ -1257,7 +1769,7 @@ function getDashboardPageHtml(): string {
         document.getElementById('successRate').textContent = stats.successRate.toFixed(1) + '%';
         document.getElementById('avgDuration').textContent = stats.averageDuration + ' ms';
 
-        // Render chart
+        // Render hourly chart
         const container = document.getElementById('chartContainer');
         container.innerHTML = '';
         const maxCount = Math.max(...stats.queriesPerHour.map(h => h.count), 1);
@@ -1272,6 +1784,309 @@ function getDashboardPageHtml(): string {
       } catch (error) {
         console.error('Error fetching stats:', error);
       }
+    }
+
+    async function fetchTimeSeries() {
+      try {
+        const res = await fetch('/dashboard/api/timeseries?days=7');
+        const data = await res.json();
+        renderTimeSeriesChart(data.timeseries);
+      } catch (error) {
+        console.error('Error fetching time series:', error);
+      }
+    }
+
+    function renderTimeSeriesChart(timeseries) {
+      const svg = document.getElementById('timeSeriesChart');
+      if (!svg) return;
+
+      svg.innerHTML = '';
+      const width = svg.clientWidth || 800;
+      const height = 300;
+      const padding = { top: 20, right: 20, bottom: 40, left: 60 };
+      const chartWidth = width - padding.left - padding.right;
+      const chartHeight = height - padding.top - padding.bottom;
+
+      svg.setAttribute('width', width);
+      svg.setAttribute('height', height);
+
+      const maxValue = Math.max(...timeseries.map(d => Math.max(d.total, d.successful, d.failed)), 1);
+
+      // Draw axes
+      const axisGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      axisGroup.setAttribute('class', 'chart-axis');
+
+      // X-axis
+      const xAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      xAxis.setAttribute('x1', padding.left);
+      xAxis.setAttribute('y1', height - padding.bottom);
+      xAxis.setAttribute('x2', width - padding.right);
+      xAxis.setAttribute('y2', height - padding.bottom);
+      axisGroup.appendChild(xAxis);
+
+      // Y-axis
+      const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      yAxis.setAttribute('x1', padding.left);
+      yAxis.setAttribute('y1', padding.top);
+      yAxis.setAttribute('x2', padding.left);
+      yAxis.setAttribute('y2', height - padding.bottom);
+      axisGroup.appendChild(yAxis);
+
+      svg.appendChild(axisGroup);
+
+      // Draw lines
+      const points = timeseries.map((d, i) => ({
+        x: padding.left + (i / (timeseries.length - 1)) * chartWidth,
+        y: height - padding.bottom - (d.total / maxValue) * chartHeight,
+        date: d.date,
+        total: d.total,
+        successful: d.successful,
+        failed: d.failed,
+      }));
+
+      // Success line
+      const successPath = points.map((p, i) => 
+        `${i === 0 ? 'M' : 'L'} ${p.x} ${height - padding.bottom - (p.successful / maxValue) * chartHeight}`
+      ).join(' ');
+      const successLine = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      successLine.setAttribute('d', successPath);
+      successLine.setAttribute('class', 'chart-line success');
+      successLine.setAttribute('stroke-width', '2');
+      successLine.setAttribute('fill', 'none');
+      svg.appendChild(successLine);
+
+      // Total line
+      const totalPath = points.map((p, i) => 
+        `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`
+      ).join(' ');
+      const totalLine = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      totalLine.setAttribute('d', totalPath);
+      totalLine.setAttribute('class', 'chart-line');
+      totalLine.setAttribute('stroke-width', '2');
+      totalLine.setAttribute('fill', 'none');
+      svg.appendChild(totalLine);
+
+      // Labels
+      points.forEach((point, i) => {
+        if (i % Math.ceil(timeseries.length / 7) === 0 || i === timeseries.length - 1) {
+          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          label.setAttribute('x', point.x);
+          label.setAttribute('y', height - padding.bottom + 20);
+          label.setAttribute('class', 'chart-label');
+          label.setAttribute('text-anchor', 'middle');
+          label.textContent = point.date.split('-')[2]; // Day only
+          svg.appendChild(label);
+        }
+      });
+    }
+
+    async function fetchToolPerformance() {
+      try {
+        const res = await fetch('/dashboard/api/tool-performance');
+        const data = await res.json();
+        renderToolPerformance(data.toolPerformance);
+      } catch (error) {
+        console.error('Error fetching tool performance:', error);
+        document.getElementById('toolPerformanceBody').innerHTML = 
+          '<tr><td colspan="6" class="empty-state">Fehler beim Laden der Tool-Performance</td></tr>';
+      }
+    }
+
+    function renderToolPerformance(toolPerformance) {
+      const tbody = document.getElementById('toolPerformanceBody');
+      
+      if (toolPerformance.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6"><div class="empty-state"><svg viewBox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg><p>Keine Tool-Performance-Daten gefunden</p></div></td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = toolPerformance.map(tool => {
+        const successRatePercent = tool.successRate.toFixed(1);
+        return '<tr>' +
+          '<td><span class="tool-name">' + tool.tool + '</span></td>' +
+          '<td>' + tool.totalQueries.toLocaleString('de-DE') + '</td>' +
+          '<td>' + tool.successfulQueries.toLocaleString('de-DE') + '</td>' +
+          '<td>' + tool.failedQueries.toLocaleString('de-DE') + '</td>' +
+          '<td>' +
+            '<div style="display: flex; align-items: center; gap: 8px;">' +
+              '<span>' + successRatePercent + '%</span>' +
+              '<div class="progress-bar" style="flex: 1; max-width: 200px;">' +
+                '<div class="progress-bar-fill ' + (tool.successRate >= 80 ? 'success' : tool.successRate < 50 ? 'error' : '') + '" ' +
+                'style="width: ' + tool.successRate + '%"></div>' +
+              '</div>' +
+            '</div>' +
+          '</td>' +
+          '<td>' + (tool.averageDuration > 0 ? tool.averageDuration + ' ms' : '-') + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    async function fetchUserStats() {
+      try {
+        const res = await fetch('/dashboard/api/user-stats');
+        const data = await res.json();
+        renderUserStats(data.userStats);
+      } catch (error) {
+        console.error('Error fetching user stats:', error);
+        document.getElementById('userStatsBody').innerHTML = 
+          '<tr><td colspan="7" class="empty-state">Fehler beim Laden der Nutzer-Statistiken</td></tr>';
+      }
+    }
+
+    function renderUserStats(userStats) {
+      const tbody = document.getElementById('userStatsBody');
+      
+      if (userStats.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7"><div class="empty-state"><svg viewBox="0 0 24 24"><path d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg><p>Keine Nutzer-Statistiken gefunden</p></div></td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = userStats.slice(0, 50).map(user => {
+        const date = new Date(user.lastActivity);
+        const formattedDate = date.toLocaleDateString('de-DE') + ' ' + date.toLocaleTimeString('de-DE');
+        const successRatePercent = user.successRate.toFixed(1);
+        return '<tr>' +
+          '<td><span class="user-hash">' + user.userIdHash + '</span></td>' +
+          '<td>' + user.totalQueries.toLocaleString('de-DE') + '</td>' +
+          '<td>' + user.successfulQueries.toLocaleString('de-DE') + '</td>' +
+          '<td>' + user.failedQueries.toLocaleString('de-DE') + '</td>' +
+          '<td>' +
+            '<div style="display: flex; align-items: center; gap: 8px;">' +
+              '<span>' + successRatePercent + '%</span>' +
+              '<div class="progress-bar" style="flex: 1; max-width: 150px;">' +
+                '<div class="progress-bar-fill ' + (user.successRate >= 80 ? 'success' : user.successRate < 50 ? 'error' : '') + '" ' +
+                'style="width: ' + user.successRate + '%"></div>' +
+              '</div>' +
+            '</div>' +
+          '</td>' +
+          '<td>' + user.uniqueTools + '</td>' +
+          '<td class="timestamp">' + formattedDate + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    async function fetchAnalytics() {
+      try {
+        const toolRes = await fetch('/dashboard/api/tool-performance');
+        const toolData = await toolRes.json();
+        renderTopToolsChart(toolData.toolPerformance.slice(0, 10));
+        renderToolSuccessChart(toolData.toolPerformance.slice(0, 10));
+      } catch (error) {
+        console.error('Error fetching analytics:', error);
+      }
+    }
+
+    function renderTopToolsChart(toolPerformance) {
+      const container = document.getElementById('topToolsChart');
+      if (!container) return;
+
+      container.innerHTML = '';
+      const maxValue = Math.max(...toolPerformance.map(t => t.totalQueries), 1);
+
+      toolPerformance.forEach(tool => {
+        const barContainer = document.createElement('div');
+        barContainer.style.display = 'flex';
+        barContainer.style.alignItems = 'center';
+        barContainer.style.marginBottom = '12px';
+        barContainer.style.gap = '12px';
+
+        const label = document.createElement('div');
+        label.style.minWidth = '200px';
+        label.style.fontSize = '13px';
+        label.textContent = tool.tool;
+        barContainer.appendChild(label);
+
+        const barWrapper = document.createElement('div');
+        barWrapper.style.flex = '1';
+        barWrapper.style.height = '24px';
+        barWrapper.style.background = 'var(--bg-tertiary)';
+        barWrapper.style.borderRadius = '4px';
+        barWrapper.style.overflow = 'hidden';
+        barWrapper.style.position = 'relative';
+
+        const bar = document.createElement('div');
+        bar.style.height = '100%';
+        bar.style.width = (tool.totalQueries / maxValue * 100) + '%';
+        bar.style.background = 'var(--accent)';
+        bar.style.transition = 'width 0.3s';
+        barWrapper.appendChild(bar);
+
+        const value = document.createElement('div');
+        value.style.position = 'absolute';
+        value.style.right = '8px';
+        value.style.top = '50%';
+        value.style.transform = 'translateY(-50%)';
+        value.style.fontSize = '12px';
+        value.style.color = 'var(--text-primary)';
+        value.textContent = tool.totalQueries.toLocaleString('de-DE');
+        barWrapper.appendChild(value);
+
+        barContainer.appendChild(barWrapper);
+        container.appendChild(barContainer);
+      });
+    }
+
+    function renderToolSuccessChart(toolPerformance) {
+      const container = document.getElementById('toolSuccessChart');
+      if (!container) return;
+
+      container.innerHTML = '';
+      const maxValue = 100; // Percentage
+
+      toolPerformance.forEach(tool => {
+        const barContainer = document.createElement('div');
+        barContainer.style.display = 'flex';
+        barContainer.style.alignItems = 'center';
+        barContainer.style.marginBottom = '12px';
+        barContainer.style.gap = '12px';
+
+        const label = document.createElement('div');
+        label.style.minWidth = '200px';
+        label.style.fontSize = '13px';
+        label.textContent = tool.tool;
+        barContainer.appendChild(label);
+
+        const barWrapper = document.createElement('div');
+        barWrapper.style.flex = '1';
+        barWrapper.style.height = '24px';
+        barWrapper.style.background = 'var(--bg-tertiary)';
+        barWrapper.style.borderRadius = '4px';
+        barWrapper.style.overflow = 'hidden';
+        barWrapper.style.position = 'relative';
+
+        const bar = document.createElement('div');
+        bar.style.height = '100%';
+        bar.style.width = tool.successRate + '%';
+        bar.style.background = tool.successRate >= 80 ? 'var(--success)' : tool.successRate < 50 ? 'var(--error)' : 'var(--warning)';
+        bar.style.transition = 'width 0.3s';
+        barWrapper.appendChild(bar);
+
+        const value = document.createElement('div');
+        value.style.position = 'absolute';
+        value.style.right = '8px';
+        value.style.top = '50%';
+        value.style.transform = 'translateY(-50%)';
+        value.style.fontSize = '12px';
+        value.style.color = 'var(--text-primary)';
+        value.textContent = tool.successRate.toFixed(1) + '%';
+        barWrapper.appendChild(value);
+
+        barContainer.appendChild(barWrapper);
+        container.appendChild(barContainer);
+      });
+    }
+
+    function exportData() {
+      const params = new URLSearchParams();
+      if (filters.toolName) params.append('toolName', filters.toolName);
+      if (filters.startDate) params.append('startDate', filters.startDate);
+      if (filters.endDate) params.append('endDate', filters.endDate);
+      
+      window.open('/dashboard/api/export/csv?' + params.toString(), '_blank');
+    }
+
+    function exportToolPerformance() {
+      window.open('/dashboard/api/export/csv', '_blank');
     }
 
     async function fetchTools() {
