@@ -616,8 +616,9 @@ class MicrosoftGraphServer {
 
           // SECURITY: Validate and sanitize OAuth callback parameters to prevent type confusion
           // Note: redirect_uri can be URLs, URNs (urn:ietf:wg:oauth:2.0:oob), or custom schemes
+          // Microsoft authorization codes can be 2500+ characters long
           const oauthCallbackSchema = z.object({
-            code: z.string().max(2000).optional(),
+            code: z.string().max(4000).optional(), // Microsoft codes can be 2500+ chars
             error: z.string().max(200).optional(),
             error_description: z.string().max(2000).optional(), // Increased for verbose MS error descriptions
             state: z.string().max(4000).optional(), // Increased for base64-encoded state with client info
