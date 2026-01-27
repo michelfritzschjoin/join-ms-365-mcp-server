@@ -617,6 +617,247 @@ export function createDashboardRouter(): Router {
     }
   });
 
+  // API: Get error analysis
+  router.get('/api/error-analysis', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+      const failedQueries = allQueries.filter((q) => !q.success);
+
+      // Group errors by error message
+      const errorCounts: Record<string, number> = {};
+      const toolErrors: Record<string, Record<string, number>> = {};
+      const errorTrends: Record<string, number[]> = {};
+
+      for (const query of failedQueries) {
+        const errorMsg = query.errorMessage || 'Unknown error';
+        errorCounts[errorMsg] = (errorCounts[errorMsg] || 0) + 1;
+
+        if (!toolErrors[query.toolName]) {
+          toolErrors[query.toolName] = {};
+        }
+        toolErrors[query.toolName][errorMsg] = (toolErrors[query.toolName][errorMsg] || 0) + 1;
+
+        // Group by day for trends
+        const day = query.timestamp.split('T')[0];
+        if (!errorTrends[day]) {
+          errorTrends[day] = [];
+        }
+        errorTrends[day].push(1);
+      }
+
+      const topErrors = Object.entries(errorCounts)
+        .map(([error, count]) => ({ error, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+
+      const toolErrorSummary = Object.entries(toolErrors).map(([tool, errors]) => ({
+        tool,
+        totalErrors: Object.values(errors).reduce((sum, count) => sum + count, 0),
+        uniqueErrors: Object.keys(errors).length,
+        topError: Object.entries(errors).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A',
+      }));
+
+      res.json({
+        totalErrors: failedQueries.length,
+        topErrors,
+        toolErrorSummary: toolErrorSummary.sort((a, b) => b.totalErrors - a.totalErrors),
+        errorTrends: Object.entries(errorTrends)
+          .map(([day, errors]) => ({ day, count: errors.length }))
+          .sort((a, b) => a.day.localeCompare(b.day)),
+      });
+    } catch (error) {
+      logger.error('Error fetching error analysis:', error);
+      res.status(500).json({ error: 'Failed to fetch error analysis' });
+    }
+  });
+
+  // API: Get performance bottlenecks
+  router.get('/api/performance-bottlenecks', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+      const queriesWithDuration = allQueries.filter((q) => q.durationMs && q.durationMs > 0);
+
+      // Find slow queries (above 95th percentile)
+      const durations = queriesWithDuration.map((q) => q.durationMs!).sort((a, b) => a - b);
+      const p95Index = Math.floor(durations.length * 0.95);
+      const p95Threshold = durations[p95Index] || 0;
+
+      const slowQueries = queriesWithDuration.filter((q) => q.durationMs! >= p95Threshold);
+
+      // Group by tool
+      const toolPerformance: Record<
+        string,
+        { tool: string; slowCount: number; avgDuration: number; maxDuration: number }
+      > = {};
+
+      for (const query of slowQueries) {
+        if (!toolPerformance[query.toolName]) {
+          const toolQueries = queriesWithDuration.filter((q) => q.toolName === query.toolName);
+          toolPerformance[query.toolName] = {
+            tool: query.toolName,
+            slowCount: 0,
+            avgDuration:
+              toolQueries.reduce((sum, q) => sum + (q.durationMs || 0), 0) / toolQueries.length,
+            maxDuration: Math.max(...toolQueries.map((q) => q.durationMs || 0)),
+          };
+        }
+        toolPerformance[query.toolName].slowCount++;
+      }
+
+      const bottlenecks = Object.values(toolPerformance)
+        .sort((a, b) => b.slowCount - a.slowCount)
+        .slice(0, 10);
+
+      res.json({
+        p95Threshold: Math.round(p95Threshold),
+        slowQueriesCount: slowQueries.length,
+        bottlenecks,
+      });
+    } catch (error) {
+      logger.error('Error fetching performance bottlenecks:', error);
+      res.status(500).json({ error: 'Failed to fetch performance bottlenecks' });
+    }
+  });
+
+  // API: Get usage patterns
+  router.get('/api/usage-patterns', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+
+      // Hourly patterns
+      const hourlyPatterns: Record<number, number> = {};
+      for (let i = 0; i < 24; i++) {
+        hourlyPatterns[i] = 0;
+      }
+
+      // Day of week patterns
+      const dayPatterns: Record<number, number> = {};
+      for (let i = 0; i < 7; i++) {
+        dayPatterns[i] = 0;
+      }
+
+      // Tool combinations (which tools are used together)
+      const userToolSequences: Record<string, string[]> = {};
+      for (const query of allQueries) {
+        const date = new Date(query.timestamp);
+        const hour = date.getHours();
+        const dayOfWeek = date.getDay();
+
+        hourlyPatterns[hour]++;
+        dayPatterns[dayOfWeek]++;
+
+        if (!userToolSequences[query.userIdHash]) {
+          userToolSequences[query.userIdHash] = [];
+        }
+        userToolSequences[query.userIdHash].push(query.toolName);
+      }
+
+      // Find common tool sequences
+      const sequences: Record<string, number> = {};
+      for (const userSeq of Object.values(userToolSequences)) {
+        for (let i = 0; i < userSeq.length - 1; i++) {
+          const seq = `${userSeq[i]} → ${userSeq[i + 1]}`;
+          sequences[seq] = (sequences[seq] || 0) + 1;
+        }
+      }
+
+      const topSequences = Object.entries(sequences)
+        .map(([sequence, count]) => ({ sequence, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+
+      res.json({
+        hourlyPatterns: Object.entries(hourlyPatterns).map(([hour, count]) => ({
+          hour: parseInt(hour),
+          count,
+        })),
+        dayPatterns: Object.entries(dayPatterns).map(([day, count]) => ({
+          day: parseInt(day),
+          dayName: [
+            'Sonntag',
+            'Montag',
+            'Dienstag',
+            'Mittwoch',
+            'Donnerstag',
+            'Freitag',
+            'Samstag',
+          ][parseInt(day)],
+          count,
+        })),
+        topSequences,
+      });
+    } catch (error) {
+      logger.error('Error fetching usage patterns:', error);
+      res.status(500).json({ error: 'Failed to fetch usage patterns' });
+    }
+  });
+
+  // API: Get success rate trends
+  router.get('/api/success-trends', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const days = parseInt((req.query.days as string) || '30', 10);
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+
+      const dailyStats: Record<
+        string,
+        { date: string; total: number; successful: number; failed: number }
+      > = {};
+
+      const now = new Date();
+      for (let i = days - 1; i >= 0; i--) {
+        const date = new Date(now);
+        date.setDate(date.getDate() - i);
+        const dateKey = date.toISOString().split('T')[0];
+        dailyStats[dateKey] = {
+          date: dateKey,
+          total: 0,
+          successful: 0,
+          failed: 0,
+        };
+      }
+
+      for (const query of allQueries) {
+        const queryDate = new Date(query.timestamp).toISOString().split('T')[0];
+        if (dailyStats[queryDate]) {
+          dailyStats[queryDate].total++;
+          if (query.success) {
+            dailyStats[queryDate].successful++;
+          } else {
+            dailyStats[queryDate].failed++;
+          }
+        }
+      }
+
+      const trends = Object.values(dailyStats).map((stat) => ({
+        date: stat.date,
+        successRate: stat.total > 0 ? (stat.successful / stat.total) * 100 : 0,
+        total: stat.total,
+        successful: stat.successful,
+        failed: stat.failed,
+      }));
+
+      // Calculate trend direction
+      const recent = trends.slice(-7);
+      const older = trends.slice(-14, -7);
+      const recentAvg = recent.reduce((sum, t) => sum + t.successRate, 0) / recent.length;
+      const olderAvg = older.reduce((sum, t) => sum + t.successRate, 0) / older.length;
+      const trendDirection =
+        recentAvg > olderAvg ? 'improving' : recentAvg < olderAvg ? 'declining' : 'stable';
+      const trendChange = recentAvg - olderAvg;
+
+      res.json({
+        trends,
+        trendDirection,
+        trendChange: Math.round(trendChange * 10) / 10,
+        recentAverage: Math.round(recentAvg * 10) / 10,
+        olderAverage: Math.round(olderAvg * 10) / 10,
+      });
+    } catch (error) {
+      logger.error('Error fetching success trends:', error);
+      res.status(500).json({ error: 'Failed to fetch success trends' });
+    }
+  });
+
   // API: Export all queries as CSV
   router.get('/api/export/csv', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
@@ -1557,14 +1798,15 @@ function getDashboardPageHtml(): string {
       </div>
     </div>
 
-    <!-- Tabs -->
-    <div class="tabs">
-      <button class="tab active" onclick="switchTab('overview')">Übersicht</button>
-      <button class="tab" onclick="switchTab('queries')">Queries</button>
-      <button class="tab" onclick="switchTab('tools')">Tools</button>
-      <button class="tab" onclick="switchTab('users')">Nutzer</button>
-      <button class="tab" onclick="switchTab('analytics')">Analytics</button>
-    </div>
+     <!-- Tabs -->
+     <div class="tabs">
+       <button class="tab active" onclick="switchTab('overview', event)">Übersicht</button>
+       <button class="tab" onclick="switchTab('queries', event)">Queries</button>
+       <button class="tab" onclick="switchTab('tools', event)">Tools</button>
+       <button class="tab" onclick="switchTab('users', event)">Nutzer</button>
+       <button class="tab" onclick="switchTab('analytics', event)">Analytics</button>
+       <button class="tab" onclick="switchTab('insights', event)">Erkenntnisse</button>
+     </div>
 
     <!-- Overview Tab -->
     <div id="tab-overview" class="tab-content active">
@@ -1712,18 +1954,88 @@ function getDashboardPageHtml(): string {
       </div>
     </div>
 
-    <!-- Analytics Tab -->
-    <div id="tab-analytics" class="tab-content">
-      <div class="chart-section">
-        <h3>Top Tools nach Nutzung</h3>
-        <div id="topToolsChart" style="height: 300px; margin-top: 20px;"></div>
-      </div>
-      <div class="chart-section">
-        <h3>Erfolgsrate nach Tool</h3>
-        <div id="toolSuccessChart" style="height: 300px; margin-top: 20px;"></div>
-      </div>
-    </div>
-  </main>
+     <!-- Analytics Tab -->
+     <div id="tab-analytics" class="tab-content">
+       <div class="chart-section">
+         <h3>Top Tools nach Nutzung</h3>
+         <div id="topToolsChart" style="height: 300px; margin-top: 20px;"></div>
+       </div>
+       <div class="chart-section">
+         <h3>Erfolgsrate nach Tool</h3>
+         <div id="toolSuccessChart" style="height: 300px; margin-top: 20px;"></div>
+       </div>
+     </div>
+
+     <!-- Insights Tab -->
+     <div id="tab-insights" class="tab-content">
+       <!-- Key Insights Cards -->
+       <div class="stats-grid" style="margin-bottom: 24px;">
+         <div class="stat-card" id="insightCard1">
+           <div class="stat-label">Erkenntnis 1</div>
+           <div class="stat-value" style="font-size: 16px;">Lade...</div>
+         </div>
+         <div class="stat-card" id="insightCard2">
+           <div class="stat-label">Erkenntnis 2</div>
+           <div class="stat-value" style="font-size: 16px;">Lade...</div>
+         </div>
+         <div class="stat-card" id="insightCard3">
+           <div class="stat-label">Erkenntnis 3</div>
+           <div class="stat-value" style="font-size: 16px;">Lade...</div>
+         </div>
+         <div class="stat-card" id="insightCard4">
+           <div class="stat-label">Erkenntnis 4</div>
+           <div class="stat-value" style="font-size: 16px;">Lade...</div>
+         </div>
+       </div>
+
+       <!-- Error Analysis -->
+       <div class="chart-section">
+         <h3>Fehleranalyse</h3>
+         <div id="errorAnalysis" style="margin-top: 20px;">
+           <div class="loading">
+             <div class="loading-spinner"></div>
+             Lade Fehleranalyse...
+           </div>
+         </div>
+       </div>
+
+       <!-- Performance Bottlenecks -->
+       <div class="chart-section">
+         <h3>Performance-Bottlenecks</h3>
+         <div id="performanceBottlenecks" style="margin-top: 20px;">
+           <div class="loading">
+             <div class="loading-spinner"></div>
+             Lade Performance-Analyse...
+           </div>
+         </div>
+       </div>
+
+       <!-- Usage Patterns -->
+       <div class="chart-section">
+         <h3>Nutzungsmuster</h3>
+         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 20px;">
+           <div>
+             <h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Stündliche Verteilung</h4>
+             <div id="hourlyPatternChart" style="height: 200px;"></div>
+           </div>
+           <div>
+             <h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Wochentags-Verteilung</h4>
+             <div id="dayPatternChart" style="height: 200px;"></div>
+           </div>
+         </div>
+         <div style="margin-top: 24px;">
+           <h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Häufige Tool-Sequenzen</h4>
+           <div id="toolSequences" style="margin-top: 12px;"></div>
+         </div>
+       </div>
+
+       <!-- Success Rate Trends -->
+       <div class="chart-section">
+         <h3>Erfolgsrate-Trends</h3>
+         <div id="successTrendsChart" style="height: 300px; margin-top: 20px;"></div>
+       </div>
+     </div>
+   </main>
 
   <script>
     let currentPage = 0;
@@ -1732,32 +2044,385 @@ function getDashboardPageHtml(): string {
     let filters = {};
     let currentTab = 'overview';
 
-    function switchTab(tabName) {
-      // Update tab buttons
-      document.querySelectorAll('.tab').forEach(tab => {
-        tab.classList.remove('active');
-      });
-      event.target.classList.add('active');
+     function switchTab(tabName, evt) {
+       // Update tab buttons
+       document.querySelectorAll('.tab').forEach(tab => {
+         tab.classList.remove('active');
+       });
+       if (evt && evt.target) {
+         evt.target.classList.add('active');
+       } else {
+         // Find button by tab name
+         const tabs = Array.from(document.querySelectorAll('.tab'));
+         const tabNames = ['overview', 'queries', 'tools', 'users', 'analytics'];
+         const index = tabNames.indexOf(tabName);
+         if (index >= 0 && tabs[index]) {
+           tabs[index].classList.add('active');
+         }
+       }
 
-      // Update tab content
-      document.querySelectorAll('.tab-content').forEach(content => {
-        content.classList.remove('active');
-      });
-      document.getElementById('tab-' + tabName).classList.add('active');
+       // Update tab content
+       document.querySelectorAll('.tab-content').forEach(content => {
+         content.classList.remove('active');
+       });
+       document.getElementById('tab-' + tabName).classList.add('active');
 
-      currentTab = tabName;
+       currentTab = tabName;
 
-      // Load tab-specific data
-      if (tabName === 'tools') {
-        fetchToolPerformance();
-      } else if (tabName === 'users') {
-        fetchUserStats();
-      } else if (tabName === 'analytics') {
-        fetchAnalytics();
-      } else if (tabName === 'overview') {
-        fetchTimeSeries();
-      }
-    }
+       // Load tab-specific data
+       if (tabName === 'tools') {
+         fetchToolPerformance();
+       } else if (tabName === 'users') {
+         fetchUserStats();
+       } else if (tabName === 'analytics') {
+         fetchAnalytics();
+       } else if (tabName === 'insights') {
+         fetchInsights();
+       } else if (tabName === 'overview') {
+         fetchTimeSeries();
+       }
+     }
+
+     async function fetchInsights() {
+       try {
+         await Promise.all([
+           fetchErrorAnalysis(),
+           fetchPerformanceBottlenecks(),
+           fetchUsagePatterns(),
+           fetchSuccessTrends(),
+         ]);
+       } catch (error) {
+         console.error('Error fetching insights:', error);
+       }
+     }
+
+     async function fetchErrorAnalysis() {
+       try {
+         const res = await fetch('/dashboard/api/error-analysis');
+         const data = await res.json();
+         renderErrorAnalysis(data);
+       } catch (error) {
+         console.error('Error fetching error analysis:', error);
+       }
+     }
+
+     function renderErrorAnalysis(data) {
+       const container = document.getElementById('errorAnalysis');
+       if (!container) return;
+
+       let html = '<div style="margin-bottom: 24px;">';
+       html += '<div style="display: flex; gap: 16px; margin-bottom: 20px;">';
+       html += '<div style="flex: 1; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">';
+       html += '<div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">Gesamtfehler</div>';
+       html += '<div style="font-size: 24px; font-weight: 700; color: var(--error);">' + data.totalErrors.toLocaleString('de-DE') + '</div>';
+       html += '</div>';
+       html += '</div>';
+
+       html += '<h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Häufigste Fehler</h4>';
+       html += '<div style="display: flex; flex-direction: column; gap: 8px;">';
+       data.topErrors.forEach((error, index) => {
+         html += '<div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px;">';
+         html += '<span style="font-size: 12px; color: var(--text-muted); min-width: 24px;">#' + (index + 1) + '</span>';
+         html += '<div style="flex: 1; font-size: 13px;">' + (error.error.length > 100 ? error.error.substring(0, 100) + '...' : error.error) + '</div>';
+         html += '<span style="font-size: 13px; font-weight: 600; color: var(--error);">' + error.count + 'x</span>';
+         html += '</div>';
+       });
+       html += '</div>';
+
+       html += '<h4 style="font-size: 14px; margin-top: 24px; margin-bottom: 12px; color: var(--text-secondary);">Fehler nach Tool</h4>';
+       html += '<div style="display: flex; flex-direction: column; gap: 8px;">';
+       data.toolErrorSummary.slice(0, 5).forEach(tool => {
+         html += '<div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px;">';
+         html += '<span class="tool-name">' + tool.tool + '</span>';
+         html += '<div style="flex: 1; display: flex; align-items: center; gap: 8px;">';
+         html += '<span style="font-size: 12px; color: var(--text-secondary);">' + tool.totalErrors + ' Fehler</span>';
+         html += '<span style="font-size: 12px; color: var(--text-muted);">(' + tool.uniqueErrors + ' verschiedene)</span>';
+         html += '</div>';
+         html += '</div>';
+       });
+       html += '</div>';
+
+       html += '</div>';
+       container.innerHTML = html;
+     }
+
+     async function fetchPerformanceBottlenecks() {
+       try {
+         const res = await fetch('/dashboard/api/performance-bottlenecks');
+         const data = await res.json();
+         renderPerformanceBottlenecks(data);
+       } catch (error) {
+         console.error('Error fetching performance bottlenecks:', error);
+       }
+     }
+
+     function renderPerformanceBottlenecks(data) {
+       const container = document.getElementById('performanceBottlenecks');
+       if (!container) return;
+
+       let html = '<div style="margin-bottom: 16px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px;">';
+       html += '<div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px;">95. Perzentil Schwellenwert</div>';
+       html += '<div style="font-size: 24px; font-weight: 700;">' + data.p95Threshold.toLocaleString('de-DE') + ' ms</div>';
+       html += '<div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">' + data.slowQueriesCount + ' langsame Queries</div>';
+       html += '</div>';
+
+       html += '<h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Langsamste Tools</h4>';
+       html += '<div style="display: flex; flex-direction: column; gap: 8px;">';
+       data.bottlenecks.forEach(bottleneck => {
+         html += '<div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px;">';
+         html += '<span class="tool-name">' + bottleneck.tool + '</span>';
+         html += '<div style="flex: 1; display: flex; flex-direction: column; gap: 4px;">';
+         html += '<div style="display: flex; gap: 16px; font-size: 12px;">';
+         html += '<span style="color: var(--text-secondary);">Langsam: <strong>' + bottleneck.slowCount + '</strong></span>';
+         html += '<span style="color: var(--text-secondary);">Ø Dauer: <strong>' + Math.round(bottleneck.avgDuration) + ' ms</strong></span>';
+         html += '<span style="color: var(--text-secondary);">Max: <strong>' + Math.round(bottleneck.maxDuration) + ' ms</strong></span>';
+         html += '</div>';
+         html += '</div>';
+         html += '</div>';
+       });
+       html += '</div>';
+
+       container.innerHTML = html;
+     }
+
+     async function fetchUsagePatterns() {
+       try {
+         const res = await fetch('/dashboard/api/usage-patterns');
+         const data = await res.json();
+         renderUsagePatterns(data);
+       } catch (error) {
+         console.error('Error fetching usage patterns:', error);
+       }
+     }
+
+     function renderUsagePatterns(data) {
+       // Hourly chart
+       const hourlyContainer = document.getElementById('hourlyPatternChart');
+       if (hourlyContainer) {
+         hourlyContainer.innerHTML = '';
+         const maxHourly = Math.max(...data.hourlyPatterns.map(h => h.count), 1);
+         data.hourlyPatterns.forEach(({ hour, count }) => {
+           const bar = document.createElement('div');
+           bar.style.display = 'flex';
+           bar.style.alignItems = 'center';
+           bar.style.gap = '8px';
+           bar.style.marginBottom = '4px';
+
+           const label = document.createElement('div');
+           label.style.minWidth = '40px';
+           label.style.fontSize = '11px';
+           label.textContent = hour + ':00';
+           bar.appendChild(label);
+
+           const barWrapper = document.createElement('div');
+           barWrapper.style.flex = '1';
+           barWrapper.style.height = '20px';
+           barWrapper.style.background = 'var(--bg-tertiary)';
+           barWrapper.style.borderRadius = '4px';
+           barWrapper.style.overflow = 'hidden';
+           barWrapper.style.position = 'relative';
+
+           const barFill = document.createElement('div');
+           barFill.style.height = '100%';
+           barFill.style.width = (count / maxHourly * 100) + '%';
+           barFill.style.background = 'var(--accent)';
+           barWrapper.appendChild(barFill);
+
+           const value = document.createElement('div');
+           value.style.position = 'absolute';
+           value.style.right = '4px';
+           value.style.top = '50%';
+           value.style.transform = 'translateY(-50%)';
+           value.style.fontSize = '10px';
+           value.textContent = count;
+           barWrapper.appendChild(value);
+
+           bar.appendChild(barWrapper);
+           hourlyContainer.appendChild(bar);
+         });
+       }
+
+       // Day chart
+       const dayContainer = document.getElementById('dayPatternChart');
+       if (dayContainer) {
+         dayContainer.innerHTML = '';
+         const maxDay = Math.max(...data.dayPatterns.map(d => d.count), 1);
+         data.dayPatterns.forEach(({ dayName, count }) => {
+           const bar = document.createElement('div');
+           bar.style.display = 'flex';
+           bar.style.alignItems = 'center';
+           bar.style.gap = '8px';
+           bar.style.marginBottom = '4px';
+
+           const label = document.createElement('div');
+           label.style.minWidth = '80px';
+           label.style.fontSize = '11px';
+           label.textContent = dayName;
+           bar.appendChild(label);
+
+           const barWrapper = document.createElement('div');
+           barWrapper.style.flex = '1';
+           barWrapper.style.height = '20px';
+           barWrapper.style.background = 'var(--bg-tertiary)';
+           barWrapper.style.borderRadius = '4px';
+           barWrapper.style.overflow = 'hidden';
+           barWrapper.style.position = 'relative';
+
+           const barFill = document.createElement('div');
+           barFill.style.height = '100%';
+           barFill.style.width = (count / maxDay * 100) + '%';
+           barFill.style.background = 'var(--accent)';
+           barWrapper.appendChild(barFill);
+
+           const value = document.createElement('div');
+           value.style.position = 'absolute';
+           value.style.right = '4px';
+           value.style.top = '50%';
+           value.style.transform = 'translateY(-50%)';
+           value.style.fontSize = '10px';
+           value.textContent = count;
+           barWrapper.appendChild(value);
+
+           bar.appendChild(barWrapper);
+           dayContainer.appendChild(bar);
+         });
+       }
+
+       // Tool sequences
+       const sequencesContainer = document.getElementById('toolSequences');
+       if (sequencesContainer) {
+         sequencesContainer.innerHTML = '';
+         data.topSequences.forEach((seq, index) => {
+           const item = document.createElement('div');
+           item.style.display = 'flex';
+           item.style.alignItems = 'center';
+           item.style.gap = '12px';
+           item.style.padding = '8px 12px';
+           item.style.background = 'var(--bg-tertiary)';
+           item.style.borderRadius = '6px';
+           item.style.marginBottom = '6px';
+
+           const rank = document.createElement('span');
+           rank.style.fontSize = '12px';
+           rank.style.color = 'var(--text-muted)';
+           rank.style.minWidth = '24px';
+           rank.textContent = '#' + (index + 1);
+           item.appendChild(rank);
+
+           const sequence = document.createElement('span');
+           sequence.style.fontSize = '13px';
+           sequence.style.fontFamily = 'monospace';
+           sequence.textContent = seq.sequence;
+           item.appendChild(sequence);
+
+           const count = document.createElement('span');
+           count.style.marginLeft = 'auto';
+           count.style.fontSize = '12px';
+           count.style.fontWeight = '600';
+           count.textContent = seq.count + 'x';
+           item.appendChild(count);
+
+           sequencesContainer.appendChild(item);
+         });
+       }
+     }
+
+     async function fetchSuccessTrends() {
+       try {
+         const res = await fetch('/dashboard/api/success-trends?days=30');
+         const data = await res.json();
+         renderSuccessTrends(data);
+       } catch (error) {
+         console.error('Error fetching success trends:', error);
+       }
+     }
+
+     function renderSuccessTrends(data) {
+       const container = document.getElementById('successTrendsChart');
+       if (!container) return;
+
+       // Update insight cards
+       const trendIcon = data.trendDirection === 'improving' ? '📈' : data.trendDirection === 'declining' ? '📉' : '➡️';
+       const trendColor = data.trendDirection === 'improving' ? 'var(--success)' : data.trendDirection === 'declining' ? 'var(--error)' : 'var(--text-secondary)';
+       
+       document.getElementById('insightCard1').innerHTML = 
+         '<div class="stat-label">Trend</div>' +
+         '<div class="stat-value" style="font-size: 16px; color: ' + trendColor + ';">' + trendIcon + ' ' + 
+         (data.trendDirection === 'improving' ? 'Verbesserung' : data.trendDirection === 'declining' ? 'Rückgang' : 'Stabil') + '</div>' +
+         '<div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">' + 
+         (data.trendChange > 0 ? '+' : '') + data.trendChange.toFixed(1) + '% vs. Vorwoche</div>';
+
+       document.getElementById('insightCard2').innerHTML = 
+         '<div class="stat-label">Aktuelle Erfolgsrate</div>' +
+         '<div class="stat-value" style="font-size: 16px;">' + data.recentAverage.toFixed(1) + '%</div>' +
+         '<div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Letzte 7 Tage</div>';
+
+       // Render chart
+       container.innerHTML = '';
+       const maxValue = 100;
+       const width = container.clientWidth || 800;
+       const height = 300;
+       const padding = { top: 20, right: 20, bottom: 40, left: 60 };
+       const chartWidth = width - padding.left - padding.right;
+       const chartHeight = height - padding.top - padding.bottom;
+
+       const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+       svg.setAttribute('width', width);
+       svg.setAttribute('height', height);
+       svg.style.width = '100%';
+       svg.style.height = '100%';
+
+       // Draw axes
+       const xAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+       xAxis.setAttribute('x1', padding.left);
+       xAxis.setAttribute('y1', height - padding.bottom);
+       xAxis.setAttribute('x2', width - padding.right);
+       xAxis.setAttribute('y2', height - padding.bottom);
+       xAxis.setAttribute('stroke', 'var(--border)');
+       xAxis.setAttribute('stroke-width', '1');
+       svg.appendChild(xAxis);
+
+       const yAxis = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+       yAxis.setAttribute('x1', padding.left);
+       yAxis.setAttribute('y1', padding.top);
+       yAxis.setAttribute('x2', padding.left);
+       yAxis.setAttribute('y2', height - padding.bottom);
+       yAxis.setAttribute('stroke', 'var(--border)');
+       yAxis.setAttribute('stroke-width', '1');
+       svg.appendChild(yAxis);
+
+       // Draw trend line
+       const points = data.trends.map((trend, i) => ({
+         x: padding.left + (i / (data.trends.length - 1)) * chartWidth,
+         y: height - padding.bottom - (trend.successRate / maxValue) * chartHeight,
+         date: trend.date,
+         rate: trend.successRate,
+       }));
+
+       const path = points.map((p, i) => (i === 0 ? 'M' : 'L') + ' ' + p.x + ' ' + p.y).join(' ');
+       const trendLine = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+       trendLine.setAttribute('d', path);
+       trendLine.setAttribute('stroke', trendColor);
+       trendLine.setAttribute('stroke-width', '2');
+       trendLine.setAttribute('fill', 'none');
+       svg.appendChild(trendLine);
+
+       // Add labels
+       points.forEach((point, i) => {
+         if (i % Math.ceil(data.trends.length / 10) === 0 || i === data.trends.length - 1) {
+           const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+           label.setAttribute('x', point.x);
+           label.setAttribute('y', height - padding.bottom + 20);
+           label.setAttribute('font-size', '11px');
+           label.setAttribute('fill', 'var(--text-secondary)');
+           label.setAttribute('text-anchor', 'middle');
+           label.textContent = point.date.split('-')[2];
+           svg.appendChild(label);
+         }
+       });
+
+       container.appendChild(svg);
+     }
 
     async function fetchStats() {
       try {
@@ -1845,9 +2510,12 @@ function getDashboardPageHtml(): string {
       }));
 
       // Success line
-      const successPath = points.map((p, i) => 
-        `${i === 0 ? 'M' : 'L'} ${p.x} ${height - padding.bottom - (p.successful / maxValue) * chartHeight}`
-      ).join(' ');
+      const successPath = points
+        .map((p, i) => {
+          const yPos = height - padding.bottom - (p.successful / maxValue) * chartHeight;
+          return (i === 0 ? 'M' : 'L') + ' ' + p.x + ' ' + yPos;
+        })
+        .join(' ');
       const successLine = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       successLine.setAttribute('d', successPath);
       successLine.setAttribute('class', 'chart-line success');
@@ -1856,9 +2524,11 @@ function getDashboardPageHtml(): string {
       svg.appendChild(successLine);
 
       // Total line
-      const totalPath = points.map((p, i) => 
-        `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`
-      ).join(' ');
+      const totalPath = points
+        .map((p, i) => {
+          return (i === 0 ? 'M' : 'L') + ' ' + p.x + ' ' + p.y;
+        })
+        .join(' ');
       const totalLine = document.createElementNS('http://www.w3.org/2000/svg', 'path');
       totalLine.setAttribute('d', totalPath);
       totalLine.setAttribute('class', 'chart-line');
@@ -2204,13 +2874,21 @@ function getDashboardPageHtml(): string {
       window.location.href = '/dashboard/login';
     }
 
-    // Initial load
-    fetchStats();
-    fetchTools();
-    fetchQueries();
+     // Initial load
+     fetchStats();
+     fetchTools();
+     fetchQueries();
+     fetchTimeSeries();
 
-    // Auto-refresh every 30 seconds
-    setInterval(fetchStats, 30000);
+     // Auto-refresh every 30 seconds
+     setInterval(() => {
+       fetchStats();
+       if (currentTab === 'overview') {
+         fetchTimeSeries();
+       } else if (currentTab === 'insights') {
+         fetchInsights();
+       }
+     }, 30000);
   </script>
 </body>
 </html>`;

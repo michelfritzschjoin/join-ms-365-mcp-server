@@ -573,7 +573,7 @@ class MicrosoftGraphServer {
       if (useSuperTools) {
         // Super-Tools mode: 10 consolidated tools instead of 126+
         logger.info('Super-Tools mode enabled - registering 10 consolidated tools');
-        registerSuperTools(this.server, this.graphClient);
+        registerSuperTools(this.server, this.graphClient, this.options.readOnly);
       } else {
         // Classic mode: register all individual tools
         // Initialize knowledge base for tool usage learning

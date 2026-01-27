@@ -30,23 +30,93 @@ const filterSchema = {
   orderby: z.string().optional().describe('OData orderby expression'),
 };
 
+// Read-only mode check helper
+function checkReadOnly(readOnly: boolean, action: string): void {
+  if (readOnly) {
+    throw new Error(
+      `Action "${action}" is a write operation and is blocked in read-only mode. ` +
+        'Set READ_ONLY=0 or MS365_MCP_READ_ONLY=false to enable write operations.'
+    );
+  }
+}
+
+// Write actions that require readOnly check
+const WRITE_ACTIONS = new Set([
+  // Email
+  'send',
+  'delete',
+  'move',
+  'reply',
+  'forward',
+  // Calendar
+  'create-event',
+  'update-event',
+  'delete-event',
+  // Tasks
+  'create-task',
+  'update-task',
+  'delete-task',
+  // Contacts
+  'create-contact',
+  'update-contact',
+  'delete-contact',
+]);
+
 // ============================================================================
 // 1. EMAIL SUPER-TOOL
 // ============================================================================
-const emailActions = z.enum([
+const emailActionsRead = [
   'list', // List messages from inbox or folder
   'get', // Get a specific message
   'folders', // List mail folders
   'attachments', // List/get attachments
   'search', // Search messages
+] as const;
+
+const emailActionsWrite = [
+  'send', // Send a new email
+  'reply', // Reply to an email
+  'delete', // Delete an email
+  'move', // Move email to folder
+] as const;
+
+// Build schema dynamically based on readOnly mode
+function getEmailActions(readOnly: boolean) {
+  if (readOnly) {
+    return z.enum(emailActionsRead);
+  }
+  return z.enum([...emailActionsRead, ...emailActionsWrite]);
+}
+
+const emailActions = z.enum([
+  // Read operations
+  'list',
+  'get',
+  'folders',
+  'attachments',
+  'search',
+  // Write operations (blocked in read-only mode)
+  'send',
+  'reply',
+  'delete',
+  'move',
 ]);
 
 const emailSchema = z.object({
-  action: emailActions.describe('The email operation to perform'),
+  action: emailActions.describe(
+    'The email operation: list, get, folders, attachments, search (read) | send, reply, delete, move (write)'
+  ),
   // Identifiers
-  messageId: z.string().optional().describe('Message ID (required for get, attachments)'),
-  folderId: z.string().optional().describe('Folder ID to list messages from'),
+  messageId: z
+    .string()
+    .optional()
+    .describe('Message ID (required for get, attachments, reply, delete, move)'),
+  folderId: z.string().optional().describe('Folder ID to list messages from or move to'),
   attachmentId: z.string().optional().describe('Attachment ID (for getting specific attachment)'),
+  // For send/reply
+  to: z.string().optional().describe('Recipient email address(es), comma-separated (for send)'),
+  subject: z.string().optional().describe('Email subject (for send)'),
+  body: z.string().optional().describe('Email body content (for send/reply)'),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -54,8 +124,17 @@ const emailSchema = z.object({
 
 type EmailInput = z.infer<typeof emailSchema>;
 
-async function handleEmail(input: EmailInput, graphClient: GraphClient): Promise<string> {
+async function handleEmail(
+  input: EmailInput,
+  graphClient: GraphClient,
+  readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+
+  // Check write operations against readOnly mode
+  if (['send', 'reply', 'delete', 'move'].includes(input.action)) {
+    checkReadOnly(readOnly, input.action);
+  }
 
   switch (input.action) {
     case 'list': {
@@ -110,6 +189,69 @@ async function handleEmail(input: EmailInput, graphClient: GraphClient): Promise
       return addThinkingToResponse(result, thinking);
     }
 
+    // Write operations (blocked in read-only mode - check happens at function start)
+    case 'send': {
+      if (!input.to) throw new Error('to (recipient) is required for action "send"');
+      if (!input.subject) throw new Error('subject is required for action "send"');
+      if (!input.body) throw new Error('body is required for action "send"');
+      thinking.push(`Sending email to: ${input.to}`);
+      const recipients = input.to.split(',').map((email) => ({
+        emailAddress: { address: email.trim() },
+      }));
+      const message = {
+        subject: input.subject,
+        body: { contentType: 'Text', content: input.body },
+        toRecipients: recipients,
+      };
+      const result = await graphClient.callEndpoint('POST', '/me/sendMail', undefined, {
+        message,
+        saveToSentItems: true,
+      });
+      return addThinkingToResponse(
+        result || JSON.stringify({ success: true, message: 'Email sent' }),
+        thinking
+      );
+    }
+
+    case 'reply': {
+      if (!input.messageId) throw new Error('messageId is required for action "reply"');
+      if (!input.body) throw new Error('body is required for action "reply"');
+      thinking.push(`Replying to email: ${input.messageId}`);
+      const result = await graphClient.callEndpoint(
+        'POST',
+        `/me/messages/${input.messageId}/reply`,
+        undefined,
+        { comment: input.body }
+      );
+      return addThinkingToResponse(
+        result || JSON.stringify({ success: true, message: 'Reply sent' }),
+        thinking
+      );
+    }
+
+    case 'delete': {
+      if (!input.messageId) throw new Error('messageId is required for action "delete"');
+      thinking.push(`Deleting email: ${input.messageId}`);
+      const result = await graphClient.callEndpoint('DELETE', `/me/messages/${input.messageId}`);
+      return addThinkingToResponse(
+        result || JSON.stringify({ success: true, message: 'Email deleted' }),
+        thinking
+      );
+    }
+
+    case 'move': {
+      if (!input.messageId) throw new Error('messageId is required for action "move"');
+      if (!input.folderId) throw new Error('folderId (destination) is required for action "move"');
+      thinking.push(`Moving email ${input.messageId} to folder ${input.folderId}`);
+      const result = await graphClient.callEndpoint(
+        'POST',
+        `/me/messages/${input.messageId}/move`,
+        undefined,
+        { destinationId: input.folderId }
+      );
+      return addThinkingToResponse(result, thinking);
+    }
+
     default:
       throw new Error(`Unknown email action: ${input.action}`);
   }
@@ -119,23 +261,36 @@ async function handleEmail(input: EmailInput, graphClient: GraphClient): Promise
 // 2. CALENDAR SUPER-TOOL
 // ============================================================================
 const calendarActions = z.enum([
+  // Read operations
   'list', // List events from primary calendar
   'get', // Get specific event
   'view', // Get calendar view (date range)
   'calendars', // List all calendars
   'specific-calendar', // List events from specific calendar
+  // Write operations (blocked in read-only mode)
+  'create-event', // Create new event
+  'update-event', // Update existing event
+  'delete-event', // Delete event
 ]);
 
 const calendarSchema = z.object({
-  action: calendarActions.describe('The calendar operation to perform'),
+  action: calendarActions.describe(
+    'Calendar operation: list, get, view, calendars (read) | create-event, update-event, delete-event (write)'
+  ),
   // Identifiers
   eventId: z.string().optional().describe('Event ID (required for get)'),
   calendarId: z.string().optional().describe('Calendar ID (for specific-calendar action)'),
-  // Date range for view
-  startDateTime: z.string().optional().describe('Start date/time for calendar view (ISO format)'),
-  endDateTime: z.string().optional().describe('End date/time for calendar view (ISO format)'),
+  // Date range for view and create-event
+  startDateTime: z.string().optional().describe('Start date/time (ISO format)'),
+  endDateTime: z.string().optional().describe('End date/time (ISO format)'),
   // Timezone
   timezone: z.string().optional().describe('Timezone for date/time values (e.g., "Europe/Berlin")'),
+  // For create/update event
+  subject: z.string().optional().describe('Event subject/title (for create-event, update-event)'),
+  body: z.string().optional().describe('Event body/description (for create-event, update-event)'),
+  location: z.string().optional().describe('Event location (for create-event, update-event)'),
+  attendees: z.string().optional().describe('Attendee emails, comma-separated (for create-event)'),
+  isOnline: z.boolean().optional().describe('Create as online meeting (for create-event)'),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -143,11 +298,20 @@ const calendarSchema = z.object({
 
 type CalendarInput = z.infer<typeof calendarSchema>;
 
-async function handleCalendar(input: CalendarInput, graphClient: GraphClient): Promise<string> {
+async function handleCalendar(
+  input: CalendarInput,
+  graphClient: GraphClient,
+  readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
   const headers: Record<string, string> = {};
   if (input.timezone) {
     headers['Prefer'] = `outlook.timezone="${input.timezone}"`;
+  }
+
+  // Check write operations against readOnly mode
+  if (['create-event', 'update-event', 'delete-event'].includes(input.action)) {
+    checkReadOnly(readOnly, input.action);
   }
 
   switch (input.action) {
@@ -222,6 +386,67 @@ async function handleCalendar(input: CalendarInput, graphClient: GraphClient): P
       return addThinkingToResponse(result, thinking);
     }
 
+    // Write operations (blocked in read-only mode - check happens at function start)
+    case 'create-event': {
+      if (!input.subject) throw new Error('subject is required for create-event');
+      if (!input.startDateTime) throw new Error('startDateTime is required for create-event');
+      if (!input.endDateTime) throw new Error('endDateTime is required for create-event');
+      thinking.push(`Creating event: ${input.subject}`);
+      const event: Record<string, unknown> = {
+        subject: input.subject,
+        start: { dateTime: input.startDateTime, timeZone: input.timezone || 'UTC' },
+        end: { dateTime: input.endDateTime, timeZone: input.timezone || 'UTC' },
+      };
+      if (input.body) event.body = { contentType: 'Text', content: input.body };
+      if (input.location) event.location = { displayName: input.location };
+      if (input.isOnline) event.isOnlineMeeting = true;
+      if (input.attendees) {
+        event.attendees = input.attendees.split(',').map((email) => ({
+          emailAddress: { address: email.trim() },
+          type: 'required',
+        }));
+      }
+      const result = await graphClient.callEndpoint(
+        'POST',
+        '/me/events',
+        undefined,
+        event,
+        headers
+      );
+      return addThinkingToResponse(result, thinking);
+    }
+
+    case 'update-event': {
+      if (!input.eventId) throw new Error('eventId is required for update-event');
+      thinking.push(`Updating event: ${input.eventId}`);
+      const updates: Record<string, unknown> = {};
+      if (input.subject) updates.subject = input.subject;
+      if (input.body) updates.body = { contentType: 'Text', content: input.body };
+      if (input.location) updates.location = { displayName: input.location };
+      if (input.startDateTime)
+        updates.start = { dateTime: input.startDateTime, timeZone: input.timezone || 'UTC' };
+      if (input.endDateTime)
+        updates.end = { dateTime: input.endDateTime, timeZone: input.timezone || 'UTC' };
+      const result = await graphClient.callEndpoint(
+        'PATCH',
+        `/me/events/${input.eventId}`,
+        undefined,
+        updates,
+        headers
+      );
+      return addThinkingToResponse(result, thinking);
+    }
+
+    case 'delete-event': {
+      if (!input.eventId) throw new Error('eventId is required for delete-event');
+      thinking.push(`Deleting event: ${input.eventId}`);
+      const result = await graphClient.callEndpoint('DELETE', `/me/events/${input.eventId}`);
+      return addThinkingToResponse(
+        result || JSON.stringify({ success: true, message: 'Event deleted' }),
+        thinking
+      );
+    }
+
     default:
       throw new Error(`Unknown calendar action: ${input.action}`);
   }
@@ -253,8 +478,13 @@ const teamsSchema = z.object({
 
 type TeamsInput = z.infer<typeof teamsSchema>;
 
-async function handleTeams(input: TeamsInput, graphClient: GraphClient): Promise<string> {
+async function handleTeams(
+  input: TeamsInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+  // Teams operations are read-only in this version
 
   switch (input.action) {
     case 'list-teams': {
@@ -340,8 +570,13 @@ const filesSchema = z.object({
 
 type FilesInput = z.infer<typeof filesSchema>;
 
-async function handleFiles(input: FilesInput, graphClient: GraphClient): Promise<string> {
+async function handleFiles(
+  input: FilesInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+  // Files operations are read-only in this version
 
   switch (input.action) {
     case 'drives': {
@@ -414,20 +649,34 @@ async function handleFiles(input: FilesInput, graphClient: GraphClient): Promise
 // 5. TASKS SUPER-TOOL
 // ============================================================================
 const tasksActions = z.enum([
+  // Read operations
   'todo-lists', // List To-Do task lists
   'todo-tasks', // List tasks in a To-Do list
   'todo-get', // Get specific To-Do task
   'planner-tasks', // List Planner tasks assigned to me
   'planner-plans', // Get Planner plan details
   'plan-tasks', // List tasks in a Planner plan
+  // Write operations (blocked in read-only mode)
+  'create-todo', // Create To-Do task
+  'update-todo', // Update To-Do task
+  'delete-todo', // Delete To-Do task
 ]);
 
 const tasksSchema = z.object({
-  action: tasksActions.describe('The tasks operation to perform'),
+  action: tasksActions.describe(
+    'Tasks operation: todo-lists, todo-tasks, planner-tasks (read) | create-todo, update-todo, delete-todo (write)'
+  ),
   // Identifiers
   taskListId: z.string().optional().describe('To-Do task list ID'),
   taskId: z.string().optional().describe('Task ID'),
   planId: z.string().optional().describe('Planner plan ID'),
+  // For create/update todo
+  title: z.string().optional().describe('Task title (for create-todo, update-todo)'),
+  dueDateTime: z
+    .string()
+    .optional()
+    .describe('Due date/time ISO format (for create-todo, update-todo)'),
+  isCompleted: z.boolean().optional().describe('Mark as completed (for update-todo)'),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -435,8 +684,17 @@ const tasksSchema = z.object({
 
 type TasksInput = z.infer<typeof tasksSchema>;
 
-async function handleTasks(input: TasksInput, graphClient: GraphClient): Promise<string> {
+async function handleTasks(
+  input: TasksInput,
+  graphClient: GraphClient,
+  readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+
+  // Check write operations against readOnly mode
+  if (['create-todo', 'update-todo', 'delete-todo'].includes(input.action)) {
+    checkReadOnly(readOnly, input.action);
+  }
 
   switch (input.action) {
     case 'todo-lists': {
@@ -490,6 +748,57 @@ async function handleTasks(input: TasksInput, graphClient: GraphClient): Promise
       return addThinkingToResponse(result, thinking);
     }
 
+    // Write operations (blocked in read-only mode - check happens at function start)
+    case 'create-todo': {
+      if (!input.taskListId) throw new Error('taskListId is required for create-todo');
+      if (!input.title) throw new Error('title is required for create-todo');
+      thinking.push(`Creating To-Do task: ${input.title}`);
+      const task: Record<string, unknown> = { title: input.title };
+      if (input.dueDateTime) {
+        task.dueDateTime = { dateTime: input.dueDateTime, timeZone: 'UTC' };
+      }
+      const result = await graphClient.callEndpoint(
+        'POST',
+        `/me/todo/lists/${input.taskListId}/tasks`,
+        undefined,
+        task
+      );
+      return addThinkingToResponse(result, thinking);
+    }
+
+    case 'update-todo': {
+      if (!input.taskListId) throw new Error('taskListId is required for update-todo');
+      if (!input.taskId) throw new Error('taskId is required for update-todo');
+      thinking.push(`Updating To-Do task: ${input.taskId}`);
+      const updates: Record<string, unknown> = {};
+      if (input.title) updates.title = input.title;
+      if (input.dueDateTime) updates.dueDateTime = { dateTime: input.dueDateTime, timeZone: 'UTC' };
+      if (input.isCompleted !== undefined) {
+        updates.status = input.isCompleted ? 'completed' : 'notStarted';
+      }
+      const result = await graphClient.callEndpoint(
+        'PATCH',
+        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`,
+        undefined,
+        updates
+      );
+      return addThinkingToResponse(result, thinking);
+    }
+
+    case 'delete-todo': {
+      if (!input.taskListId) throw new Error('taskListId is required for delete-todo');
+      if (!input.taskId) throw new Error('taskId is required for delete-todo');
+      thinking.push(`Deleting To-Do task: ${input.taskId}`);
+      const result = await graphClient.callEndpoint(
+        'DELETE',
+        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`
+      );
+      return addThinkingToResponse(
+        result || JSON.stringify({ success: true, message: 'Task deleted' }),
+        thinking
+      );
+    }
+
     default:
       throw new Error(`Unknown tasks action: ${input.action}`);
   }
@@ -518,8 +827,13 @@ const contactsSchema = z.object({
 
 type ContactsInput = z.infer<typeof contactsSchema>;
 
-async function handleContacts(input: ContactsInput, graphClient: GraphClient): Promise<string> {
+async function handleContacts(
+  input: ContactsInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+  // Contacts operations are read-only in this version
 
   switch (input.action) {
     case 'list': {
@@ -597,8 +911,13 @@ const meetingsSchema = z.object({
 
 type MeetingsInput = z.infer<typeof meetingsSchema>;
 
-async function handleMeetings(input: MeetingsInput, graphClient: GraphClient): Promise<string> {
+async function handleMeetings(
+  input: MeetingsInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+  // Meetings operations are read-only in this version
 
   switch (input.action) {
     case 'list': {
@@ -679,8 +998,13 @@ const sharepointSchema = z.object({
 
 type SharePointInput = z.infer<typeof sharepointSchema>;
 
-async function handleSharePoint(input: SharePointInput, graphClient: GraphClient): Promise<string> {
+async function handleSharePoint(
+  input: SharePointInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+  // SharePoint operations are read-only in this version
 
   switch (input.action) {
     case 'search-sites': {
@@ -763,8 +1087,13 @@ const notesSchema = z.object({
 
 type NotesInput = z.infer<typeof notesSchema>;
 
-async function handleNotes(input: NotesInput, graphClient: GraphClient): Promise<string> {
+async function handleNotes(
+  input: NotesInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
+  // Notes operations are read-only in this version
 
   switch (input.action) {
     case 'notebooks': {
@@ -811,7 +1140,166 @@ async function handleNotes(input: NotesInput, graphClient: GraphClient): Promise
 }
 
 // ============================================================================
-// 10. ASSISTANT SUPER-TOOL (Smart/Compound Operations)
+// 10. SEARCH SUPER-TOOL (Microsoft 365 Unified Search)
+// ============================================================================
+/**
+ * The Search Super-Tool uses Microsoft Graph Search API to search across
+ * all Microsoft 365 content. This is the RECOMMENDED FIRST TOOL to use
+ * when exploring data, as it helps identify which specific tools to use next.
+ *
+ * EntityTypes:
+ * - message: Emails
+ * - event: Calendar events
+ * - driveItem: OneDrive/SharePoint files
+ * - site: SharePoint sites
+ * - list: SharePoint lists
+ * - listItem: SharePoint list items
+ * - chatMessage: Teams chat messages
+ * - person: People in the organization
+ */
+const searchEntityTypes = [
+  'message',
+  'event',
+  'driveItem',
+  'site',
+  'list',
+  'listItem',
+  'chatMessage',
+  'person',
+] as const;
+
+const searchSchema = z.object({
+  query: z.string().describe('The search query - natural language or keywords'),
+  entityTypes: z
+    .array(z.enum(searchEntityTypes))
+    .optional()
+    .describe(
+      'Types of entities to search: message (emails), event (calendar), driveItem (files), site, list, listItem, chatMessage, person. Default: all types.'
+    ),
+  from: z.number().optional().describe('Starting index for pagination (default: 0)'),
+  size: z.number().optional().describe('Number of results to return (default: 25, max: 500)'),
+  // Advanced options
+  fields: z.array(z.string()).optional().describe('Specific fields to return in results'),
+  sortBy: z.string().optional().describe('Field to sort results by'),
+  trimDuplicates: z.boolean().optional().describe('Remove duplicate results (default: true)'),
+});
+
+type SearchInput = z.infer<typeof searchSchema>;
+
+async function handleSearch(
+  input: SearchInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
+  const thinking: string[] = [];
+
+  thinking.push(`🔍 Microsoft 365 Search: "${input.query}"`);
+
+  // Build entity types - default to all if not specified
+  const entityTypes = input.entityTypes || ['message', 'event', 'driveItem', 'site'];
+  thinking.push(`Searching in: ${entityTypes.join(', ')}`);
+
+  // Build the search request
+  const searchRequest = {
+    requests: [
+      {
+        entityTypes: entityTypes,
+        query: {
+          queryString: input.query,
+        },
+        from: input.from || 0,
+        size: input.size || 25,
+        trimDuplicates: input.trimDuplicates !== false,
+        ...(input.fields && { fields: input.fields }),
+        ...(input.sortBy && {
+          sortProperties: [{ name: input.sortBy, isDescending: true }],
+        }),
+      },
+    ],
+  };
+
+  try {
+    const result = await graphClient.callEndpoint(
+      'POST',
+      '/search/query',
+      undefined,
+      searchRequest
+    );
+    const parsedResult = JSON.parse(result);
+
+    // Extract and format results for better readability
+    const formattedResults: Record<string, unknown[]> = {};
+    let totalHits = 0;
+
+    if (parsedResult.value && Array.isArray(parsedResult.value)) {
+      for (const response of parsedResult.value) {
+        if (response.hitsContainers && Array.isArray(response.hitsContainers)) {
+          for (const container of response.hitsContainers) {
+            totalHits += container.total || 0;
+            if (container.hits && Array.isArray(container.hits)) {
+              for (const hit of container.hits) {
+                const entityType = hit.resource?.['@odata.type'] || 'unknown';
+                if (!formattedResults[entityType]) {
+                  formattedResults[entityType] = [];
+                }
+                formattedResults[entityType].push({
+                  id: hit.resource?.id,
+                  summary: hit.summary,
+                  rank: hit.rank,
+                  ...hit.resource,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    thinking.push(
+      `Found ${totalHits} results across ${Object.keys(formattedResults).length} entity types`
+    );
+
+    // Provide guidance on which tools to use based on results
+    const toolSuggestions: string[] = [];
+    for (const entityType of Object.keys(formattedResults)) {
+      if (entityType.includes('message')) {
+        toolSuggestions.push('Use "email" tool for detailed email operations');
+      }
+      if (entityType.includes('event')) {
+        toolSuggestions.push('Use "calendar" tool for calendar operations');
+      }
+      if (entityType.includes('driveItem')) {
+        toolSuggestions.push('Use "files" tool for file operations');
+      }
+      if (entityType.includes('site') || entityType.includes('list')) {
+        toolSuggestions.push('Use "sharepoint" tool for SharePoint operations');
+      }
+      if (entityType.includes('chatMessage')) {
+        toolSuggestions.push('Use "teams" tool for Teams operations');
+      }
+    }
+
+    if (toolSuggestions.length > 0) {
+      thinking.push('💡 Suggested next tools: ' + [...new Set(toolSuggestions)].join(', '));
+    }
+
+    const output = {
+      query: input.query,
+      totalHits,
+      entityTypes: Object.keys(formattedResults),
+      results: formattedResults,
+      suggestions: [...new Set(toolSuggestions)],
+    };
+
+    return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
+  } catch (error) {
+    thinking.push(`Search error: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
+}
+
+// ============================================================================
+// 11. ASSISTANT SUPER-TOOL (Smart/Compound Operations)
 // ============================================================================
 const assistantActions = z.enum([
   'ask', // Natural language question about M365 data
@@ -840,9 +1328,14 @@ const assistantSchema = z.object({
 
 type AssistantInput = z.infer<typeof assistantSchema>;
 
-async function handleAssistant(input: AssistantInput, graphClient: GraphClient): Promise<string> {
+async function handleAssistant(
+  input: AssistantInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
   const thinking: string[] = [];
   const results: Record<string, unknown> = {};
+  // Assistant operations are read-only (queries only)
   const limit = input.limit || 25;
   const days = input.days || 7;
 
@@ -997,17 +1490,44 @@ async function handleAssistant(input: AssistantInput, graphClient: GraphClient):
 // ============================================================================
 // REGISTRATION FUNCTION
 // ============================================================================
-export function registerSuperTools(server: McpServer, graphClient: GraphClient): void {
-  logger.info('Registering Super-Tools (consolidated interface)');
+export function registerSuperTools(
+  server: McpServer,
+  graphClient: GraphClient,
+  readOnly: boolean = false
+): void {
+  logger.info(`Registering Super-Tools (consolidated interface, readOnly=${readOnly})`);
+
+  // 0. SEARCH (Microsoft 365 Unified Search - RECOMMENDED FIRST TOOL)
+  server.tool(
+    'search',
+    'Microsoft 365 Unified Search - USE THIS FIRST to find content across emails, calendar, files, SharePoint, Teams. Returns results and suggests which specific tools to use next.',
+    searchSchema.shape,
+    async (input: SearchInput) => {
+      try {
+        const result = await handleSearch(input, graphClient, readOnly);
+        return { content: [{ type: 'text' as const, text: result }] };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
 
   // 1. Email
   server.tool(
     'email',
-    'Unified email operations: list messages, get message, folders, attachments, search',
+    `Unified email operations: list, get, folders, attachments, search${readOnly ? '' : ' | send, reply, delete, move (write)'}`,
     emailSchema.shape,
     async (input: EmailInput) => {
       try {
-        const result = await handleEmail(input, graphClient);
+        const result = await handleEmail(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1030,7 +1550,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     calendarSchema.shape,
     async (input: CalendarInput) => {
       try {
-        const result = await handleCalendar(input, graphClient);
+        const result = await handleCalendar(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1053,7 +1573,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     teamsSchema.shape,
     async (input: TeamsInput) => {
       try {
-        const result = await handleTeams(input, graphClient);
+        const result = await handleTeams(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1076,7 +1596,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     filesSchema.shape,
     async (input: FilesInput) => {
       try {
-        const result = await handleFiles(input, graphClient);
+        const result = await handleFiles(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1099,7 +1619,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     tasksSchema.shape,
     async (input: TasksInput) => {
       try {
-        const result = await handleTasks(input, graphClient);
+        const result = await handleTasks(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1122,7 +1642,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     contactsSchema.shape,
     async (input: ContactsInput) => {
       try {
-        const result = await handleContacts(input, graphClient);
+        const result = await handleContacts(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1145,7 +1665,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     meetingsSchema.shape,
     async (input: MeetingsInput) => {
       try {
-        const result = await handleMeetings(input, graphClient);
+        const result = await handleMeetings(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1168,7 +1688,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     sharepointSchema.shape,
     async (input: SharePointInput) => {
       try {
-        const result = await handleSharePoint(input, graphClient);
+        const result = await handleSharePoint(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1191,7 +1711,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     notesSchema.shape,
     async (input: NotesInput) => {
       try {
-        const result = await handleNotes(input, graphClient);
+        const result = await handleNotes(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1214,7 +1734,7 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     assistantSchema.shape,
     async (input: AssistantInput) => {
       try {
-        const result = await handleAssistant(input, graphClient);
+        const result = await handleAssistant(input, graphClient, readOnly);
         return { content: [{ type: 'text' as const, text: result }] };
       } catch (error) {
         return {
@@ -1230,5 +1750,5 @@ export function registerSuperTools(server: McpServer, graphClient: GraphClient):
     }
   );
 
-  logger.info('Registered 10 Super-Tools');
+  logger.info('Registered 11 Super-Tools (search is the recommended first tool)');
 }
