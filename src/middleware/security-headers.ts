@@ -29,9 +29,24 @@ export function securityHeadersMiddleware(req: Request, res: Response, next: Nex
   res.setHeader('Permissions-Policy', permissionsPolicy);
 
   // Content-Security-Policy: Control resource loading
-  const csp =
-    process.env.MS365_MCP_CSP ||
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';";
+  // For dashboard routes, allow unsafe-inline scripts (dashboard uses inline scripts)
+  // For other routes, use stricter CSP
+  const isDashboardRoute = req.path.startsWith('/dashboard');
+  let csp: string;
+
+  if (isDashboardRoute) {
+    // Dashboard routes: Allow unsafe-inline for scripts (dashboard HTML contains inline scripts)
+    // This is acceptable since dashboard is password-protected and only accessible internally
+    csp =
+      process.env.MS365_MCP_CSP_DASHBOARD ||
+      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';";
+  } else {
+    // Other routes: Stricter CSP (no unsafe-inline for scripts)
+    csp =
+      process.env.MS365_MCP_CSP ||
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';";
+  }
+
   res.setHeader('Content-Security-Policy', csp);
 
   // Strict-Transport-Security: Force HTTPS (only if HTTPS is used)
