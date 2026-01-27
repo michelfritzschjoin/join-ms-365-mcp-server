@@ -25,6 +25,7 @@ import { randomUUID } from 'crypto';
 import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
 import { getQueryStore } from './query-store.js';
 import { z } from 'zod';
+import { isThinkingEnabled, getThinkingLevel } from './thinking-process.js';
 
 /**
  * Extract chat ID from request headers
@@ -257,6 +258,15 @@ class MicrosoftGraphServer {
 
     if (this.options.readOnly) {
       logger.info('Server running in READ-ONLY mode. Write operations are disabled.');
+    }
+
+    // Log thinking process status
+    if (isThinkingEnabled()) {
+      logger.info(
+        `Thinking process enabled (level: ${getThinkingLevel()}) - reasoning steps will be included in responses`
+      );
+    } else {
+      logger.info('Thinking process disabled');
     }
 
     if (this.options.http) {

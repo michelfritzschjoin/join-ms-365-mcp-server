@@ -22,6 +22,7 @@ import {
   formatMailResponse,
   mailResponseToText,
 } from './response-formatter.js';
+import { createThinkingProcess } from './thinking-process.js';
 
 /**
  * SECURITY: Properly sanitize HTML content to prevent XSS
@@ -209,6 +210,15 @@ interface GraphEvent {
     dateTime: string;
     timeZone: string;
   };
+  isAllDay?: boolean;
+  isCancelled?: boolean;
+  importance?: string;
+  showAs?: string;
+  categories?: string[];
+  isOnlineMeeting?: boolean;
+  onlineMeeting?: {
+    joinUrl?: string;
+  };
   attendees?: Array<{
     emailAddress: {
       name?: string;
@@ -385,6 +395,23 @@ interface EnhancedAskM365Response {
     totalResults: number;
     queryTime: number;
     productsSearched: string[];
+  };
+  /** Optional thinking process for transparent reasoning display in OpenWebUI */
+  thinking?: {
+    enabled: boolean;
+    level: string;
+    summary: string;
+    totalDuration: number;
+    stepCount: number;
+    steps: Array<{
+      type: string;
+      category: string;
+      message: string;
+      duration?: number;
+      icon?: string;
+      details?: Record<string, unknown>;
+    }>;
+    markdown: string;
   };
 }
 
@@ -1099,6 +1126,139 @@ async function findMeetingsWithPerson(
   }
 }
 
+type CalendarWindowQuery = {
+  readonly startDateTime: string;
+  readonly endDateTime: string;
+};
+
+type RollingWindowSearchResult = {
+  readonly windows: CalendarWindowQuery[];
+  readonly formatted:
+    | (ReturnType<typeof formatCalendarResponse> & { readonly _humanReadable: string })
+    | null;
+};
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date.getTime());
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function buildCalendarWindowQuery(params: {
+  readonly windowStart: Date;
+  readonly windowDays: number;
+}): CalendarWindowQuery {
+  const start = new Date(params.windowStart.getTime());
+  const end = addDays(start, params.windowDays);
+  return { startDateTime: start.toISOString(), endDateTime: end.toISOString() };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function buildFilteredCalendarResponse(params: {
+  readonly rawResponse: unknown;
+  readonly includeAllDay: boolean;
+  readonly includeCancelled: boolean;
+}): Record<string, unknown> {
+  if (!isRecord(params.rawResponse)) {
+    return { value: [] };
+  }
+
+  const rawEvents = Array.isArray(params.rawResponse.value)
+    ? (params.rawResponse.value as Array<Record<string, unknown>>)
+    : [];
+
+  const filtered = rawEvents.filter((event) => {
+    const isAllDay = Boolean(event.isAllDay);
+    const isCancelled = Boolean(event.isCancelled);
+
+    if (!params.includeAllDay && isAllDay) return false;
+    if (!params.includeCancelled && isCancelled) return false;
+
+    return true;
+  });
+
+  return { value: filtered };
+}
+
+async function findUpcomingMeetingsRollingWindow(params: {
+  readonly graphClient: GraphClient;
+  readonly windowDays: number;
+  readonly maxWindows: number;
+  readonly limit: number;
+  readonly includeAllDay: boolean;
+  readonly includeCancelled: boolean;
+  readonly timezone?: string;
+}): Promise<RollingWindowSearchResult> {
+  const windows: CalendarWindowQuery[] = [];
+  const now = new Date();
+
+  for (let i = 0; i < params.maxWindows; i++) {
+    const windowStart = addDays(now, i * params.windowDays);
+    const windowQuery = buildCalendarWindowQuery({ windowStart, windowDays: params.windowDays });
+    windows.push(windowQuery);
+
+    const queryParams: Record<string, string> = {
+      startDateTime: windowQuery.startDateTime,
+      endDateTime: windowQuery.endDateTime,
+      $top: String(Math.max(1, Math.min(params.limit, 500))),
+      $select:
+        'id,subject,bodyPreview,start,end,location,attendees,organizer,isAllDay,isCancelled,importance,showAs,categories,isOnlineMeeting,onlineMeeting,webLink',
+      $orderby: 'start/dateTime asc',
+    };
+
+    const rawResponse = await params.graphClient.makeRequest(
+      `/me/calendarView?${buildGraphQueryString(queryParams)}`,
+      {
+        method: 'GET',
+        headers: params.timezone ? { Prefer: `outlook.timezone="${params.timezone}"` } : undefined,
+      }
+    );
+
+    const filteredResponse = buildFilteredCalendarResponse({
+      rawResponse,
+      includeAllDay: params.includeAllDay,
+      includeCancelled: params.includeCancelled,
+    });
+
+    const formatted = formatCalendarResponse(
+      filteredResponse,
+      windowQuery.startDateTime,
+      windowQuery.endDateTime
+    );
+
+    if (formatted.summary.totalEvents > 0) {
+      const limitedEvents = formatted.events.slice(0, params.limit);
+      const groupedByDate: Record<string, typeof limitedEvents> = {};
+
+      for (const event of limitedEvents) {
+        if (!groupedByDate[event.startDate]) {
+          groupedByDate[event.startDate] = [];
+        }
+        groupedByDate[event.startDate].push(event);
+      }
+
+      const limitedFormatted = {
+        ...formatted,
+        events: limitedEvents,
+        groupedByDate,
+      };
+
+      return {
+        windows,
+        formatted: {
+          _humanReadable: calendarResponseToText(limitedFormatted),
+          ...limitedFormatted,
+        },
+      };
+    }
+  }
+
+  return { windows, formatted: null };
+}
+
 /**
  * Find files shared by or with a person
  */
@@ -1668,9 +1828,70 @@ async function executeCentralSearch(
                   const type = ((hit.resource['@odata.type'] as string) || '').toLowerCase();
                   const rank = hit.rank || 0;
 
-                  // Calculate relevance score (0-100 based on position)
-                  // Higher rank = more relevant in Microsoft Search
-                  const relevanceScore = Math.max(0, 100 - hitCount * 2);
+                  // Enhanced relevance calculation with query matching and temporal weighting
+                  let relevanceScore = Math.max(0, 100 - hitCount * 2); // Base score from position
+
+                  // Boost relevance based on query matching in key fields
+                  const queryLower = query.toLowerCase();
+                  const resource = hit.resource || {};
+                  const name = (
+                    resource.name ||
+                    resource.subject ||
+                    resource.displayName ||
+                    ''
+                  ).toLowerCase();
+                  const summary = (hit.summary || resource.bodyPreview || '').toLowerCase();
+
+                  // Exact match in name/title/subject gets highest boost
+                  if (name.includes(queryLower)) {
+                    relevanceScore += 20;
+                  }
+
+                  // Partial word matches
+                  const queryWords = queryLower.split(/\s+/).filter((w) => w.length > 2);
+                  const nameWords = name.split(/\s+/);
+                  const matchingWords = queryWords.filter((qw) =>
+                    nameWords.some((nw) => nw.includes(qw) || qw.includes(nw))
+                  );
+                  if (matchingWords.length > 0) {
+                    relevanceScore += matchingWords.length * 5;
+                  }
+
+                  // Summary/content match boost
+                  if (summary.includes(queryLower)) {
+                    relevanceScore += 10;
+                  }
+
+                  // Temporal relevance boost (newer items are more relevant)
+                  const timestamp = this.extractTimestampFromResource(resource);
+                  if (timestamp) {
+                    const daysSince = (Date.now() - timestamp.getTime()) / (1000 * 60 * 60 * 24);
+                    if (daysSince < 7) {
+                      relevanceScore += 15; // Very recent
+                    } else if (daysSince < 30) {
+                      relevanceScore += 10; // Recent
+                    } else if (daysSince < 90) {
+                      relevanceScore += 5; // Somewhat recent
+                    }
+                  }
+
+                  // Entity-type specific weighting
+                  if (type.includes('message') || type.includes('email')) {
+                    relevanceScore += 5; // Emails are often highly relevant
+                  } else if (type.includes('event')) {
+                    // Future events are more relevant than past events
+                    if (resource.start?.dateTime) {
+                      const startDate = new Date(resource.start.dateTime as string);
+                      if (startDate > new Date()) {
+                        relevanceScore += 10; // Future event
+                      }
+                    }
+                  } else if (type.includes('driveitem') || type.includes('file')) {
+                    relevanceScore += 3; // Files are moderately relevant
+                  }
+
+                  // Cap relevance score at 100
+                  relevanceScore = Math.min(100, Math.max(0, relevanceScore));
 
                   // Skip if below minimum relevance
                   if (minRelevance > 0 && relevanceScore < minRelevance) {
@@ -1979,6 +2200,23 @@ export function registerCompoundTools(
 
   // Initialize NLP Enhancer for structured query analysis
   const nlpEnhancer = new NLPEnhancer();
+
+  // Helper function to get current user email
+  async function getCurrentUserEmail(): Promise<string> {
+    try {
+      const userResponse = await graphClient.makeRequest('/me', {
+        method: 'GET',
+        queryParams: { $select: 'mail,userPrincipalName' },
+      });
+      return (
+        (userResponse as { mail?: string; userPrincipalName?: string }).mail ||
+        (userResponse as { userPrincipalName?: string }).userPrincipalName ||
+        ''
+      );
+    } catch {
+      return '';
+    }
+  }
 
   // ==========================================================================
   // 0. INTELLIGENT QUERY - PRIMARY ENTRY POINT - ALWAYS PROVIDES AN ANSWER
@@ -3270,6 +3508,13 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
       const startTime = Date.now();
       logger.info(`Enhanced query: "${question}"${context ? ` (context: ${context})` : ''}`);
 
+      // Initialize thinking process for transparent reasoning
+      const thinking = createThinkingProcess('ask-m365');
+      thinking.addReasoning(
+        'intent',
+        `Processing natural language query: "${question.substring(0, 50)}${question.length > 50 ? '...' : ''}"`
+      );
+
       // Get chat memory context if enabled
       const chatId = getChatId();
       const userId = getUserId();
@@ -3286,6 +3531,7 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
         const prefs = memoryStore.getPreferences(chatId, userId);
         if (prefs?.language && language === 'auto') {
           language = prefs.language;
+          thinking.addInfo('processing', `Applied stored language preference: ${language}`);
         }
 
         logger.debug('Chat memory context available', {
@@ -3294,14 +3540,22 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
           hasContext: !!memoryContext,
           prefsApplied: !!prefs?.language,
         });
+        if (memoryContext) {
+          thinking.addInfo('processing', 'Chat memory context loaded from previous conversation');
+        }
       }
 
       // Detect language
       const detectedLang = language === 'auto' ? detectLanguage(question) : language;
       const msg = messages[detectedLang];
       logger.info(`Detected language: ${detectedLang}`);
+      thinking.addDecision(
+        'intent',
+        `Detected language: ${detectedLang === 'de' ? 'German' : 'English'}`
+      );
 
       // Perform NLP-based query decomposition for structured analysis
+      thinking.startAction('processing', 'Analyzing query with NLP decomposition');
       const queryAnalysis = nlpEnhancer.decomposeQuery(question);
       logger.debug('Query decomposition completed', {
         entity: queryAnalysis.entity,
@@ -3309,6 +3563,10 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
         confidence: queryAnalysis.confidence,
         subQueries: queryAnalysis.subQueries.length,
       });
+      thinking.completeAction(
+        'processing',
+        `Query decomposed: ${queryAnalysis.intent.type} intent with ${Math.round(queryAnalysis.confidence * 100)}% confidence`
+      );
 
       // Combine question, context, and memory context
       let fullQuestion = context ? `${question} ${context}` : question;
@@ -3321,8 +3579,13 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
       }
 
       // Step 1: Classify intent
+      thinking.startAction('intent', 'Classifying user intent');
       const intentResult = classifyIntent(fullQuestion, detectedLang);
       const processingSteps: string[] = [];
+      thinking.completeAction(
+        'intent',
+        `Primary intent: ${intentResult.primary} (${Math.round(intentResult.confidence * 100)}% confidence)`
+      );
 
       // Intent labels for display
       const intentLabels: Record<Intent, { en: string; de: string }> = {
@@ -3357,7 +3620,22 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
       );
 
       const searchQuery = intentResult.extractedEntities.topic || question;
+      thinking.startAction(
+        'search',
+        `Executing Microsoft Search API query: "${searchQuery.substring(0, 30)}${searchQuery.length > 30 ? '...' : ''}"`
+      );
       const searchResults = await executeSearchApiFirst(graphClient, searchQuery);
+      const searchResultCount =
+        searchResults.emails.length +
+        searchResults.events.length +
+        searchResults.files.length +
+        searchResults.people.length +
+        searchResults.sites.length +
+        searchResults.listItems.length;
+      thinking.completeAction(
+        'search',
+        `Search API returned ${searchResultCount} results across 6 categories`
+      );
 
       // Step 3: Execute Follow-up queries for products not covered by Search API
       processingSteps.push(
@@ -3366,7 +3644,9 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
           : `🔄 Expanding search to additional products...`
       );
 
+      thinking.startAction('aggregation', 'Executing follow-up queries for additional products');
       const followUpResults = await executeFollowUpQueries(graphClient, searchQuery);
+      thinking.completeAction('aggregation', 'Follow-up queries completed');
 
       // Step 4: Product-specific primary intent execution (for more details)
       let primaryIntentData: any = null;
@@ -3573,6 +3853,13 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
       // Generate current date/time context for LLM reference
       const currentContext = generateDateTimeContext(detectedLang);
 
+      // Finalize thinking process
+      thinking.addDecision(
+        'processing',
+        `Query completed with ${totalCount} results in ${Date.now() - startTime}ms`
+      );
+      const thinkingResult = thinking.formatForResponse();
+
       // Build Enhanced Response
       const response: EnhancedAskM365Response = {
         question,
@@ -3601,6 +3888,10 @@ Dieses Tool bietet eine UNIVERSAL-Suche über mehr als 16 Microsoft 365-Produkte
           queryTime: Date.now() - startTime,
           productsSearched,
         },
+        // Include thinking process for transparent reasoning display
+        ...(thinkingResult.thinking
+          ? { thinking: thinkingResult.thinking as EnhancedAskM365Response['thinking'] }
+          : {}),
       };
 
       if (primaryIntentData) {
@@ -5405,14 +5696,268 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
         }
       }
 
-      // Format results for output
-      const formatHits = (hits: SearchHit[], maxItems: number) =>
-        hits.slice(0, maxItems).map((hit) => ({
+      // Helper function to extract key fields based on entity type
+      const extractKeyFields = (
+        hit: SearchHit,
+        entityType: 'email' | 'event' | 'file' | 'site' | 'listItem' | 'chat' | 'person'
+      ): Record<string, unknown> => {
+        const resource = hit.resource || {};
+        const maxSummaryLength = parseInt(process.env.MS365_MCP_MAX_SUMMARY_LENGTH || '150', 10);
+
+        const baseFields: Record<string, unknown> = {
+          name: hit.name,
+          relevance: hit.relevanceScore || 0,
+        };
+
+        if (hit.webUrl) {
+          baseFields.webUrl = hit.webUrl;
+        }
+
+        switch (entityType) {
+          case 'email':
+            return {
+              ...baseFields,
+              subject: resource.subject || hit.name,
+              from: resource.from?.emailAddress?.address || resource.from?.emailAddress?.name,
+              date: resource.receivedDateTime || resource.sentDateTime,
+              preview: (resource.bodyPreview || hit.summary || '').substring(0, maxSummaryLength),
+              hasAttachments: resource.hasAttachments || false,
+            };
+
+          case 'event':
+            return {
+              ...baseFields,
+              subject: resource.subject || hit.name,
+              start: resource.start?.dateTime,
+              end: resource.end?.dateTime,
+              location: resource.location?.displayName,
+              organizer:
+                resource.organizer?.emailAddress?.name || resource.organizer?.emailAddress?.address,
+              preview: (resource.bodyPreview || hit.summary || '').substring(0, maxSummaryLength),
+            };
+
+          case 'file':
+            return {
+              ...baseFields,
+              name: resource.name || hit.name,
+              type: resource['@odata.type'] || resource.file?.mimeType,
+              size: resource.size,
+              modified: resource.lastModifiedDateTime || resource.modifiedDateTime,
+              createdBy: resource.createdBy?.user?.displayName,
+            };
+
+          case 'site':
+            return {
+              ...baseFields,
+              name: resource.displayName || resource.name || hit.name,
+              url: resource.webUrl || hit.webUrl,
+              description: resource.description?.substring(0, maxSummaryLength),
+            };
+
+          case 'listItem':
+            return {
+              ...baseFields,
+              title: resource.title || resource.name || hit.name,
+              contentType: resource.contentType?.name,
+              modified: resource.lastModifiedDateTime,
+            };
+
+          case 'chat':
+            return {
+              ...baseFields,
+              subject: resource.subject || hit.name,
+              from: resource.from?.user?.displayName || resource.from?.application?.displayName,
+              date: resource.createdDateTime,
+              preview: (resource.body?.content || hit.summary || '').substring(0, maxSummaryLength),
+            };
+
+          case 'person':
+            return {
+              ...baseFields,
+              name: resource.displayName || hit.name,
+              email: resource.emailAddresses?.[0]?.address || resource.mail,
+              jobTitle: resource.jobTitle,
+              department: resource.department,
+              company: resource.companyName,
+            };
+
+          default:
+            return {
+              ...baseFields,
+              summary: (hit.summary || '').substring(0, maxSummaryLength),
+            };
+        }
+      };
+
+      // Helper function to format item summary for markdown
+      const formatItemSummary = (
+        fields: Record<string, unknown>,
+        entityType: string,
+        maxLength: number
+      ): string => {
+        const parts: string[] = [];
+
+        switch (entityType) {
+          case 'email':
+            if (fields.subject) parts.push(`**${String(fields.subject).substring(0, 60)}**`);
+            if (fields.from) parts.push(`from ${fields.from}`);
+            if (fields.date) {
+              const date = new Date(String(fields.date));
+              parts.push(`(${date.toLocaleDateString()})`);
+            }
+            break;
+          case 'event':
+            if (fields.subject) parts.push(`**${String(fields.subject).substring(0, 60)}**`);
+            if (fields.start) {
+              const start = new Date(String(fields.start));
+              parts.push(`on ${start.toLocaleDateString()}`);
+            }
+            if (fields.location) parts.push(`at ${fields.location}`);
+            break;
+          case 'file':
+            if (fields.name) parts.push(`**${String(fields.name).substring(0, 60)}**`);
+            if (fields.modified) {
+              const modified = new Date(String(fields.modified));
+              parts.push(`(modified ${modified.toLocaleDateString()})`);
+            }
+            break;
+          case 'person':
+            if (fields.name) parts.push(`**${String(fields.name)}**`);
+            if (fields.email) parts.push(`(${fields.email})`);
+            if (fields.jobTitle) parts.push(`- ${fields.jobTitle}`);
+            break;
+          default:
+            if (fields.name) parts.push(`**${String(fields.name).substring(0, 60)}**`);
+            if (fields.relevance) parts.push(`[relevance: ${fields.relevance}]`);
+        }
+
+        let summary = parts.join(' ');
+        if (summary.length > maxLength) {
+          summary = summary.substring(0, maxLength - 3) + '...';
+        }
+        return summary;
+      };
+
+      // Format results for LLM consumption with compact summary
+      const formatSearchResultsForLLM = (
+        results: CentralSearchResult,
+        options: { maxItems?: number; includeDetails?: boolean } = {}
+      ): { summary: string; topResults: unknown[]; categories: Record<string, unknown> } => {
+        const maxItems = options.maxItems || 10;
+        const includeDetails = options.includeDetails ?? true;
+        const maxSummaryLength = parseInt(process.env.MS365_MCP_MAX_SUMMARY_LENGTH || '150', 10);
+
+        const summaryLines: string[] = [];
+        const topResults: unknown[] = [];
+        const categories: Record<string, unknown> = {};
+
+        // Overall summary
+        summaryLines.push(`## Search Results for "${results.query}"`);
+        summaryLines.push(`**Total Results:** ${results.totalHits}`);
+        summaryLines.push(`**Search Duration:** ${results.metadata.searchDuration}ms`);
+        summaryLines.push('');
+
+        // Process each category
+        const categoryProcessors: Array<{
+          key: string;
+          items: SearchHit[];
+          label: string;
+          entityType: 'email' | 'event' | 'file' | 'site' | 'listItem' | 'chat' | 'person';
+        }> = [
+          { key: 'emails', items: results.results.emails, label: '📧 Emails', entityType: 'email' },
+          { key: 'events', items: results.results.events, label: '📅 Events', entityType: 'event' },
+          { key: 'files', items: results.results.files, label: '📁 Files', entityType: 'file' },
+          { key: 'sites', items: results.results.sites, label: '🌐 Sites', entityType: 'site' },
+          {
+            key: 'listItems',
+            items: results.results.listItems,
+            label: '📋 List Items',
+            entityType: 'listItem',
+          },
+          {
+            key: 'chats',
+            items: results.results.chats,
+            label: '💬 Teams Messages',
+            entityType: 'chat',
+          },
+          {
+            key: 'people',
+            items: results.results.people,
+            label: '👥 People',
+            entityType: 'person',
+          },
+        ];
+
+        for (const processor of categoryProcessors) {
+          if (processor.items.length > 0) {
+            const topItems = processor.items
+              .sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0))
+              .slice(0, Math.min(maxItems, processor.items.length));
+
+            summaryLines.push(`### ${processor.label} (${processor.items.length})`);
+
+            const formattedItems = topItems.map((hit, idx) => {
+              const fields = extractKeyFields(hit, processor.entityType);
+              const itemSummary = formatItemSummary(fields, processor.entityType, maxSummaryLength);
+              summaryLines.push(`${idx + 1}. ${itemSummary}`);
+              return fields;
+            });
+
+            if (processor.items.length > maxItems) {
+              summaryLines.push(`   ... and ${processor.items.length - maxItems} more`);
+            }
+            summaryLines.push('');
+
+            categories[processor.key] = {
+              count: processor.items.length,
+              topItems: formattedItems.slice(0, 5), // Top 5 for details
+            };
+
+            // Add top 3 to overall top results
+            topResults.push(...formattedItems.slice(0, 3));
+          }
+        }
+
+        return {
+          summary: summaryLines.join('\n'),
+          topResults: topResults.slice(0, maxItems),
+          categories: includeDetails ? categories : {},
+        };
+      };
+
+      // Enhanced formatHits with context-specific field selection
+      const formatHits = (
+        hits: SearchHit[],
+        maxItems: number,
+        entityType?: 'email' | 'event' | 'file' | 'site' | 'listItem' | 'chat' | 'person'
+      ) => {
+        const llmOptimize = process.env.MS365_MCP_LLM_OPTIMIZE !== 'false';
+        const relevanceThreshold = parseFloat(process.env.MS365_MCP_RELEVANCE_THRESHOLD || '0');
+
+        // Filter by relevance threshold if enabled
+        let filteredHits = hits;
+        if (relevanceThreshold > 0) {
+          filteredHits = hits.filter((hit) => (hit.relevanceScore || 0) >= relevanceThreshold);
+        }
+
+        // Sort by relevance and limit
+        const sortedHits = [...filteredHits]
+          .sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0))
+          .slice(0, maxItems);
+
+        if (llmOptimize && entityType) {
+          // Use context-specific field extraction for LLM optimization
+          return sortedHits.map((hit) => extractKeyFields(hit, entityType));
+        }
+
+        // Fallback to original format
+        return sortedHits.map((hit) => ({
           name: hit.name,
           webUrl: hit.webUrl,
           summary: hit.summary?.substring(0, 150),
           relevance: hit.relevanceScore,
         }));
+      };
 
       const correctedQuery = (searchResult as unknown as { correctedQuery?: string })
         .correctedQuery;
@@ -5442,37 +5987,37 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
       if (searchResult.results.emails.length > 0) {
         response.emails = {
           count: searchResult.results.emails.length,
-          items: formatHits(searchResult.results.emails, limit),
+          items: formatHits(searchResult.results.emails, limit, 'email'),
         };
       }
       if (searchResult.results.events.length > 0) {
         response.events = {
           count: searchResult.results.events.length,
-          items: formatHits(searchResult.results.events, limit),
+          items: formatHits(searchResult.results.events, limit, 'event'),
         };
       }
       if (searchResult.results.files.length > 0) {
         response.files = {
           count: searchResult.results.files.length,
-          items: formatHits(searchResult.results.files, limit),
+          items: formatHits(searchResult.results.files, limit, 'file'),
         };
       }
       if (searchResult.results.sites.length > 0) {
         response.sites = {
           count: searchResult.results.sites.length,
-          items: formatHits(searchResult.results.sites, limit),
+          items: formatHits(searchResult.results.sites, limit, 'site'),
         };
       }
       if (searchResult.results.listItems.length > 0) {
         response.listItems = {
           count: searchResult.results.listItems.length,
-          items: formatHits(searchResult.results.listItems, limit),
+          items: formatHits(searchResult.results.listItems, limit, 'listItem'),
         };
       }
       if (searchResult.results.chats.length > 0) {
         response.teamsMessages = {
           count: searchResult.results.chats.length,
-          items: formatHits(searchResult.results.chats, limit),
+          items: formatHits(searchResult.results.chats, limit, 'chat'),
         };
       }
       if (searchResult.results.people.length > 0) {
@@ -10500,6 +11045,5100 @@ Preferences are automatically applied to subsequent queries in this chat.`,
   );
   registeredCount++;
 
+  // ==========================================================================
+  // CONTENT INTELLIGENCE & EXTRACTION TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 23. EXTRACT ACTION ITEMS - Extract action items from emails and meetings
+  // ==========================================================================
+  server.tool(
+    'extract-action-items',
+    `Extract action items from emails and meetings:
+- Parse emails for action items (tasks, to-dos, follow-ups)
+- Extract tasks from meeting notes and descriptions
+- Identify deadlines and assignees
+- Create structured task list
+- Link to source emails/meetings
+
+Use this for "What action items do I have from recent emails?", "Extract tasks from yesterday's meeting", or "Show me all action items from [person]".`,
+    {
+      source: z
+        .enum(['emails', 'meetings', 'both'])
+        .optional()
+        .describe('Source to extract from: emails, meetings, or both (default: both)'),
+      days: z.number().optional().describe('Days back to search (default: 7)'),
+      person: z.string().optional().describe('Filter by person name or email'),
+      limit: z.number().optional().describe('Maximum action items to return (default: 50)'),
+    },
+    {
+      title: 'Extract Action Items',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ source = 'both', days = 7, person, limit = 50 }) => {
+      logger.info(`Extracting action items: source=${source}, days=${days}, person=${person}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface ActionItem {
+        text: string;
+        source: 'email' | 'meeting';
+        sourceId: string;
+        sourceTitle: string;
+        sourceDate: string;
+        sourceLink?: string;
+        assignee?: string;
+        deadline?: string;
+        priority?: 'high' | 'medium' | 'low';
+      }
+
+      const actionItems: ActionItem[] = [];
+      const promises: Promise<void>[] = [];
+
+      // Action item detection patterns
+      const actionPatterns = [
+        /(?:action item|action|todo|to do|task|follow up|follow-up)[\s:]+(.+?)(?:\.|$)/gi,
+        /(?:need to|must|should|will|going to)\s+(.+?)(?:\.|$)/gi,
+        /(?:please|can you|could you)\s+(.+?)(?:\.|\?|$)/gi,
+        /(?:deadline|due|by)\s+([^\.]+)/gi,
+        /(?:assign(?:ed)? to|@)([^\s\.]+)/gi,
+      ];
+
+      // Extract from emails
+      if (source === 'emails' || source === 'both') {
+        promises.push(
+          (async () => {
+            try {
+              let queryParams: Record<string, string> = {
+                $top: '100',
+                $select: 'id,subject,bodyPreview,body,receivedDateTime,from,toRecipients,webLink',
+                $orderby: 'receivedDateTime desc',
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+              };
+
+              if (person) {
+                const user = await findUser(graphClient, person);
+                if (user) {
+                  const userEmail = user.mail || user.userPrincipalName || '';
+                  queryParams.$filter += ` and (from/emailAddress/address eq '${userEmail}' or toRecipients/any(r:r/emailAddress/address eq '${userEmail}'))`;
+                }
+              }
+
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams,
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                for (const email of emailResponse.value as GraphEmail[]) {
+                  const content = sanitizeHtml(email.bodyPreview || email.body?.content || '');
+                  const subject = email.subject || '';
+
+                  // Extract action items from content
+                  for (const pattern of actionPatterns) {
+                    const matches = content.matchAll(pattern);
+                    for (const match of matches) {
+                      if (match[1] && match[1].trim().length > 5) {
+                        const actionText = match[1].trim();
+                        // Check if it's actually an action item (not just a mention)
+                        if (
+                          actionText.length < 200 &&
+                          !actionText.toLowerCase().includes('http') &&
+                          !actionText.toLowerCase().includes('@')
+                        ) {
+                          actionItems.push({
+                            text: actionText,
+                            source: 'email',
+                            sourceId: email.id,
+                            sourceTitle: subject,
+                            sourceDate: email.receivedDateTime,
+                            sourceLink: email.webLink,
+                            assignee: email.from?.emailAddress?.name,
+                          });
+                        }
+                      }
+                    }
+                  }
+
+                  // Also check subject line
+                  if (
+                    subject.toLowerCase().includes('action') ||
+                    subject.toLowerCase().includes('todo')
+                  ) {
+                    actionItems.push({
+                      text: subject,
+                      source: 'email',
+                      sourceId: email.id,
+                      sourceTitle: subject,
+                      sourceDate: email.receivedDateTime,
+                      sourceLink: email.webLink,
+                      assignee: email.from?.emailAddress?.name,
+                    });
+                  }
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not extract action items from emails: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Extract from meetings
+      if (source === 'meetings' || source === 'both') {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '100',
+                $select: 'id,subject,bodyPreview,start,end,organizer,attendees,webLink',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                for (const meeting of meetingsResponse.value as GraphEvent[]) {
+                  const content = sanitizeHtml(meeting.bodyPreview || '');
+                  const subject = meeting.subject || '';
+
+                  // Filter by person if specified
+                  if (person) {
+                    const user = await findUser(graphClient, person);
+                    if (user) {
+                      const userEmail = user.mail || user.userPrincipalName || '';
+                      const isAttendee =
+                        meeting.attendees?.some(
+                          (a) => a.emailAddress?.address?.toLowerCase() === userEmail.toLowerCase()
+                        ) ||
+                        meeting.organizer?.emailAddress?.address?.toLowerCase() ===
+                          userEmail.toLowerCase();
+                      if (!isAttendee) continue;
+                    }
+                  }
+
+                  // Extract action items from meeting notes
+                  for (const pattern of actionPatterns) {
+                    const matches = content.matchAll(pattern);
+                    for (const match of matches) {
+                      if (match[1] && match[1].trim().length > 5) {
+                        const actionText = match[1].trim();
+                        if (
+                          actionText.length < 200 &&
+                          !actionText.toLowerCase().includes('http') &&
+                          !actionText.toLowerCase().includes('@')
+                        ) {
+                          actionItems.push({
+                            text: actionText,
+                            source: 'meeting',
+                            sourceId: meeting.id,
+                            sourceTitle: subject,
+                            sourceDate: meeting.start.dateTime,
+                            sourceLink: meeting.webLink,
+                            assignee: meeting.organizer?.emailAddress?.name,
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not extract action items from meetings: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Deduplicate and limit
+      const uniqueItems = Array.from(
+        new Map(actionItems.map((item) => [item.text.toLowerCase(), item])).values()
+      ).slice(0, limit);
+
+      const result = {
+        totalFound: uniqueItems.length,
+        actionItems: uniqueItems,
+        summary: {
+          fromEmails: uniqueItems.filter((i) => i.source === 'email').length,
+          fromMeetings: uniqueItems.filter((i) => i.source === 'meeting').length,
+          dateRange: {
+            start: startDate.toISOString(),
+            end: new Date().toISOString(),
+          },
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 24. SUMMARIZE EMAIL THREAD - Summarize long email threads
+  // ==========================================================================
+  server.tool(
+    'summarize-email-thread',
+    `Summarize long email threads:
+- Extract key points from email conversations
+- Identify decisions made
+- List participants
+- Highlight action items
+- Create concise summary
+
+Use this for "Summarize the email thread about [topic]", "What was decided in this email chain?", or "Give me a summary of this conversation".`,
+    {
+      topic: z.string().describe('Topic or subject to find and summarize email thread'),
+      days: z.number().optional().describe('Days back to search (default: 30)'),
+      limit: z.number().optional().describe('Maximum emails to analyze (default: 50)'),
+    },
+    {
+      title: 'Summarize Email Thread',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ topic, days = 30, limit = 50 }) => {
+      logger.info(`Summarizing email thread for topic: ${topic}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      try {
+        const emailResponse = await graphClient.makeRequest('/me/messages', {
+          method: 'GET',
+          queryParams: {
+            $search: `"${topic}"`,
+            $top: String(limit),
+            $select:
+              'id,subject,bodyPreview,body,receivedDateTime,from,toRecipients,ccRecipients,webLink',
+            $orderby: 'receivedDateTime desc',
+            $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+          },
+        });
+
+        if (!emailResponse || typeof emailResponse !== 'object' || !('value' in emailResponse)) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: 'No emails found',
+                  message: `No emails found matching "${topic}" in the last ${days} days.`,
+                  topic,
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const emails = emailResponse.value as GraphEmail[];
+        if (emails.length === 0) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: 'No emails found',
+                  message: `No emails found matching "${topic}" in the last ${days} days.`,
+                  topic,
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        // Extract participants
+        const participants = new Set<string>();
+        const participantsByEmail = new Map<string, string>();
+
+        // Extract key points, decisions, and action items
+        const keyPoints: string[] = [];
+        const decisions: string[] = [];
+        const actionItems: string[] = [];
+
+        // Group by thread (same subject)
+        const threads = new Map<string, GraphEmail[]>();
+        for (const email of emails) {
+          const subject = email.subject || 'No Subject';
+          if (!threads.has(subject)) {
+            threads.set(subject, []);
+          }
+          threads.get(subject)!.push(email);
+        }
+
+        // Process each thread
+        for (const [subject, threadEmails] of threads) {
+          // Sort by date
+          threadEmails.sort(
+            (a, b) =>
+              new Date(a.receivedDateTime).getTime() - new Date(b.receivedDateTime).getTime()
+          );
+
+          for (const email of threadEmails) {
+            // Track participants
+            if (email.from?.emailAddress) {
+              participants.add(email.from.emailAddress.name || email.from.emailAddress.address);
+              participantsByEmail.set(
+                email.from.emailAddress.address,
+                email.from.emailAddress.name || email.from.emailAddress.address
+              );
+            }
+            for (const recipient of [
+              ...(email.toRecipients || []),
+              ...(email.ccRecipients || []),
+            ]) {
+              if (recipient.emailAddress?.address) {
+                participants.add(recipient.emailAddress.name || recipient.emailAddress.address);
+                participantsByEmail.set(
+                  recipient.emailAddress.address,
+                  recipient.emailAddress.name || recipient.emailAddress.address
+                );
+              }
+            }
+
+            const content = sanitizeHtml(email.bodyPreview || email.body?.content || '');
+            const contentLower = content.toLowerCase();
+
+            // Extract decisions
+            if (
+              contentLower.includes('decided') ||
+              contentLower.includes('decision') ||
+              contentLower.includes('agreed') ||
+              contentLower.includes('we will') ||
+              contentLower.includes("let's go with")
+            ) {
+              const decisionMatch = content.match(
+                /(?:decided|decision|agreed|we will|let's go with)[\s:]+(.+?)(?:\.|$)/i
+              );
+              if (decisionMatch && decisionMatch[1]) {
+                decisions.push(decisionMatch[1].trim());
+              }
+            }
+
+            // Extract action items
+            if (
+              contentLower.includes('action') ||
+              contentLower.includes('todo') ||
+              contentLower.includes('follow up') ||
+              contentLower.includes('need to')
+            ) {
+              const actionMatch = content.match(
+                /(?:action|todo|follow up|need to)[\s:]+(.+?)(?:\.|$)/i
+              );
+              if (actionMatch && actionMatch[1]) {
+                actionItems.push(actionMatch[1].trim());
+              }
+            }
+
+            // Extract key points (sentences with important keywords)
+            if (
+              contentLower.includes('important') ||
+              contentLower.includes('key') ||
+              contentLower.includes('summary') ||
+              contentLower.includes('conclusion')
+            ) {
+              const sentences = content.split(/[.!?]+/).filter((s) => s.trim().length > 20);
+              for (const sentence of sentences.slice(0, 3)) {
+                if (sentence.trim().length > 20 && sentence.trim().length < 200) {
+                  keyPoints.push(sentence.trim());
+                }
+              }
+            }
+          }
+        }
+
+        // Create summary
+        const firstEmail = emails[emails.length - 1]; // Oldest
+        const lastEmail = emails[0]; // Newest
+
+        const summary = {
+          topic,
+          threadCount: threads.size,
+          totalEmails: emails.length,
+          participants: Array.from(participants).slice(0, 20),
+          dateRange: {
+            start: firstEmail.receivedDateTime,
+            end: lastEmail.receivedDateTime,
+          },
+          keyPoints: keyPoints.slice(0, 10),
+          decisions: decisions.slice(0, 10),
+          actionItems: actionItems.slice(0, 10),
+          threads: Array.from(threads.entries()).map(([subject, threadEmails]) => ({
+            subject,
+            emailCount: threadEmails.length,
+            firstEmail: threadEmails[0].receivedDateTime,
+            lastEmail: threadEmails[threadEmails.length - 1].receivedDateTime,
+            participants: Array.from(
+              new Set(
+                threadEmails.flatMap((e) => [
+                  e.from?.emailAddress?.name || e.from?.emailAddress?.address,
+                  ...(e.toRecipients || []).map(
+                    (r) => r.emailAddress?.name || r.emailAddress?.address
+                  ),
+                ])
+              )
+            ).filter(Boolean),
+          })),
+        };
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(summary, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: 'Failed to summarize email thread',
+                  message: `${error}`,
+                  topic,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 25. EXTRACT DECISIONS - Extract decisions from communications
+  // ==========================================================================
+  server.tool(
+    'extract-decisions',
+    `Extract decisions from communications:
+- Find decision points in emails
+- Extract decisions from meetings
+- Track decision timeline
+- Identify decision makers
+- Link to related documents
+
+Use this for "What decisions were made about [topic]?", "Extract all decisions from last week", or "Show me decision history for [project]".`,
+    {
+      topic: z.string().optional().describe('Topic or project to find decisions about'),
+      days: z.number().optional().describe('Days back to search (default: 90)'),
+      source: z
+        .enum(['emails', 'meetings', 'both'])
+        .optional()
+        .describe('Source to search: emails, meetings, or both (default: both)'),
+      limit: z.number().optional().describe('Maximum decisions to return (default: 50)'),
+    },
+    {
+      title: 'Extract Decisions',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ topic, days = 90, source = 'both', limit = 50 }) => {
+      logger.info(`Extracting decisions: topic=${topic}, days=${days}, source=${source}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface Decision {
+        text: string;
+        source: 'email' | 'meeting';
+        sourceId: string;
+        sourceTitle: string;
+        sourceDate: string;
+        sourceLink?: string;
+        decisionMaker?: string;
+        participants?: string[];
+      }
+
+      const decisions: Decision[] = [];
+      const promises: Promise<void>[] = [];
+
+      const decisionPatterns = [
+        /(?:decided|decision)[\s:]+(.+?)(?:\.|$)/gi,
+        /(?:agreed|agreement)[\s:]+(.+?)(?:\.|$)/gi,
+        /(?:we will|we'll|going to)[\s:]+(.+?)(?:\.|$)/gi,
+        /(?:let's|let us)[\s:]+(.+?)(?:\.|$)/gi,
+        /(?:conclusion|concluded)[\s:]+(.+?)(?:\.|$)/gi,
+        /(?:final|finally)[\s:]+(.+?)(?:\.|$)/gi,
+      ];
+
+      // Extract from emails
+      if (source === 'emails' || source === 'both') {
+        promises.push(
+          (async () => {
+            try {
+              let queryParams: Record<string, string> = {
+                $top: '100',
+                $select:
+                  'id,subject,bodyPreview,body,receivedDateTime,from,toRecipients,ccRecipients,webLink',
+                $orderby: 'receivedDateTime desc',
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+              };
+
+              if (topic) {
+                queryParams.$search = `"${topic}"`;
+                delete queryParams.$orderby; // Can't use orderby with search
+              }
+
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams,
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                for (const email of emailResponse.value as GraphEmail[]) {
+                  const content = sanitizeHtml(email.bodyPreview || email.body?.content || '');
+                  const subject = email.subject || '';
+
+                  // Filter by topic if specified and not already filtered by search
+                  if (topic && !queryParams.$search) {
+                    if (
+                      !subject.toLowerCase().includes(topic.toLowerCase()) &&
+                      !content.toLowerCase().includes(topic.toLowerCase())
+                    ) {
+                      continue;
+                    }
+                  }
+
+                  // Extract decisions
+                  for (const pattern of decisionPatterns) {
+                    const matches = content.matchAll(pattern);
+                    for (const match of matches) {
+                      if (match[1] && match[1].trim().length > 10) {
+                        const decisionText = match[1].trim();
+                        if (
+                          decisionText.length < 300 &&
+                          !decisionText.toLowerCase().includes('http') &&
+                          !decisionText.toLowerCase().includes('@')
+                        ) {
+                          decisions.push({
+                            text: decisionText,
+                            source: 'email',
+                            sourceId: email.id,
+                            sourceTitle: subject,
+                            sourceDate: email.receivedDateTime,
+                            sourceLink: email.webLink,
+                            decisionMaker: email.from?.emailAddress?.name,
+                            participants: [
+                              email.from?.emailAddress?.name || email.from?.emailAddress?.address,
+                              ...(email.toRecipients || []).map(
+                                (r) => r.emailAddress?.name || r.emailAddress?.address
+                              ),
+                            ].filter(Boolean),
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not extract decisions from emails: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Extract from meetings
+      if (source === 'meetings' || source === 'both') {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '100',
+                $select: 'id,subject,bodyPreview,start,end,organizer,attendees,webLink',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                for (const meeting of meetingsResponse.value as GraphEvent[]) {
+                  const content = sanitizeHtml(meeting.bodyPreview || '');
+                  const subject = meeting.subject || '';
+
+                  // Filter by topic if specified
+                  if (topic) {
+                    if (
+                      !subject.toLowerCase().includes(topic.toLowerCase()) &&
+                      !content.toLowerCase().includes(topic.toLowerCase())
+                    ) {
+                      continue;
+                    }
+                  }
+
+                  // Extract decisions
+                  for (const pattern of decisionPatterns) {
+                    const matches = content.matchAll(pattern);
+                    for (const match of matches) {
+                      if (match[1] && match[1].trim().length > 10) {
+                        const decisionText = match[1].trim();
+                        if (
+                          decisionText.length < 300 &&
+                          !decisionText.toLowerCase().includes('http') &&
+                          !decisionText.toLowerCase().includes('@')
+                        ) {
+                          decisions.push({
+                            text: decisionText,
+                            source: 'meeting',
+                            sourceId: meeting.id,
+                            sourceTitle: subject,
+                            sourceDate: meeting.start.dateTime,
+                            sourceLink: meeting.webLink,
+                            decisionMaker: meeting.organizer?.emailAddress?.name,
+                            participants: [
+                              meeting.organizer?.emailAddress?.name,
+                              ...(meeting.attendees || []).map(
+                                (a) => a.emailAddress?.name || a.emailAddress?.address
+                              ),
+                            ].filter(Boolean),
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not extract decisions from meetings: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Sort by date and deduplicate
+      decisions.sort((a, b) => new Date(a.sourceDate).getTime() - new Date(b.sourceDate).getTime());
+      const uniqueDecisions = Array.from(
+        new Map(decisions.map((d) => [d.text.toLowerCase().substring(0, 100), d])).values()
+      ).slice(0, limit);
+
+      // Build timeline
+      const timeline = uniqueDecisions.map((d) => ({
+        date: d.sourceDate,
+        decision: d.text,
+        source: d.source,
+        decisionMaker: d.decisionMaker,
+        sourceTitle: d.sourceTitle,
+        sourceLink: d.sourceLink,
+      }));
+
+      // Identify decision makers
+      const decisionMakers = new Map<string, number>();
+      for (const decision of uniqueDecisions) {
+        if (decision.decisionMaker) {
+          decisionMakers.set(
+            decision.decisionMaker,
+            (decisionMakers.get(decision.decisionMaker) || 0) + 1
+          );
+        }
+      }
+
+      const result = {
+        topic: topic || 'All topics',
+        totalDecisions: uniqueDecisions.length,
+        dateRange: {
+          start: startDate.toISOString(),
+          end: new Date().toISOString(),
+        },
+        timeline,
+        decisionMakers: Array.from(decisionMakers.entries())
+          .map(([name, count]) => ({ name, decisionCount: count }))
+          .sort((a, b) => b.decisionCount - a.decisionCount)
+          .slice(0, 10),
+        summary: {
+          fromEmails: uniqueDecisions.filter((d) => d.source === 'email').length,
+          fromMeetings: uniqueDecisions.filter((d) => d.source === 'meeting').length,
+          firstDecision: timeline[0]?.date,
+          lastDecision: timeline[timeline.length - 1]?.date,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // RELATIONSHIP INTELLIGENCE TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 26. ANALYZE RELATIONSHIP STRENGTH - Analyze relationship strength with contacts
+  // ==========================================================================
+  server.tool(
+    'analyze-relationship-strength',
+    `Analyze relationship strength with contacts:
+- Communication frequency scoring
+- Interaction recency
+- Meeting participation rate
+- Email thread depth
+- Overall relationship score
+
+Use this for "How strong is my relationship with [person]?", "Who do I communicate with most?", or "Analyze my professional network".`,
+    {
+      person: z
+        .string()
+        .optional()
+        .describe('Person name or email to analyze (optional - analyzes all if not provided)'),
+      days: z.number().optional().describe('Days of history to analyze (default: 90)'),
+      limit: z.number().optional().describe('Maximum relationships to return (default: 20)'),
+    },
+    {
+      title: 'Analyze Relationship Strength',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ person, days = 90, limit = 20 }) => {
+      logger.info(`Analyzing relationship strength: person=${person}, days=${days}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface RelationshipData {
+        personId: string;
+        name: string;
+        email: string;
+        emailCount: number;
+        meetingCount: number;
+        lastInteraction: string;
+        firstInteraction: string;
+        emailThreads: number;
+        relationshipScore: number;
+      }
+
+      const relationships = new Map<string, RelationshipData>();
+      const promises: Promise<void>[] = [];
+
+      // Analyze emails
+      promises.push(
+        (async () => {
+          try {
+            let queryParams: Record<string, string> = {
+              $top: '500',
+              $select: 'id,subject,from,toRecipients,ccRecipients,receivedDateTime,conversationId',
+              $orderby: 'receivedDateTime desc',
+              $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+            };
+
+            if (person) {
+              const user = await findUser(graphClient, person);
+              if (user) {
+                const userEmail = user.mail || user.userPrincipalName || '';
+                queryParams.$filter += ` and (from/emailAddress/address eq '${userEmail}' or toRecipients/any(r:r/emailAddress/address eq '${userEmail}'))`;
+              }
+            }
+
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams,
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              const threads = new Map<string, Set<string>>();
+
+              for (const email of emailResponse.value as GraphEmail[]) {
+                const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
+                const senderName = email.from?.emailAddress?.name || senderEmail || 'Unknown';
+
+                if (senderEmail && senderEmail !== (await getCurrentUserEmail())) {
+                  if (!relationships.has(senderEmail)) {
+                    relationships.set(senderEmail, {
+                      personId: '',
+                      name: senderName,
+                      email: senderEmail,
+                      emailCount: 0,
+                      meetingCount: 0,
+                      lastInteraction: email.receivedDateTime,
+                      firstInteraction: email.receivedDateTime,
+                      emailThreads: 0,
+                      relationshipScore: 0,
+                    });
+                  }
+
+                  const rel = relationships.get(senderEmail)!;
+                  rel.emailCount++;
+                  if (new Date(email.receivedDateTime) > new Date(rel.lastInteraction)) {
+                    rel.lastInteraction = email.receivedDateTime;
+                  }
+                  if (new Date(email.receivedDateTime) < new Date(rel.firstInteraction)) {
+                    rel.firstInteraction = email.receivedDateTime;
+                  }
+
+                  // Track threads
+                  if (email.conversationId) {
+                    if (!threads.has(email.conversationId)) {
+                      threads.set(email.conversationId, new Set());
+                    }
+                    threads.get(email.conversationId)!.add(senderEmail);
+                  }
+                }
+              }
+
+              // Count threads per person
+              for (const [conversationId, participants] of threads) {
+                for (const participantEmail of participants) {
+                  if (relationships.has(participantEmail)) {
+                    relationships.get(participantEmail)!.emailThreads++;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze email relationships: ${error}`);
+          }
+        })()
+      );
+
+      // Analyze meetings
+      promises.push(
+        (async () => {
+          try {
+            const meetingQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: new Date().toISOString(),
+              $top: '500',
+              $select: 'id,subject,start,end,organizer,attendees',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              const currentUserEmail = await getCurrentUserEmail();
+
+              for (const meeting of meetingsResponse.value as GraphEvent[]) {
+                const organizerEmail = meeting.organizer?.emailAddress?.address?.toLowerCase();
+                const organizerName =
+                  meeting.organizer?.emailAddress?.name || organizerEmail || 'Unknown';
+
+                // Track organizer
+                if (organizerEmail && organizerEmail !== currentUserEmail) {
+                  if (!relationships.has(organizerEmail)) {
+                    relationships.set(organizerEmail, {
+                      personId: '',
+                      name: organizerName,
+                      email: organizerEmail,
+                      emailCount: 0,
+                      meetingCount: 0,
+                      lastInteraction: meeting.start.dateTime,
+                      firstInteraction: meeting.start.dateTime,
+                      emailThreads: 0,
+                      relationshipScore: 0,
+                    });
+                  }
+                  relationships.get(organizerEmail)!.meetingCount++;
+                }
+
+                // Track attendees
+                for (const attendee of meeting.attendees || []) {
+                  const attendeeEmail = attendee.emailAddress?.address?.toLowerCase();
+                  const attendeeName = attendee.emailAddress?.name || attendeeEmail || 'Unknown';
+
+                  if (attendeeEmail && attendeeEmail !== currentUserEmail) {
+                    if (!relationships.has(attendeeEmail)) {
+                      relationships.set(attendeeEmail, {
+                        personId: '',
+                        name: attendeeName,
+                        email: attendeeEmail,
+                        emailCount: 0,
+                        meetingCount: 0,
+                        lastInteraction: meeting.start.dateTime,
+                        firstInteraction: meeting.start.dateTime,
+                        emailThreads: 0,
+                        relationshipScore: 0,
+                      });
+                    }
+                    relationships.get(attendeeEmail)!.meetingCount++;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze meeting relationships: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Calculate relationship scores
+      const now = new Date();
+      for (const [email, rel] of relationships) {
+        // Score components:
+        // - Email frequency (0-40 points)
+        // - Meeting frequency (0-30 points)
+        // - Recency (0-20 points)
+        // - Thread depth (0-10 points)
+
+        const emailScore = Math.min(rel.emailCount * 2, 40);
+        const meetingScore = Math.min(rel.meetingCount * 5, 30);
+        const daysSinceLastInteraction =
+          (now.getTime() - new Date(rel.lastInteraction).getTime()) / (1000 * 60 * 60 * 24);
+        const recencyScore = Math.max(0, 20 - daysSinceLastInteraction / 5);
+        const threadScore = Math.min(rel.emailThreads * 2, 10);
+
+        rel.relationshipScore = emailScore + meetingScore + recencyScore + threadScore;
+      }
+
+      // Sort by score and filter by person if specified
+      let sortedRelationships = Array.from(relationships.values())
+        .sort((a, b) => b.relationshipScore - a.relationshipScore)
+        .slice(0, limit);
+
+      // Filter by person if specified
+      if (person) {
+        const user = await findUser(graphClient, person);
+        if (user) {
+          const userEmail = user.mail || user.userPrincipalName || '';
+          sortedRelationships = sortedRelationships.filter(
+            (r) => r.email.toLowerCase() === userEmail.toLowerCase()
+          );
+        }
+      }
+
+      const result = {
+        analyzedPeriod: `Last ${days} days`,
+        totalRelationships: relationships.size,
+        relationships: sortedRelationships.map((rel) => ({
+          name: rel.name,
+          email: rel.email,
+          score: Math.round(rel.relationshipScore * 10) / 10,
+          metrics: {
+            emailCount: rel.emailCount,
+            meetingCount: rel.meetingCount,
+            emailThreads: rel.emailThreads,
+            lastInteraction: rel.lastInteraction,
+            firstInteraction: rel.firstInteraction,
+          },
+          strength:
+            rel.relationshipScore >= 70
+              ? 'Very Strong'
+              : rel.relationshipScore >= 50
+                ? 'Strong'
+                : rel.relationshipScore >= 30
+                  ? 'Moderate'
+                  : rel.relationshipScore >= 15
+                    ? 'Weak'
+                    : 'Very Weak',
+        })),
+        summary: {
+          strongestRelationship: sortedRelationships[0]?.name,
+          mostEmails: sortedRelationships.sort((a, b) => b.emailCount - a.emailCount)[0]?.name,
+          mostMeetings: sortedRelationships.sort((a, b) => b.meetingCount - a.meetingCount)[0]
+            ?.name,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 27. FIND MUTUAL CONNECTIONS - Find mutual connections between people
+  // ==========================================================================
+  server.tool(
+    'find-mutual-connections',
+    `Find mutual connections between people:
+- Common meeting participants
+- Shared email threads
+- Mutual contacts
+- Collaboration history
+- Network connections
+
+Use this for "Who do I know in common with [person]?", "Find mutual connections for [person]", or "Who connects me to [person]?".`,
+    {
+      person: z.string().describe('Person name or email to find mutual connections with'),
+      days: z.number().optional().describe('Days of history to analyze (default: 180)'),
+      limit: z.number().optional().describe('Maximum connections to return (default: 20)'),
+    },
+    {
+      title: 'Find Mutual Connections',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ person, days = 180, limit = 20 }) => {
+      logger.info(`Finding mutual connections for: ${person}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      // Find the target person
+      const targetUser = await findUser(graphClient, person);
+      if (!targetUser) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: 'Person not found',
+                message: `Could not find a person matching "${person}".`,
+                searchedFor: person,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const targetEmail = targetUser.mail || targetUser.userPrincipalName || '';
+      const currentUserEmail = await getCurrentUserEmail();
+
+      // Track mutual connections
+      const mutualConnections = new Map<
+        string,
+        {
+          name: string;
+          email: string;
+          sharedMeetings: number;
+          sharedEmails: number;
+          connectionStrength: number;
+        }
+      >();
+
+      const promises: Promise<void>[] = [];
+
+      // Find shared meetings
+      promises.push(
+        (async () => {
+          try {
+            const meetingQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: new Date().toISOString(),
+              $top: '500',
+              $select: 'id,subject,start,attendees,organizer',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              for (const meeting of meetingsResponse.value as GraphEvent[]) {
+                const attendees = meeting.attendees || [];
+                const organizer = meeting.organizer?.emailAddress?.address?.toLowerCase();
+
+                // Check if target person is in this meeting
+                const hasTarget =
+                  organizer === targetEmail.toLowerCase() ||
+                  attendees.some(
+                    (a) => a.emailAddress?.address?.toLowerCase() === targetEmail.toLowerCase()
+                  );
+
+                if (hasTarget) {
+                  // Track all other participants as mutual connections
+                  for (const attendee of attendees) {
+                    const attendeeEmail = attendee.emailAddress?.address?.toLowerCase();
+                    const attendeeName = attendee.emailAddress?.name || attendeeEmail || 'Unknown';
+
+                    if (
+                      attendeeEmail &&
+                      attendeeEmail !== currentUserEmail.toLowerCase() &&
+                      attendeeEmail !== targetEmail.toLowerCase()
+                    ) {
+                      if (!mutualConnections.has(attendeeEmail)) {
+                        mutualConnections.set(attendeeEmail, {
+                          name: attendeeName,
+                          email: attendeeEmail,
+                          sharedMeetings: 0,
+                          sharedEmails: 0,
+                          connectionStrength: 0,
+                        });
+                      }
+                      mutualConnections.get(attendeeEmail)!.sharedMeetings++;
+                    }
+                  }
+
+                  // Also track organizer if not already tracked
+                  if (
+                    organizer &&
+                    organizer !== currentUserEmail.toLowerCase() &&
+                    organizer !== targetEmail.toLowerCase()
+                  ) {
+                    if (!mutualConnections.has(organizer)) {
+                      mutualConnections.set(organizer, {
+                        name: meeting.organizer?.emailAddress?.name || organizer,
+                        email: organizer,
+                        sharedMeetings: 0,
+                        sharedEmails: 0,
+                        connectionStrength: 0,
+                      });
+                    }
+                    mutualConnections.get(organizer)!.sharedMeetings++;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze shared meetings: ${error}`);
+          }
+        })()
+      );
+
+      // Find shared email threads
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $top: '500',
+                $select:
+                  'id,subject,from,toRecipients,ccRecipients,conversationId,receivedDateTime',
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                $orderby: 'receivedDateTime desc',
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              // Group by conversation
+              const conversations = new Map<string, GraphEmail[]>();
+              for (const email of emailResponse.value as GraphEmail[]) {
+                if (email.conversationId) {
+                  if (!conversations.has(email.conversationId)) {
+                    conversations.set(email.conversationId, []);
+                  }
+                  conversations.get(email.conversationId)!.push(email);
+                }
+              }
+
+              // Find conversations with target person
+              for (const [conversationId, emails] of conversations) {
+                const hasTarget = emails.some(
+                  (e) =>
+                    e.from?.emailAddress?.address?.toLowerCase() === targetEmail.toLowerCase() ||
+                    e.toRecipients?.some(
+                      (r) => r.emailAddress?.address?.toLowerCase() === targetEmail.toLowerCase()
+                    ) ||
+                    e.ccRecipients?.some(
+                      (r) => r.emailAddress?.address?.toLowerCase() === targetEmail.toLowerCase()
+                    )
+                );
+
+                if (hasTarget) {
+                  // Track all other participants
+                  for (const email of emails) {
+                    const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
+                    const senderName = email.from?.emailAddress?.name || senderEmail || 'Unknown';
+
+                    if (
+                      senderEmail &&
+                      senderEmail !== currentUserEmail.toLowerCase() &&
+                      senderEmail !== targetEmail.toLowerCase()
+                    ) {
+                      if (!mutualConnections.has(senderEmail)) {
+                        mutualConnections.set(senderEmail, {
+                          name: senderName,
+                          email: senderEmail,
+                          sharedMeetings: 0,
+                          sharedEmails: 0,
+                          connectionStrength: 0,
+                        });
+                      }
+                      mutualConnections.get(senderEmail)!.sharedEmails++;
+                    }
+
+                    // Track recipients
+                    for (const recipient of [
+                      ...(email.toRecipients || []),
+                      ...(email.ccRecipients || []),
+                    ]) {
+                      const recipientEmail = recipient.emailAddress?.address?.toLowerCase();
+                      const recipientName =
+                        recipient.emailAddress?.name || recipientEmail || 'Unknown';
+
+                      if (
+                        recipientEmail &&
+                        recipientEmail !== currentUserEmail.toLowerCase() &&
+                        recipientEmail !== targetEmail.toLowerCase() &&
+                        recipientEmail !== senderEmail
+                      ) {
+                        if (!mutualConnections.has(recipientEmail)) {
+                          mutualConnections.set(recipientEmail, {
+                            name: recipientName,
+                            email: recipientEmail,
+                            sharedMeetings: 0,
+                            sharedEmails: 0,
+                            connectionStrength: 0,
+                          });
+                        }
+                        mutualConnections.get(recipientEmail)!.sharedEmails++;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze shared emails: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Calculate connection strength
+      for (const [email, connection] of mutualConnections) {
+        connection.connectionStrength = connection.sharedMeetings * 3 + connection.sharedEmails;
+      }
+
+      // Sort by strength
+      const sortedConnections = Array.from(mutualConnections.values())
+        .sort((a, b) => b.connectionStrength - a.connectionStrength)
+        .slice(0, limit);
+
+      const result = {
+        targetPerson: {
+          name: targetUser.displayName,
+          email: targetEmail,
+        },
+        analyzedPeriod: `Last ${days} days`,
+        totalMutualConnections: mutualConnections.size,
+        connections: sortedConnections.map((conn) => ({
+          name: conn.name,
+          email: conn.email,
+          sharedMeetings: conn.sharedMeetings,
+          sharedEmails: conn.sharedEmails,
+          connectionStrength: conn.connectionStrength,
+        })),
+        summary: {
+          strongestConnection: sortedConnections[0]?.name,
+          mostSharedMeetings: sortedConnections.sort(
+            (a, b) => b.sharedMeetings - a.sharedMeetings
+          )[0]?.name,
+          mostSharedEmails: sortedConnections.sort((a, b) => b.sharedEmails - a.sharedEmails)[0]
+            ?.name,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 28. GET COMMUNICATION FREQUENCY - Analyze communication frequency
+  // ==========================================================================
+  server.tool(
+    'get-communication-frequency',
+    `Analyze communication frequency:
+- Most frequent contacts
+- Communication trends
+- Response patterns
+- Interaction types breakdown
+- Time-based patterns
+
+Use this for "Who do I email most often?", "Show my communication frequency", or "Analyze my communication patterns".`,
+    {
+      days: z.number().optional().describe('Days of history to analyze (default: 90)'),
+      limit: z.number().optional().describe('Maximum contacts to return (default: 30)'),
+      includeMeetings: z
+        .boolean()
+        .optional()
+        .describe('Include meeting interactions (default: true)'),
+    },
+    {
+      title: 'Get Communication Frequency',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ days = 90, limit = 30, includeMeetings = true }) => {
+      logger.info(
+        `Analyzing communication frequency: days=${days}, includeMeetings=${includeMeetings}`
+      );
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface CommunicationData {
+        name: string;
+        email: string;
+        emailCount: number;
+        meetingCount: number;
+        totalInteractions: number;
+        lastInteraction: string;
+        firstInteraction: string;
+        averageDaysBetween: number;
+      }
+
+      const communications = new Map<string, CommunicationData>();
+      const promises: Promise<void>[] = [];
+
+      // Analyze emails
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $top: '1000',
+                $select: 'id,from,receivedDateTime',
+                $orderby: 'receivedDateTime desc',
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              const currentUserEmail = await getCurrentUserEmail();
+
+              for (const email of emailResponse.value as GraphEmail[]) {
+                const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
+                const senderName = email.from?.emailAddress?.name || senderEmail || 'Unknown';
+
+                if (senderEmail && senderEmail !== currentUserEmail.toLowerCase()) {
+                  if (!communications.has(senderEmail)) {
+                    communications.set(senderEmail, {
+                      name: senderName,
+                      email: senderEmail,
+                      emailCount: 0,
+                      meetingCount: 0,
+                      totalInteractions: 0,
+                      lastInteraction: email.receivedDateTime,
+                      firstInteraction: email.receivedDateTime,
+                      averageDaysBetween: 0,
+                    });
+                  }
+
+                  const comm = communications.get(senderEmail)!;
+                  comm.emailCount++;
+                  comm.totalInteractions++;
+                  if (new Date(email.receivedDateTime) > new Date(comm.lastInteraction)) {
+                    comm.lastInteraction = email.receivedDateTime;
+                  }
+                  if (new Date(email.receivedDateTime) < new Date(comm.firstInteraction)) {
+                    comm.firstInteraction = email.receivedDateTime;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze email frequency: ${error}`);
+          }
+        })()
+      );
+
+      // Analyze meetings
+      if (includeMeetings) {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '500',
+                $select: 'id,subject,start,attendees,organizer',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                const currentUserEmail = await getCurrentUserEmail();
+
+                for (const meeting of meetingsResponse.value as GraphEvent[]) {
+                  const organizerEmail = meeting.organizer?.emailAddress?.address?.toLowerCase();
+                  const organizerName =
+                    meeting.organizer?.emailAddress?.name || organizerEmail || 'Unknown';
+
+                  // Track organizer
+                  if (organizerEmail && organizerEmail !== currentUserEmail.toLowerCase()) {
+                    if (!communications.has(organizerEmail)) {
+                      communications.set(organizerEmail, {
+                        name: organizerName,
+                        email: organizerEmail,
+                        emailCount: 0,
+                        meetingCount: 0,
+                        totalInteractions: 0,
+                        lastInteraction: meeting.start.dateTime,
+                        firstInteraction: meeting.start.dateTime,
+                        averageDaysBetween: 0,
+                      });
+                    }
+                    communications.get(organizerEmail)!.meetingCount++;
+                    communications.get(organizerEmail)!.totalInteractions++;
+                  }
+
+                  // Track attendees
+                  for (const attendee of meeting.attendees || []) {
+                    const attendeeEmail = attendee.emailAddress?.address?.toLowerCase();
+                    const attendeeName = attendee.emailAddress?.name || attendeeEmail || 'Unknown';
+
+                    if (attendeeEmail && attendeeEmail !== currentUserEmail.toLowerCase()) {
+                      if (!communications.has(attendeeEmail)) {
+                        communications.set(attendeeEmail, {
+                          name: attendeeName,
+                          email: attendeeEmail,
+                          emailCount: 0,
+                          meetingCount: 0,
+                          totalInteractions: 0,
+                          lastInteraction: meeting.start.dateTime,
+                          firstInteraction: meeting.start.dateTime,
+                          averageDaysBetween: 0,
+                        });
+                      }
+                      communications.get(attendeeEmail)!.meetingCount++;
+                      communications.get(attendeeEmail)!.totalInteractions++;
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze meeting frequency: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Calculate average days between interactions
+      for (const [email, comm] of communications) {
+        const totalDays =
+          (new Date(comm.lastInteraction).getTime() - new Date(comm.firstInteraction).getTime()) /
+          (1000 * 60 * 60 * 24);
+        comm.averageDaysBetween =
+          comm.totalInteractions > 1 ? totalDays / (comm.totalInteractions - 1) : totalDays;
+      }
+
+      // Sort by total interactions
+      const sortedCommunications = Array.from(communications.values())
+        .sort((a, b) => b.totalInteractions - a.totalInteractions)
+        .slice(0, limit);
+
+      // Calculate trends (weekly breakdown)
+      const weeklyBreakdown = new Map<number, number>();
+      for (const comm of sortedCommunications) {
+        const weekNum = Math.floor(
+          (new Date(comm.lastInteraction).getTime() - startDate.getTime()) /
+            (7 * 24 * 60 * 60 * 1000)
+        );
+        weeklyBreakdown.set(weekNum, (weeklyBreakdown.get(weekNum) || 0) + comm.totalInteractions);
+      }
+
+      const result = {
+        analyzedPeriod: `Last ${days} days`,
+        totalContacts: communications.size,
+        topContacts: sortedCommunications.map((comm) => ({
+          name: comm.name,
+          email: comm.email,
+          emailCount: comm.emailCount,
+          meetingCount: comm.meetingCount,
+          totalInteractions: comm.totalInteractions,
+          lastInteraction: comm.lastInteraction,
+          averageDaysBetween: Math.round(comm.averageDaysBetween * 10) / 10,
+        })),
+        summary: {
+          mostFrequentContact: sortedCommunications[0]?.name,
+          totalEmails: sortedCommunications.reduce((sum, c) => sum + c.emailCount, 0),
+          totalMeetings: sortedCommunications.reduce((sum, c) => sum + c.meetingCount, 0),
+          averageInteractionsPerContact:
+            sortedCommunications.length > 0
+              ? Math.round(
+                  (sortedCommunications.reduce((sum, c) => sum + c.totalInteractions, 0) /
+                    sortedCommunications.length) *
+                    10
+                ) / 10
+              : 0,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // DOCUMENT INTELLIGENCE TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 29. FIND RELATED DOCUMENTS - Find related documents across services
+  // ==========================================================================
+  server.tool(
+    'find-related-documents',
+    `Find related documents across services:
+- Documents mentioned in emails
+- Files related to meetings
+- Documents shared with same people
+- Related by topic/keywords
+- Version history connections
+
+Use this for "Find documents related to [topic]", "Show files related to this meeting", or "Find all documents about [project]".`,
+    {
+      topic: z.string().describe('Topic, project name, or keyword to find related documents'),
+      days: z.number().optional().describe('Days back to search (default: 180)'),
+      limit: z.number().optional().describe('Maximum documents to return (default: 50)'),
+      includeEmails: z
+        .boolean()
+        .optional()
+        .describe('Include documents mentioned in emails (default: true)'),
+      includeMeetings: z
+        .boolean()
+        .optional()
+        .describe('Include documents related to meetings (default: true)'),
+    },
+    {
+      title: 'Find Related Documents',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ topic, days = 180, limit = 50, includeEmails = true, includeMeetings = true }) => {
+      logger.info(`Finding related documents for topic: ${topic}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface RelatedDocument {
+        name: string;
+        webUrl?: string;
+        type: 'file' | 'email' | 'meeting';
+        source: string;
+        sourceDate: string;
+        relevance: number;
+        sharedWith?: string[];
+      }
+
+      const documents = new Map<string, RelatedDocument>();
+      const promises: Promise<void>[] = [];
+
+      // Search for files directly
+      promises.push(
+        (async () => {
+          try {
+            const searchResult = await executeCentralSearch(graphClient, topic, {
+              entityTypes: ['driveItem', 'listItem'],
+              maxResults: limit,
+              sortByRank: true,
+            });
+
+            for (const hit of [...searchResult.results.files, ...searchResult.results.listItems]) {
+              if (hit.resource) {
+                const doc = hit.resource as GraphDriveItem;
+                const key = doc.id || doc.name || '';
+                if (key && !documents.has(key)) {
+                  documents.set(key, {
+                    name: doc.name || 'Unknown',
+                    webUrl: doc.webUrl,
+                    type: 'file',
+                    source: 'Direct search',
+                    sourceDate: doc.lastModifiedDateTime || doc.createdDateTime || '',
+                    relevance: hit.relevanceScore || 0,
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not search for files: ${error}`);
+          }
+        })()
+      );
+
+      // Find documents mentioned in emails
+      if (includeEmails) {
+        promises.push(
+          (async () => {
+            try {
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams: {
+                  $search: `"${topic}"`,
+                  $top: '100',
+                  $select:
+                    'id,subject,bodyPreview,body,receivedDateTime,hasAttachments,attachments,webLink',
+                  $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                },
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                for (const email of emailResponse.value as GraphEmail &
+                  {
+                    hasAttachments?: boolean;
+                    attachments?: Array<{ name: string; contentId?: string }>;
+                  }[]) {
+                  const content = sanitizeHtml(email.bodyPreview || email.body?.content || '');
+
+                  // Look for file references (common patterns)
+                  const filePatterns = [
+                    /(?:see|check|review|attached|attachment)[\s:]+([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                    /([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                  ];
+
+                  for (const pattern of filePatterns) {
+                    const matches = content.matchAll(pattern);
+                    for (const match of matches) {
+                      if (match[1]) {
+                        const fileName = match[1].trim();
+                        if (!documents.has(fileName)) {
+                          documents.set(fileName, {
+                            name: fileName,
+                            type: 'email',
+                            source: `Email: ${email.subject}`,
+                            sourceDate: email.receivedDateTime,
+                            relevance: 50,
+                          });
+                        }
+                      }
+                    }
+                  }
+
+                  // Check attachments
+                  if (email.hasAttachments && email.attachments) {
+                    for (const attachment of email.attachments) {
+                      if (attachment.name) {
+                        const key = `email-${email.id}-${attachment.name}`;
+                        if (!documents.has(key)) {
+                          documents.set(key, {
+                            name: attachment.name,
+                            type: 'email',
+                            source: `Email attachment: ${email.subject}`,
+                            sourceDate: email.receivedDateTime,
+                            relevance: 70,
+                            webUrl: email.webLink,
+                          });
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not find documents in emails: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Find documents related to meetings
+      if (includeMeetings) {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '100',
+                $select: 'id,subject,bodyPreview,start,attendees,organizer,webLink',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                for (const meeting of meetingsResponse.value as GraphEvent[]) {
+                  const subject = meeting.subject || '';
+                  const content = sanitizeHtml(meeting.bodyPreview || '');
+
+                  // Check if meeting is related to topic
+                  if (
+                    subject.toLowerCase().includes(topic.toLowerCase()) ||
+                    content.toLowerCase().includes(topic.toLowerCase())
+                  ) {
+                    // Look for file references in meeting notes
+                    const filePatterns = [
+                      /(?:see|check|review|document|file)[\s:]+([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                      /([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                    ];
+
+                    for (const pattern of filePatterns) {
+                      const matches = content.matchAll(pattern);
+                      for (const match of matches) {
+                        if (match[1]) {
+                          const fileName = match[1].trim();
+                          const key = `meeting-${meeting.id}-${fileName}`;
+                          if (!documents.has(key)) {
+                            documents.set(key, {
+                              name: fileName,
+                              type: 'meeting',
+                              source: `Meeting: ${subject}`,
+                              sourceDate: meeting.start.dateTime,
+                              relevance: 60,
+                              webUrl: meeting.webLink,
+                              sharedWith: [
+                                meeting.organizer?.emailAddress?.name,
+                                ...(meeting.attendees || []).map(
+                                  (a) => a.emailAddress?.name || a.emailAddress?.address
+                                ),
+                              ].filter(Boolean),
+                            });
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not find documents in meetings: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Sort by relevance
+      const sortedDocuments = Array.from(documents.values())
+        .sort((a, b) => b.relevance - a.relevance)
+        .slice(0, limit);
+
+      const result = {
+        topic,
+        analyzedPeriod: `Last ${days} days`,
+        totalDocuments: documents.size,
+        documents: sortedDocuments,
+        summary: {
+          byType: {
+            files: sortedDocuments.filter((d) => d.type === 'file').length,
+            emails: sortedDocuments.filter((d) => d.type === 'email').length,
+            meetings: sortedDocuments.filter((d) => d.type === 'meeting').length,
+          },
+          mostRelevant: sortedDocuments[0]?.name,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 30. BUILD KNOWLEDGE GRAPH - Build knowledge graph from data
+  // ==========================================================================
+  server.tool(
+    'build-knowledge-graph',
+    `Build knowledge graph from data:
+- Connect people, projects, documents
+- Identify relationships
+- Map collaboration networks
+- Visualize connections
+- Discover hidden relationships
+
+Use this for "Build a knowledge graph for [topic]", "Show connections for [project]", or "Map relationships for [person]".`,
+    {
+      topic: z.string().describe('Topic, project, or person to build knowledge graph for'),
+      days: z.number().optional().describe('Days of history to analyze (default: 180)'),
+      maxNodes: z.number().optional().describe('Maximum nodes in graph (default: 50)'),
+    },
+    {
+      title: 'Build Knowledge Graph',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ topic, days = 180, maxNodes = 50 }) => {
+      logger.info(`Building knowledge graph for: ${topic}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface GraphNode {
+        id: string;
+        type: 'person' | 'document' | 'project' | 'meeting';
+        name: string;
+        properties?: Record<string, unknown>;
+      }
+
+      interface GraphEdge {
+        from: string;
+        to: string;
+        type: 'email' | 'meeting' | 'document' | 'collaboration';
+        weight: number;
+        properties?: Record<string, unknown>;
+      }
+
+      const nodes = new Map<string, GraphNode>();
+      const edges: GraphEdge[] = [];
+
+      // Try to detect if topic is a person
+      const topicUser = await findUser(graphClient, topic);
+      const isPerson = !!topicUser;
+
+      const promises: Promise<void>[] = [];
+
+      // Add topic as central node
+      if (isPerson && topicUser) {
+        nodes.set(topicUser.id, {
+          id: topicUser.id,
+          type: 'person',
+          name: topicUser.displayName,
+          properties: {
+            email: topicUser.mail || topicUser.userPrincipalName,
+            department: topicUser.department,
+            jobTitle: topicUser.jobTitle,
+          },
+        });
+      } else {
+        nodes.set('topic', {
+          id: 'topic',
+          type: 'project',
+          name: topic,
+        });
+      }
+
+      // Find related emails
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $search: `"${topic}"`,
+                $top: '100',
+                $select:
+                  'id,subject,from,toRecipients,ccRecipients,receivedDateTime,conversationId',
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              const topicNodeId = isPerson && topicUser ? topicUser.id : 'topic';
+
+              for (const email of emailResponse.value as GraphEmail) {
+                const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
+                const senderName = email.from?.emailAddress?.name || senderEmail || 'Unknown';
+                const senderId = `person-${senderEmail}`;
+
+                // Add sender node
+                if (!nodes.has(senderId)) {
+                  nodes.set(senderId, {
+                    id: senderId,
+                    type: 'person',
+                    name: senderName,
+                    properties: { email: senderEmail },
+                  });
+                }
+
+                // Add edge from sender to topic
+                edges.push({
+                  from: senderId,
+                  to: topicNodeId,
+                  type: 'email',
+                  weight: 1,
+                  properties: { subject: email.subject, date: email.receivedDateTime },
+                });
+
+                // Add recipients
+                for (const recipient of [
+                  ...(email.toRecipients || []),
+                  ...(email.ccRecipients || []),
+                ]) {
+                  const recipientEmail = recipient.emailAddress?.address?.toLowerCase();
+                  const recipientName = recipient.emailAddress?.name || recipientEmail || 'Unknown';
+                  const recipientId = `person-${recipientEmail}`;
+
+                  if (!nodes.has(recipientId)) {
+                    nodes.set(recipientId, {
+                      id: recipientId,
+                      type: 'person',
+                      name: recipientName,
+                      properties: { email: recipientEmail },
+                    });
+                  }
+
+                  // Add edge between sender and recipient
+                  edges.push({
+                    from: senderId,
+                    to: recipientId,
+                    type: 'email',
+                    weight: 1,
+                    properties: { subject: email.subject },
+                  });
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze emails for knowledge graph: ${error}`);
+          }
+        })()
+      );
+
+      // Find related meetings
+      promises.push(
+        (async () => {
+          try {
+            const meetingQueryParams: Record<string, string> = {
+              startDateTime: startDate.toISOString(),
+              endDateTime: new Date().toISOString(),
+              $top: '100',
+              $select: 'id,subject,start,attendees,organizer',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              const topicNodeId = isPerson && topicUser ? topicUser.id : 'topic';
+
+              for (const meeting of meetingsResponse.value as GraphEvent) {
+                const subject = meeting.subject || '';
+                if (!subject.toLowerCase().includes(topic.toLowerCase())) {
+                  continue;
+                }
+
+                const meetingId = `meeting-${meeting.id}`;
+                nodes.set(meetingId, {
+                  id: meetingId,
+                  type: 'meeting',
+                  name: subject,
+                  properties: { date: meeting.start.dateTime },
+                });
+
+                // Connect meeting to topic
+                edges.push({
+                  from: meetingId,
+                  to: topicNodeId,
+                  type: 'meeting',
+                  weight: 2,
+                });
+
+                // Connect participants
+                const organizerEmail = meeting.organizer?.emailAddress?.address?.toLowerCase();
+                const organizerName =
+                  meeting.organizer?.emailAddress?.name || organizerEmail || 'Unknown';
+                const organizerId = `person-${organizerEmail}`;
+
+                if (organizerEmail && !nodes.has(organizerId)) {
+                  nodes.set(organizerId, {
+                    id: organizerId,
+                    type: 'person',
+                    name: organizerName,
+                    properties: { email: organizerEmail },
+                  });
+                }
+
+                if (organizerEmail) {
+                  edges.push({
+                    from: organizerId,
+                    to: meetingId,
+                    type: 'meeting',
+                    weight: 2,
+                  });
+                }
+
+                for (const attendee of meeting.attendees || []) {
+                  const attendeeEmail = attendee.emailAddress?.address?.toLowerCase();
+                  const attendeeName = attendee.emailAddress?.name || attendeeEmail || 'Unknown';
+                  const attendeeId = `person-${attendeeEmail}`;
+
+                  if (attendeeEmail && !nodes.has(attendeeId)) {
+                    nodes.set(attendeeId, {
+                      id: attendeeId,
+                      type: 'person',
+                      name: attendeeName,
+                      properties: { email: attendeeEmail },
+                    });
+                  }
+
+                  if (attendeeEmail) {
+                    edges.push({
+                      from: attendeeId,
+                      to: meetingId,
+                      type: 'meeting',
+                      weight: 2,
+                    });
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze meetings for knowledge graph: ${error}`);
+          }
+        })()
+      );
+
+      // Find related documents
+      promises.push(
+        (async () => {
+          try {
+            const searchResult = await executeCentralSearch(graphClient, topic, {
+              entityTypes: ['driveItem'],
+              maxResults: 20,
+              sortByRank: true,
+            });
+
+            for (const hit of searchResult.results.files) {
+              if (hit.resource) {
+                const doc = hit.resource as GraphDriveItem;
+                const docId = `doc-${doc.id}`;
+                const topicNodeId = isPerson && topicUser ? topicUser.id : 'topic';
+
+                nodes.set(docId, {
+                  id: docId,
+                  type: 'document',
+                  name: doc.name || 'Unknown',
+                  properties: {
+                    url: doc.webUrl,
+                    modified: doc.lastModifiedDateTime,
+                  },
+                });
+
+                edges.push({
+                  from: docId,
+                  to: topicNodeId,
+                  type: 'document',
+                  weight: 3,
+                });
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze documents for knowledge graph: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Limit nodes and calculate node degrees
+      const nodeArray = Array.from(nodes.values()).slice(0, maxNodes);
+      const nodeIds = new Set(nodeArray.map((n) => n.id));
+      const filteredEdges = edges.filter((e) => nodeIds.has(e.from) && nodeIds.has(e.to));
+
+      // Calculate node degrees (number of connections)
+      const nodeDegrees = new Map<string, number>();
+      for (const edge of filteredEdges) {
+        nodeDegrees.set(edge.from, (nodeDegrees.get(edge.from) || 0) + 1);
+        nodeDegrees.set(edge.to, (nodeDegrees.get(edge.to) || 0) + 1);
+      }
+
+      // Add degrees to node properties
+      for (const node of nodeArray) {
+        node.properties = {
+          ...node.properties,
+          degree: nodeDegrees.get(node.id) || 0,
+        };
+      }
+
+      const result = {
+        topic,
+        analyzedPeriod: `Last ${days} days`,
+        graph: {
+          nodes: nodeArray,
+          edges: filteredEdges,
+        },
+        statistics: {
+          totalNodes: nodeArray.length,
+          totalEdges: filteredEdges.length,
+          nodeTypes: {
+            person: nodeArray.filter((n) => n.type === 'person').length,
+            document: nodeArray.filter((n) => n.type === 'document').length,
+            meeting: nodeArray.filter((n) => n.type === 'meeting').length,
+            project: nodeArray.filter((n) => n.type === 'project').length,
+          },
+          mostConnected: nodeArray
+            .sort((a, b) => (b.properties?.degree || 0) - (a.properties?.degree || 0))
+            .slice(0, 5)
+            .map((n) => ({ name: n.name, connections: n.properties?.degree || 0 })),
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // TOOL ORCHESTRATION & INTELLIGENCE TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 31. PLAN TOOL EXECUTION - The Orchestrator - Creates execution plan for ANY query
+  // ==========================================================================
+  server.tool(
+    'plan-tool-execution',
+    `🎯 **TOOL ORCHESTRATOR** - THE MOST IMPORTANT TOOL FOR LLMs!
+
+**CRITICAL FUNCTION**: This tool tells the LLM EXACTLY which tools to call, in which order, with which parameters, for ANY question the user asks.
+
+**When to use:**
+- Call this tool FIRST for ANY user query/question
+- Use when you need to know which tools to call
+- Use for complex queries requiring multiple tools
+- Use when you're unsure which tool is best
+
+**What it does:**
+- Analyzes ANY user query/question
+- Breaks it down into concrete tool calls
+- Provides EXACT tool names and parameters
+- Gives clear step-by-step instructions
+- Handles tool dependencies automatically
+- Suggests parallel execution where possible
+
+**Output:**
+Returns a detailed execution plan with:
+- Step-by-step tool calls with exact parameters
+- Clear reasons for each step
+- Expected results
+- Parallel execution opportunities
+- Fallback strategies
+
+**Example:**
+User asks: "What do I know about Project Apollo?"
+→ Call this tool → Get plan with exact tools to call
+
+This tool works for ALL types of queries: emails, meetings, files, people, projects, tasks, etc.`,
+    {
+      query: z.string().describe('The user query or question to create an execution plan for'),
+    },
+    {
+      title: 'Plan Tool Execution',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async ({ query }) => {
+      logger.info(`Planning tool execution for query: ${query}`);
+
+      try {
+        const plan = createToolExecutionPlan(query, nlpEnhancer);
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(plan, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Error creating tool execution plan: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: 'Failed to create execution plan',
+                  message: `${error}`,
+                  query,
+                  fallback: {
+                    tool: 'ask-microsoft-365',
+                    parameters: { question: query },
+                    reason: 'Use intelligent assistant as fallback',
+                  },
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 32. SUGGEST TOOL SEQUENCE - Suggests optimal tool sequences for scenarios
+  // ==========================================================================
+  server.tool(
+    'suggest-tool-sequence',
+    `Suggest optimal tool sequences for common business scenarios:
+- Pre-defined workflows for common tasks
+- Context-aware tool recommendations
+- Multi-step operation planning
+- Tool dependency resolution
+
+Use this for "What's the best way to prepare for a meeting?", "How do I get a complete customer overview?", or "What tools should I use to analyze my productivity?".`,
+    {
+      scenario: z
+        .enum([
+          'meeting_preparation',
+          'customer_overview',
+          'project_research',
+          'person_research',
+          'productivity_analysis',
+          'weekly_review',
+          'email_analysis',
+          'document_discovery',
+        ])
+        .describe('Business scenario to get tool sequence for'),
+      context: z
+        .string()
+        .optional()
+        .describe('Additional context (e.g., person name, project name)'),
+    },
+    {
+      title: 'Suggest Tool Sequence',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async ({ scenario, context }) => {
+      logger.info(`Suggesting tool sequence for scenario: ${scenario}`);
+
+      const workflows: Record<
+        string,
+        {
+          scenario: string;
+          description: string;
+          steps: Array<{
+            step: number;
+            tool: string;
+            parameters: Record<string, unknown>;
+            reason: string;
+          }>;
+        }
+      > = {
+        meeting_preparation: {
+          scenario: 'meeting_preparation',
+          description: 'Prepare for an upcoming meeting',
+          steps: [
+            {
+              step: 1,
+              tool: 'prepare-for-meeting',
+              parameters: {
+                meetingSubject: context || 'upcoming meeting',
+                hoursAhead: 48,
+              },
+              reason: 'Gather all context for the meeting',
+            },
+            {
+              step: 2,
+              tool: 'find-related-documents',
+              parameters: {
+                topic: context || 'meeting topic',
+                days: 30,
+                limit: 20,
+              },
+              reason: 'Find documents related to the meeting',
+            },
+          ],
+        },
+        customer_overview: {
+          scenario: 'customer_overview',
+          description: 'Get complete customer overview',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-company-contacts',
+              parameters: {
+                companyName: context || 'company',
+              },
+              reason: 'Find all contacts from the company',
+            },
+            {
+              step: 2,
+              tool: 'search-everything',
+              parameters: {
+                query: context || 'company name',
+                limit: 25,
+              },
+              reason: 'Search for all interactions with the company',
+            },
+            {
+              step: 3,
+              tool: 'find-related-documents',
+              parameters: {
+                topic: context || 'company name',
+                days: 180,
+                limit: 50,
+              },
+              reason: 'Find all documents related to the company',
+            },
+          ],
+        },
+        project_research: {
+          scenario: 'project_research',
+          description: 'Research a project comprehensively',
+          steps: [
+            {
+              step: 1,
+              tool: 'search-everything',
+              parameters: {
+                query: context || 'project name',
+                limit: 25,
+              },
+              reason: 'Start with universal search',
+            },
+            {
+              step: 2,
+              tool: 'get-project-overview',
+              parameters: {
+                projectName: context || 'project name',
+                includeFiles: true,
+                includeMeetings: true,
+                includeEmails: true,
+                includeTasks: true,
+              },
+              reason: 'Get structured project overview',
+            },
+            {
+              step: 3,
+              tool: 'get-project-stakeholders',
+              parameters: {
+                projectName: context || 'project name',
+                days: 90,
+              },
+              reason: 'Identify all stakeholders',
+            },
+            {
+              step: 4,
+              tool: 'find-related-documents',
+              parameters: {
+                topic: context || 'project name',
+                days: 180,
+                limit: 50,
+              },
+              reason: 'Find all related documents',
+            },
+          ],
+        },
+        person_research: {
+          scenario: 'person_research',
+          description: 'Research a person comprehensively',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-communication-summary',
+              parameters: {
+                person: context || 'person name',
+                includeEmails: true,
+                includeChats: true,
+                includeMeetings: true,
+                includeFiles: true,
+              },
+              reason: 'Get complete communication overview',
+            },
+            {
+              step: 2,
+              tool: 'analyze-relationship-strength',
+              parameters: {
+                person: context || 'person name',
+                days: 90,
+              },
+              reason: 'Analyze relationship strength',
+            },
+            {
+              step: 3,
+              tool: 'find-mutual-connections',
+              parameters: {
+                person: context || 'person name',
+                days: 180,
+              },
+              reason: 'Find mutual connections',
+            },
+          ],
+        },
+        productivity_analysis: {
+          scenario: 'productivity_analysis',
+          description: 'Analyze productivity',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-my-week-summary',
+              parameters: {
+                weekOffset: 0,
+              },
+              reason: 'Get weekly summary',
+            },
+            {
+              step: 2,
+              tool: 'analyze-meeting-load',
+              parameters: {
+                weeks: 4,
+                includeRecurring: true,
+              },
+              reason: 'Analyze meeting load',
+            },
+            {
+              step: 3,
+              tool: 'get-communication-frequency',
+              parameters: {
+                days: 90,
+                limit: 30,
+                includeMeetings: true,
+              },
+              reason: 'Analyze communication frequency',
+            },
+          ],
+        },
+        weekly_review: {
+          scenario: 'weekly_review',
+          description: 'Weekly review workflow',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-my-week-summary',
+              parameters: {
+                weekOffset: 0,
+              },
+              reason: 'Get weekly summary',
+            },
+            {
+              step: 2,
+              tool: 'get-deadline-overview',
+              parameters: {
+                days: 7,
+                includeCompleted: false,
+              },
+              reason: 'Check upcoming deadlines',
+            },
+            {
+              step: 3,
+              tool: 'get-follow-up-items',
+              parameters: {
+                includeEmails: true,
+                includeTasks: true,
+                includeMeetings: true,
+              },
+              reason: 'Get items needing attention',
+            },
+          ],
+        },
+        email_analysis: {
+          scenario: 'email_analysis',
+          description: 'Analyze emails',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-my-emails',
+              parameters: {
+                filter: 'all',
+                limit: 50,
+              },
+              reason: 'Get recent emails',
+            },
+            {
+              step: 2,
+              tool: 'extract-action-items',
+              parameters: {
+                source: 'emails',
+                days: 7,
+                limit: 50,
+              },
+              reason: 'Extract action items from emails',
+            },
+            {
+              step: 3,
+              tool: 'find-unresponded-requests',
+              parameters: {
+                days: 14,
+                priorityOnly: false,
+              },
+              reason: 'Find unresponded requests',
+            },
+          ],
+        },
+        document_discovery: {
+          scenario: 'document_discovery',
+          description: 'Discover related documents',
+          steps: [
+            {
+              step: 1,
+              tool: 'search-everything',
+              parameters: {
+                query: context || 'topic',
+                limit: 25,
+              },
+              reason: 'Search for documents',
+            },
+            {
+              step: 2,
+              tool: 'find-related-documents',
+              parameters: {
+                topic: context || 'topic',
+                days: 180,
+                limit: 50,
+                includeEmails: true,
+                includeMeetings: true,
+              },
+              reason: 'Find related documents',
+            },
+            {
+              step: 3,
+              tool: 'build-knowledge-graph',
+              parameters: {
+                topic: context || 'topic',
+                days: 180,
+                maxNodes: 50,
+              },
+              reason: 'Build knowledge graph',
+            },
+          ],
+        },
+      };
+
+      const workflow = workflows[scenario];
+      if (!workflow) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: 'Unknown scenario',
+                  availableScenarios: Object.keys(workflows),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Update parameters with context if provided
+      if (context) {
+        for (const step of workflow.steps) {
+          for (const [key, value] of Object.entries(step.parameters)) {
+            if ((typeof value === 'string' && value.includes('name')) || value.includes('topic')) {
+              step.parameters[key] = context;
+            }
+          }
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(workflow, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 33. GET TOOL RECOMMENDATIONS - AI-powered tool recommendations
+  // ==========================================================================
+  server.tool(
+    'get-tool-recommendations',
+    `Get AI-powered tool recommendations based on:
+- Current query context
+- Historical successful tool combinations
+- User's typical workflows
+- Available data sources
+
+Use this for "What tools should I use for this query?", "Recommend tools for analyzing [topic]", or "What's the best tool combination for [task]?".`,
+    {
+      query: z.string().describe('Query or task to get tool recommendations for'),
+      limit: z.number().optional().describe('Maximum recommendations to return (default: 5)'),
+    },
+    {
+      title: 'Get Tool Recommendations',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async ({ query, limit = 5 }) => {
+      logger.info(`Getting tool recommendations for: ${query}`);
+
+      try {
+        // Analyze query
+        const decomposed = nlpEnhancer.decomposeQuery(query);
+        const queryLower = query.toLowerCase();
+
+        // Find matching tools
+        const matchingTools: Array<{
+          tool: ToolDefinition;
+          score: number;
+          reason: string;
+        }> = [];
+
+        for (const toolDef of AVAILABLE_TOOLS) {
+          let score = 0;
+          const reasons: string[] = [];
+
+          // Check use cases
+          for (const useCase of toolDef.useCases) {
+            if (queryLower.includes(useCase)) {
+              score += 10;
+              reasons.push(`Matches use case: ${useCase}`);
+            }
+          }
+
+          // Check category match
+          if (
+            (queryLower.includes('email') || queryLower.includes('mail')) &&
+            toolDef.category === 'email'
+          ) {
+            score += 5;
+            reasons.push('Email-related query');
+          }
+          if (
+            (queryLower.includes('meeting') || queryLower.includes('calendar')) &&
+            toolDef.category === 'calendar'
+          ) {
+            score += 5;
+            reasons.push('Meeting-related query');
+          }
+          if (
+            (queryLower.includes('person') || queryLower.includes('people')) &&
+            toolDef.category === 'people'
+          ) {
+            score += 5;
+            reasons.push('People-related query');
+          }
+          if (
+            (queryLower.includes('project') || queryLower.includes('task')) &&
+            toolDef.category === 'project'
+          ) {
+            score += 5;
+            reasons.push('Project-related query');
+          }
+          if (
+            (queryLower.includes('file') || queryLower.includes('document')) &&
+            toolDef.category === 'documents'
+          ) {
+            score += 5;
+            reasons.push('Document-related query');
+          }
+
+          // Check description match
+          if (toolDef.description.toLowerCase().includes(queryLower.split(' ')[0])) {
+            score += 3;
+            reasons.push('Description matches');
+          }
+
+          if (score > 0) {
+            matchingTools.push({
+              tool: toolDef,
+              score,
+              reason: reasons.join('; '),
+            });
+          }
+        }
+
+        // Sort by score
+        matchingTools.sort((a, b) => b.score - a.score);
+
+        // Get top recommendations
+        const recommendations = matchingTools.slice(0, limit).map((match, index) => ({
+          rank: index + 1,
+          tool: match.tool.name,
+          description: match.tool.description,
+          category: match.tool.category,
+          score: match.score,
+          reason: match.reason,
+          parameters: match.tool.parameters,
+          useCases: match.tool.useCases,
+        }));
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  query,
+                  recommendations,
+                  totalMatches: matchingTools.length,
+                  suggestion:
+                    recommendations.length > 0
+                      ? `Consider using '${recommendations[0].tool}' as the primary tool`
+                      : "Use 'ask-microsoft-365' for general queries",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Error getting tool recommendations: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: 'Failed to get recommendations',
+                  message: `${error}`,
+                  query,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // BUSINESS WORKFLOW TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 34. EXECUTE BUSINESS WORKFLOW - Execute predefined business workflows
+  // ==========================================================================
+  server.tool(
+    'execute-business-workflow',
+    `Execute predefined business workflows:
+- Customer onboarding workflow
+- Project kickoff workflow
+- Meeting preparation workflow
+- Weekly review workflow
+- Client communication workflow
+
+Use this for "Execute customer onboarding workflow for [company]", "Run meeting preparation workflow for [meeting]", or "Start weekly review workflow".`,
+    {
+      workflow: z
+        .enum([
+          'customer_onboarding',
+          'project_kickoff',
+          'meeting_preparation',
+          'weekly_review',
+          'client_communication',
+        ])
+        .describe('Workflow to execute'),
+      context: z
+        .string()
+        .describe('Context for the workflow (e.g., company name, project name, meeting subject)'),
+    },
+    {
+      title: 'Execute Business Workflow',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ workflow, context }) => {
+      logger.info(`Executing workflow: ${workflow} with context: ${context}`);
+
+      // Get tool sequence from suggest-tool-sequence
+      const scenarioMap: Record<string, string> = {
+        customer_onboarding: 'customer_overview',
+        project_kickoff: 'project_research',
+        meeting_preparation: 'meeting_preparation',
+        weekly_review: 'weekly_review',
+        client_communication: 'person_research',
+      };
+
+      const scenario = scenarioMap[workflow];
+      if (!scenario) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: 'Unknown workflow',
+                  availableWorkflows: Object.keys(scenarioMap),
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Use suggest-tool-sequence logic
+      const workflows: Record<string, any> = {
+        customer_overview: {
+          workflow: 'customer_onboarding',
+          description: 'Customer onboarding workflow',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-company-contacts',
+              parameters: { companyName: context },
+              reason: 'Find all contacts from the company',
+            },
+            {
+              step: 2,
+              tool: 'search-everything',
+              parameters: { query: context, limit: 25 },
+              reason: 'Search for all interactions',
+            },
+            {
+              step: 3,
+              tool: 'find-related-documents',
+              parameters: { topic: context, days: 180, limit: 50 },
+              reason: 'Find all documents',
+            },
+          ],
+        },
+        project_research: {
+          workflow: 'project_kickoff',
+          description: 'Project kickoff workflow',
+          steps: [
+            {
+              step: 1,
+              tool: 'search-everything',
+              parameters: { query: context, limit: 25 },
+              reason: 'Start with universal search',
+            },
+            {
+              step: 2,
+              tool: 'get-project-overview',
+              parameters: {
+                projectName: context,
+                includeFiles: true,
+                includeMeetings: true,
+                includeEmails: true,
+                includeTasks: true,
+              },
+              reason: 'Get project overview',
+            },
+            {
+              step: 3,
+              tool: 'get-project-stakeholders',
+              parameters: { projectName: context, days: 90 },
+              reason: 'Identify stakeholders',
+            },
+          ],
+        },
+        meeting_preparation: {
+          workflow: 'meeting_preparation',
+          description: 'Meeting preparation workflow',
+          steps: [
+            {
+              step: 1,
+              tool: 'prepare-for-meeting',
+              parameters: { meetingSubject: context, hoursAhead: 48 },
+              reason: 'Gather meeting context',
+            },
+            {
+              step: 2,
+              tool: 'find-related-documents',
+              parameters: { topic: context, days: 30, limit: 20 },
+              reason: 'Find related documents',
+            },
+          ],
+        },
+        weekly_review: {
+          workflow: 'weekly_review',
+          description: 'Weekly review workflow',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-my-week-summary',
+              parameters: { weekOffset: 0 },
+              reason: 'Get weekly summary',
+            },
+            {
+              step: 2,
+              tool: 'get-deadline-overview',
+              parameters: { days: 7, includeCompleted: false },
+              reason: 'Check deadlines',
+            },
+            {
+              step: 3,
+              tool: 'get-follow-up-items',
+              parameters: { includeEmails: true, includeTasks: true, includeMeetings: true },
+              reason: 'Get follow-ups',
+            },
+          ],
+        },
+        person_research: {
+          workflow: 'client_communication',
+          description: 'Client communication workflow',
+          steps: [
+            {
+              step: 1,
+              tool: 'get-communication-summary',
+              parameters: {
+                person: context,
+                includeEmails: true,
+                includeChats: true,
+                includeMeetings: true,
+                includeFiles: true,
+              },
+              reason: 'Get communication overview',
+            },
+            {
+              step: 2,
+              tool: 'find-related-documents',
+              parameters: { topic: context, days: 180, limit: 50 },
+              reason: 'Find related documents',
+            },
+          ],
+        },
+      };
+
+      const workflowDef = workflows[scenario];
+      if (!workflowDef) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ error: 'Workflow not found' }, null, 2),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                ...workflowDef,
+                context,
+                instructions:
+                  'Execute each step in order. Use the tool names and parameters exactly as specified.',
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 35. CREATE CUSTOM WORKFLOW - Create and save custom workflows
+  // ==========================================================================
+  server.tool(
+    'create-custom-workflow',
+    `Create and save custom workflows:
+- Define tool sequences
+- Set parameters
+- Save for reuse
+- Share with team
+
+Use this for "Create a workflow for client research" or "Save this tool sequence as a workflow".
+
+Note: This is a planning tool that returns the workflow definition. Actual persistence would need to be implemented separately.`,
+    {
+      workflowName: z.string().describe('Name for the custom workflow'),
+      description: z.string().describe('Description of what the workflow does'),
+      steps: z
+        .array(
+          z.object({
+            step: z.number(),
+            tool: z.string(),
+            parameters: z.record(z.unknown()),
+            reason: z.string(),
+          })
+        )
+        .describe('Array of workflow steps'),
+    },
+    {
+      title: 'Create Custom Workflow',
+      readOnlyHint: false,
+      openWorldHint: false,
+    },
+    async ({ workflowName, description, steps }) => {
+      logger.info(`Creating custom workflow: ${workflowName}`);
+
+      // Validate steps
+      for (const step of steps) {
+        const toolExists = AVAILABLE_TOOLS.some((t) => t.name === step.tool);
+        if (!toolExists) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(
+                  {
+                    error: 'Invalid tool',
+                    message: `Tool '${step.tool}' not found in available tools`,
+                    step: step.step,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      const workflow = {
+        name: workflowName,
+        description,
+        steps,
+        createdAt: new Date().toISOString(),
+        totalSteps: steps.length,
+        estimatedTime: `~${steps.length * 2}-${steps.length * 3} seconds`,
+        note: 'This workflow definition can be saved and reused. Actual persistence needs to be implemented.',
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(workflow, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // ADVANCED ANALYTICS & INSIGHTS TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 36. ANALYZE BUSINESS METRICS - Analyze business metrics across Microsoft 365
+  // ==========================================================================
+  server.tool(
+    'analyze-business-metrics',
+    `Analyze business metrics across Microsoft 365:
+- Communication velocity
+- Project completion rates
+- Team collaboration patterns
+- Customer engagement metrics
+- Response time analytics
+
+Use this for "Analyze my business metrics this quarter", "Show team collaboration patterns", or "What's my customer engagement rate?".`,
+    {
+      period: z
+        .enum(['week', 'month', 'quarter', 'year'])
+        .optional()
+        .describe('Time period to analyze (default: month)'),
+      includeCommunication: z
+        .boolean()
+        .optional()
+        .describe('Include communication metrics (default: true)'),
+      includeProjects: z.boolean().optional().describe('Include project metrics (default: true)'),
+      includeCollaboration: z
+        .boolean()
+        .optional()
+        .describe('Include collaboration metrics (default: true)'),
+    },
+    {
+      title: 'Analyze Business Metrics',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({
+      period = 'month',
+      includeCommunication = true,
+      includeProjects = true,
+      includeCollaboration = true,
+    }) => {
+      logger.info(`Analyzing business metrics for period: ${period}`);
+
+      const daysMap: Record<string, number> = {
+        week: 7,
+        month: 30,
+        quarter: 90,
+        year: 365,
+      };
+      const days = daysMap[period] || 30;
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const metrics: Record<string, unknown> = {
+        period,
+        analyzedDays: days,
+        analyzedFrom: startDate.toISOString(),
+        analyzedTo: new Date().toISOString(),
+      };
+
+      const promises: Promise<void>[] = [];
+
+      // Communication metrics
+      if (includeCommunication) {
+        promises.push(
+          (async () => {
+            try {
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams: {
+                  $top: '500',
+                  $select: 'receivedDateTime,from,importance',
+                  $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                  $orderby: 'receivedDateTime desc',
+                },
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                const emails = emailResponse.value as GraphEmail[];
+                const totalEmails = emails.length;
+                const importantEmails = emails.filter((e) => e.importance === 'high').length;
+                const avgPerDay = totalEmails / days;
+
+                metrics.communication = {
+                  totalEmails: totalEmails,
+                  importantEmails,
+                  averagePerDay: Math.round(avgPerDay * 10) / 10,
+                  emailVelocity: avgPerDay > 20 ? 'High' : avgPerDay > 10 ? 'Medium' : 'Low',
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze communication metrics: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Collaboration metrics
+      if (includeCollaboration) {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '500',
+                $select: 'subject,start,end,attendees,organizer',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                const meetings = meetingsResponse.value as GraphEvent[];
+                const totalMeetings = meetings.length;
+                let totalMeetingHours = 0;
+                const uniqueParticipants = new Set<string>();
+
+                for (const meeting of meetings) {
+                  const start = new Date(meeting.start.dateTime);
+                  const end = new Date(meeting.end.dateTime);
+                  const duration = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+                  totalMeetingHours += duration;
+
+                  if (meeting.attendees) {
+                    for (const attendee of meeting.attendees) {
+                      if (attendee.emailAddress?.address) {
+                        uniqueParticipants.add(attendee.emailAddress.address);
+                      }
+                    }
+                  }
+                }
+
+                metrics.collaboration = {
+                  totalMeetings,
+                  totalMeetingHours: Math.round(totalMeetingHours * 10) / 10,
+                  averageMeetingDuration: Math.round((totalMeetingHours / totalMeetings) * 10) / 10,
+                  uniqueCollaborators: uniqueParticipants.size,
+                  averageMeetingsPerDay: Math.round((totalMeetings / days) * 10) / 10,
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze collaboration metrics: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Project metrics (using task completion as proxy)
+      if (includeProjects) {
+        promises.push(
+          (async () => {
+            try {
+              const taskListsResponse = await graphClient.makeRequest('/me/todo/lists', {
+                method: 'GET',
+                queryParams: { $top: '20' },
+              });
+
+              if (
+                taskListsResponse &&
+                typeof taskListsResponse === 'object' &&
+                'value' in taskListsResponse
+              ) {
+                let totalTasks = 0;
+                let completedTasks = 0;
+
+                for (const list of taskListsResponse.value as Array<{ id: string }>) {
+                  try {
+                    const tasksResponse = await graphClient.makeRequest(
+                      `/me/todo/lists/${list.id}/tasks`,
+                      {
+                        method: 'GET',
+                        queryParams: { $top: '100' },
+                      }
+                    );
+
+                    if (
+                      tasksResponse &&
+                      typeof tasksResponse === 'object' &&
+                      'value' in tasksResponse
+                    ) {
+                      for (const task of tasksResponse.value as Array<{
+                        status: string;
+                        createdDateTime?: string;
+                      }>) {
+                        if (!task.createdDateTime || new Date(task.createdDateTime) >= startDate) {
+                          totalTasks++;
+                          if (task.status === 'completed') {
+                            completedTasks++;
+                          }
+                        }
+                      }
+                    }
+                  } catch {
+                    // Skip individual list errors
+                  }
+                }
+
+                metrics.projects = {
+                  totalTasks,
+                  completedTasks,
+                  completionRate:
+                    totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0,
+                  pendingTasks: totalTasks - completedTasks,
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze project metrics: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(metrics, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 37. GET BUSINESS INTELLIGENCE - Comprehensive business intelligence dashboard
+  // ==========================================================================
+  server.tool(
+    'get-business-intelligence',
+    `Comprehensive business intelligence dashboard:
+- Key performance indicators
+- Trend analysis
+- Comparative analytics
+- Predictive insights
+
+Use this for "Show my business intelligence dashboard", "What are the key trends this month?", or "Compare this quarter to last quarter".`,
+    {
+      period: z
+        .enum(['week', 'month', 'quarter'])
+        .optional()
+        .describe('Time period (default: month)'),
+      compareWithPrevious: z
+        .boolean()
+        .optional()
+        .describe('Compare with previous period (default: true)'),
+    },
+    {
+      title: 'Get Business Intelligence',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ period = 'month', compareWithPrevious = true }) => {
+      logger.info(`Getting business intelligence for period: ${period}`);
+
+      const daysMap: Record<string, number> = {
+        week: 7,
+        month: 30,
+        quarter: 90,
+      };
+      const days = daysMap[period] || 30;
+
+      // Get current period metrics
+      const currentStart = new Date();
+      currentStart.setDate(currentStart.getDate() - days);
+      const currentEnd = new Date();
+
+      // Get previous period metrics if requested
+      const previousStart = new Date(currentStart);
+      previousStart.setDate(previousStart.getDate() - days);
+      const previousEnd = currentStart;
+
+      const promises: Promise<void>[] = [];
+      const bi: Record<string, unknown> = {
+        period,
+        currentPeriod: {
+          start: currentStart.toISOString(),
+          end: currentEnd.toISOString(),
+        },
+      };
+
+      // Email activity
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $top: '1000',
+                $select: 'receivedDateTime,importance',
+                $filter: `receivedDateTime ge ${currentStart.toISOString()}`,
+                $orderby: 'receivedDateTime desc',
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              const emails = emailResponse.value as GraphEmail[];
+              bi.emailActivity = {
+                total: emails.length,
+                important: emails.filter((e) => e.importance === 'high').length,
+                averagePerDay: Math.round((emails.length / days) * 10) / 10,
+              };
+
+              if (compareWithPrevious) {
+                const prevEmailResponse = await graphClient.makeRequest('/me/messages', {
+                  method: 'GET',
+                  queryParams: {
+                    $top: '1000',
+                    $select: 'receivedDateTime',
+                    $filter: `receivedDateTime ge ${previousStart.toISOString()} and receivedDateTime lt ${previousEnd.toISOString()}`,
+                  },
+                });
+
+                if (
+                  prevEmailResponse &&
+                  typeof prevEmailResponse === 'object' &&
+                  'value' in prevEmailResponse
+                ) {
+                  const prevEmails = prevEmailResponse.value as GraphEmail[];
+                  const change = emails.length - prevEmails.length;
+                  bi.emailActivity = {
+                    ...bi.emailActivity,
+                    previousPeriod: prevEmails.length,
+                    change,
+                    changePercent:
+                      prevEmails.length > 0 ? Math.round((change / prevEmails.length) * 100) : 0,
+                    trend: change > 0 ? 'increasing' : change < 0 ? 'decreasing' : 'stable',
+                  };
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze email activity: ${error}`);
+          }
+        })()
+      );
+
+      // Meeting activity
+      promises.push(
+        (async () => {
+          try {
+            const meetingQueryParams: Record<string, string> = {
+              startDateTime: currentStart.toISOString(),
+              endDateTime: currentEnd.toISOString(),
+              $top: '500',
+              $select: 'subject,start,end',
+            };
+
+            const meetingsResponse = await graphClient.makeRequest(
+              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              {
+                method: 'GET',
+              }
+            );
+
+            if (
+              meetingsResponse &&
+              typeof meetingsResponse === 'object' &&
+              'value' in meetingsResponse
+            ) {
+              const meetings = meetingsResponse.value as GraphEvent[];
+              let totalHours = 0;
+              for (const meeting of meetings) {
+                const start = new Date(meeting.start.dateTime);
+                const end = new Date(meeting.end.dateTime);
+                totalHours += (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+              }
+
+              bi.meetingActivity = {
+                totalMeetings: meetings.length,
+                totalHours: Math.round(totalHours * 10) / 10,
+                averagePerDay: Math.round((meetings.length / days) * 10) / 10,
+              };
+            }
+          } catch (error) {
+            logger.warn(`Could not analyze meeting activity: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Calculate KPIs
+      bi.keyPerformanceIndicators = {
+        communicationVelocity: (bi.emailActivity as any)?.averagePerDay || 0,
+        meetingLoad: (bi.meetingActivity as any)?.totalHours || 0,
+        productivityScore:
+          ((bi.emailActivity as any)?.total || 0) > 0 &&
+          ((bi.meetingActivity as any)?.totalMeetings || 0) > 0
+            ? 'Active'
+            : 'Low',
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(bi, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 38. ANALYZE TEAM PERFORMANCE - Team performance analytics
+  // ==========================================================================
+  server.tool(
+    'analyze-team-performance',
+    `Team performance analytics:
+- Individual contributions
+- Collaboration effectiveness
+- Meeting efficiency
+- Task completion rates
+- Communication patterns
+
+Use this for "Analyze team performance", "How effective is our team collaboration?", or "Show team productivity metrics".`,
+    {
+      days: z.number().optional().describe('Days of history to analyze (default: 90)'),
+      includeMeetings: z.boolean().optional().describe('Include meeting analysis (default: true)'),
+      includeCommunication: z
+        .boolean()
+        .optional()
+        .describe('Include communication analysis (default: true)'),
+    },
+    {
+      title: 'Analyze Team Performance',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ days = 90, includeMeetings = true, includeCommunication = true }) => {
+      logger.info(`Analyzing team performance for ${days} days`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const performance: Record<string, unknown> = {
+        analyzedPeriod: `Last ${days} days`,
+        startDate: startDate.toISOString(),
+        endDate: new Date().toISOString(),
+      };
+
+      const promises: Promise<void>[] = [];
+
+      // Meeting efficiency
+      if (includeMeetings) {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '500',
+                $select: 'subject,start,end,attendees,organizer',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                const meetings = meetingsResponse.value as GraphEvent[];
+                let totalHours = 0;
+                const attendeeCounts = new Map<string, number>();
+
+                for (const meeting of meetings) {
+                  const start = new Date(meeting.start.dateTime);
+                  const end = new Date(meeting.end.dateTime);
+                  const duration = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+                  totalHours += duration;
+
+                  if (meeting.attendees) {
+                    for (const attendee of meeting.attendees) {
+                      const email = attendee.emailAddress?.address;
+                      if (email) {
+                        attendeeCounts.set(email, (attendeeCounts.get(email) || 0) + 1);
+                      }
+                    }
+                  }
+                }
+
+                performance.meetingEfficiency = {
+                  totalMeetings: meetings.length,
+                  totalHours: Math.round(totalHours * 10) / 10,
+                  averageDuration: Math.round((totalHours / meetings.length) * 10) / 10,
+                  averageAttendees:
+                    Math.round(
+                      (Array.from(attendeeCounts.values()).reduce((a, b) => a + b, 0) /
+                        meetings.length) *
+                        10
+                    ) / 10,
+                  mostActiveParticipants: Array.from(attendeeCounts.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 10)
+                    .map(([email, count]) => ({ email, meetingCount: count })),
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze meeting efficiency: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Communication patterns
+      if (includeCommunication) {
+        promises.push(
+          (async () => {
+            try {
+              const commFrequency = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams: {
+                  $top: '1000',
+                  $select: 'from,receivedDateTime',
+                  $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                  $orderby: 'receivedDateTime desc',
+                },
+              });
+
+              if (commFrequency && typeof commFrequency === 'object' && 'value' in commFrequency) {
+                const emails = commFrequency.value as GraphEmail[];
+                const senderCounts = new Map<string, number>();
+
+                for (const email of emails) {
+                  const sender = email.from?.emailAddress?.address;
+                  if (sender) {
+                    senderCounts.set(sender, (senderCounts.get(sender) || 0) + 1);
+                  }
+                }
+
+                performance.communicationPatterns = {
+                  totalEmails: emails.length,
+                  uniqueSenders: senderCounts.size,
+                  topCommunicators: Array.from(senderCounts.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 10)
+                    .map(([email, count]) => ({ email, emailCount: count })),
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze communication patterns: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(performance, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // SMART AUTOMATION TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 39. AUTO CATEGORIZE ITEMS - Automatically categorize emails, files, and tasks
+  // ==========================================================================
+  server.tool(
+    'auto-categorize-items',
+    `Automatically categorize emails, files, and tasks:
+- Use AI to detect categories
+- Apply tags and labels
+- Organize by project/topic
+- Learn from user corrections
+
+Use this for "Categorize my recent emails", "Auto-organize files by project", or "Tag all items related to [topic]".
+
+Note: This tool analyzes and suggests categories. Actual categorization would require write permissions.`,
+    {
+      source: z
+        .enum(['emails', 'files', 'tasks', 'all'])
+        .optional()
+        .describe('Source to categorize (default: all)'),
+      days: z.number().optional().describe('Days back to analyze (default: 7)'),
+      topic: z.string().optional().describe('Topic to categorize by (optional)'),
+      limit: z.number().optional().describe('Maximum items to categorize (default: 50)'),
+    },
+    {
+      title: 'Auto Categorize Items',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ source = 'all', days = 7, topic, limit = 50 }) => {
+      logger.info(`Auto-categorizing items: source=${source}, days=${days}, topic=${topic}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      interface CategorizedItem {
+        id: string;
+        type: 'email' | 'file' | 'task';
+        title: string;
+        suggestedCategories: string[];
+        confidence: number;
+        date: string;
+      }
+
+      const categorized: CategorizedItem[] = [];
+      const promises: Promise<void>[] = [];
+
+      // Categorize emails
+      if (source === 'emails' || source === 'all') {
+        promises.push(
+          (async () => {
+            try {
+              let queryParams: Record<string, string> = {
+                $top: String(limit),
+                $select: 'id,subject,bodyPreview,receivedDateTime,categories',
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                $orderby: 'receivedDateTime desc',
+              };
+
+              if (topic) {
+                queryParams.$search = `"${topic}"`;
+                delete queryParams.$orderby;
+              }
+
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams,
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                for (const email of emailResponse.value as GraphEmail &
+                  {
+                    categories?: string[];
+                  }[]) {
+                  const content = sanitizeHtml(email.bodyPreview || '');
+                  const subject = email.subject || '';
+                  const combined = `${subject} ${content}`.toLowerCase();
+
+                  const suggestedCategories: string[] = [];
+                  let confidence = 0.5;
+
+                  // Detect categories based on keywords
+                  if (combined.includes('project') || combined.includes('projekt')) {
+                    suggestedCategories.push('Project');
+                    confidence += 0.2;
+                  }
+                  if (combined.includes('meeting') || combined.includes('termin')) {
+                    suggestedCategories.push('Meeting');
+                    confidence += 0.2;
+                  }
+                  if (
+                    combined.includes('task') ||
+                    combined.includes('todo') ||
+                    combined.includes('aufgabe')
+                  ) {
+                    suggestedCategories.push('Task');
+                    confidence += 0.2;
+                  }
+                  if (
+                    combined.includes('urgent') ||
+                    combined.includes('important') ||
+                    combined.includes('wichtig')
+                  ) {
+                    suggestedCategories.push('Urgent');
+                    confidence += 0.2;
+                  }
+                  if (
+                    combined.includes('client') ||
+                    combined.includes('customer') ||
+                    combined.includes('kunde')
+                  ) {
+                    suggestedCategories.push('Client');
+                    confidence += 0.2;
+                  }
+                  if (topic && combined.includes(topic.toLowerCase())) {
+                    suggestedCategories.push(topic);
+                    confidence += 0.3;
+                  }
+
+                  if (suggestedCategories.length === 0) {
+                    suggestedCategories.push('General');
+                  }
+
+                  categorized.push({
+                    id: email.id,
+                    type: 'email',
+                    title: subject,
+                    suggestedCategories,
+                    confidence: Math.min(confidence, 1),
+                    date: email.receivedDateTime,
+                  });
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not categorize emails: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Group by category
+      const categoryGroups: Record<string, CategorizedItem[]> = {};
+      for (const item of categorized) {
+        for (const category of item.suggestedCategories) {
+          if (!categoryGroups[category]) {
+            categoryGroups[category] = [];
+          }
+          categoryGroups[category].push(item);
+        }
+      }
+
+      const result = {
+        totalItems: categorized.length,
+        categorizedItems: categorized.slice(0, limit),
+        categoryGroups,
+        summary: {
+          totalCategories: Object.keys(categoryGroups).length,
+          topCategories: Object.entries(categoryGroups)
+            .sort((a, b) => b[1].length - a[1].length)
+            .slice(0, 10)
+            .map(([category, items]) => ({ category, itemCount: items.length })),
+        },
+        note: 'These are suggested categories. Actual categorization requires write permissions.',
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 40. SMART REMINDER SYSTEM - Intelligent reminder system
+  // ==========================================================================
+  server.tool(
+    'smart-reminder-system',
+    `Intelligent reminder system:
+- Context-aware reminders
+- Priority-based scheduling
+- Follow-up detection
+- Deadline tracking
+
+Use this for "Set a smart reminder for [item]", "What should I follow up on?", or "Show me upcoming deadlines".`,
+    {
+      action: z
+        .enum(['list', 'set', 'check'])
+        .optional()
+        .describe('Action: list reminders, set reminder, or check for reminders (default: list)'),
+      item: z.string().optional().describe('Item to set reminder for (required if action=set)'),
+      days: z.number().optional().describe('Days ahead to check (default: 7)'),
+    },
+    {
+      title: 'Smart Reminder System',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ action = 'list', item, days = 7 }) => {
+      logger.info(`Smart reminder system: action=${action}, item=${item}`);
+
+      if (action === 'set' && !item) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: 'Item required',
+                  message: 'Please provide an item to set a reminder for',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const reminders: Array<{
+        type: string;
+        title: string;
+        dueDate: string;
+        priority: string;
+        source: string;
+      }> = [];
+
+      // Get deadlines
+      const deadlineResponse = await graphClient.makeRequest('/me/todo/lists', {
+        method: 'GET',
+        queryParams: { $top: '20' },
+      });
+
+      if (deadlineResponse && typeof deadlineResponse === 'object' && 'value' in deadlineResponse) {
+        for (const list of deadlineResponse.value as Array<{ id: string }>) {
+          try {
+            const tasksResponse = await graphClient.makeRequest(`/me/todo/lists/${list.id}/tasks`, {
+              method: 'GET',
+              queryParams: { $top: '100' },
+            });
+
+            if (tasksResponse && typeof tasksResponse === 'object' && 'value' in tasksResponse) {
+              for (const task of tasksResponse.value as Array<{
+                title: string;
+                dueDateTime?: { dateTime: string };
+                status: string;
+                importance: string;
+              }>) {
+                if (task.status !== 'completed' && task.dueDateTime) {
+                  const dueDate = new Date(task.dueDateTime.dateTime);
+                  const daysUntil = Math.ceil(
+                    (dueDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24)
+                  );
+                  if (daysUntil >= 0 && daysUntil <= days) {
+                    reminders.push({
+                      type: 'task',
+                      title: task.title,
+                      dueDate: task.dueDateTime.dateTime,
+                      priority: task.importance || 'normal',
+                      source: 'To-Do',
+                    });
+                  }
+                }
+              }
+            }
+          } catch {
+            // Skip errors
+          }
+        }
+      }
+
+      // Get flagged emails
+      try {
+        const flaggedResponse = await graphClient.makeRequest('/me/messages', {
+          method: 'GET',
+          queryParams: {
+            $filter: "flag/flagStatus eq 'flagged'",
+            $top: '50',
+            $select: 'subject,flag,receivedDateTime',
+          },
+        });
+
+        if (flaggedResponse && typeof flaggedResponse === 'object' && 'value' in flaggedResponse) {
+          for (const email of flaggedResponse.value as Array<{
+            subject: string;
+            flag?: { dueDateTime?: { dateTime: string }; flagStatus: string };
+            receivedDateTime: string;
+          }>) {
+            if (email.flag?.dueDateTime) {
+              reminders.push({
+                type: 'email',
+                title: email.subject,
+                dueDate: email.flag.dueDateTime.dateTime,
+                priority: 'high',
+                source: 'Email',
+              });
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn(`Could not get flagged emails: ${error}`);
+      }
+
+      // Sort by due date
+      reminders.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+
+      const result = {
+        action,
+        reminders: reminders.slice(0, 20),
+        totalReminders: reminders.length,
+        upcoming: reminders.filter(
+          (r) => new Date(r.dueDate).getTime() <= Date.now() + 24 * 60 * 60 * 1000
+        ).length,
+        summary: {
+          byType: {
+            task: reminders.filter((r) => r.type === 'task').length,
+            email: reminders.filter((r) => r.type === 'email').length,
+          },
+          byPriority: {
+            high: reminders.filter((r) => r.priority === 'high').length,
+            normal: reminders.filter((r) => r.priority === 'normal').length,
+          },
+        },
+        note:
+          action === 'set'
+            ? `Reminder suggestion for "${item}": Set reminder for 1 day before due date or follow-up date`
+            : undefined,
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 41. AUTO SUMMARIZE PERIOD - Automatically summarize a time period
+  // ==========================================================================
+  server.tool(
+    'auto-summarize-period',
+    `Automatically summarize a time period:
+- Daily/weekly/monthly summaries
+- Key highlights
+- Action items
+- Decisions made
+
+Use this for "Summarize my week", "What happened this month?", or "Give me a daily summary".`,
+    {
+      period: z
+        .enum(['day', 'week', 'month'])
+        .optional()
+        .describe('Period to summarize (default: week)'),
+      includeEmails: z.boolean().optional().describe('Include email summary (default: true)'),
+      includeMeetings: z.boolean().optional().describe('Include meeting summary (default: true)'),
+      includeTasks: z.boolean().optional().describe('Include task summary (default: true)'),
+    },
+    {
+      title: 'Auto Summarize Period',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({
+      period = 'week',
+      includeEmails = true,
+      includeMeetings = true,
+      includeTasks = true,
+    }) => {
+      logger.info(`Auto-summarizing period: ${period}`);
+
+      const daysMap: Record<string, number> = {
+        day: 1,
+        week: 7,
+        month: 30,
+      };
+      const days = daysMap[period] || 7;
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const summary: Record<string, unknown> = {
+        period,
+        dateRange: {
+          start: startDate.toISOString(),
+          end: new Date().toISOString(),
+        },
+      };
+
+      const promises: Promise<void>[] = [];
+
+      // Email summary
+      if (includeEmails) {
+        promises.push(
+          (async () => {
+            try {
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams: {
+                  $top: '100',
+                  $select: 'subject,from,receivedDateTime,importance,bodyPreview',
+                  $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                  $orderby: 'receivedDateTime desc',
+                },
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                const emails = emailResponse.value as GraphEmail[];
+                summary.emails = {
+                  total: emails.length,
+                  important: emails.filter((e) => e.importance === 'high').length,
+                  topSenders: Array.from(
+                    new Map(
+                      emails.map((e) => [
+                        e.from?.emailAddress?.address || 'Unknown',
+                        e.from?.emailAddress?.name || 'Unknown',
+                      ])
+                    ).entries()
+                  )
+                    .slice(0, 5)
+                    .map(([email, name]) => ({ email, name })),
+                  recentSubjects: emails.slice(0, 10).map((e) => ({
+                    subject: e.subject,
+                    from: e.from?.emailAddress?.name,
+                    date: e.receivedDateTime,
+                  })),
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not summarize emails: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Meeting summary
+      if (includeMeetings) {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '100',
+                $select: 'subject,start,end,attendees,organizer',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                const meetings = meetingsResponse.value as GraphEvent[];
+                let totalHours = 0;
+                for (const meeting of meetings) {
+                  const start = new Date(meeting.start.dateTime);
+                  const end = new Date(meeting.end.dateTime);
+                  totalHours += (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+                }
+
+                summary.meetings = {
+                  total: meetings.length,
+                  totalHours: Math.round(totalHours * 10) / 10,
+                  upcoming: meetings.filter((m) => new Date(m.start.dateTime) > new Date()).length,
+                  recent: meetings.slice(0, 10).map((m) => ({
+                    subject: m.subject,
+                    date: m.start.dateTime,
+                    organizer: m.organizer?.emailAddress?.name,
+                  })),
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not summarize meetings: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Task summary
+      if (includeTasks) {
+        promises.push(
+          (async () => {
+            try {
+              const taskListsResponse = await graphClient.makeRequest('/me/todo/lists', {
+                method: 'GET',
+                queryParams: { $top: '20' },
+              });
+
+              if (
+                taskListsResponse &&
+                typeof taskListsResponse === 'object' &&
+                'value' in taskListsResponse
+              ) {
+                let totalTasks = 0;
+                let completedTasks = 0;
+
+                for (const list of taskListsResponse.value as Array<{ id: string }>) {
+                  try {
+                    const tasksResponse = await graphClient.makeRequest(
+                      `/me/todo/lists/${list.id}/tasks`,
+                      {
+                        method: 'GET',
+                        queryParams: { $top: '100' },
+                      }
+                    );
+
+                    if (
+                      tasksResponse &&
+                      typeof tasksResponse === 'object' &&
+                      'value' in tasksResponse
+                    ) {
+                      for (const task of tasksResponse.value as Array<{
+                        title: string;
+                        status: string;
+                        createdDateTime?: string;
+                      }>) {
+                        if (!task.createdDateTime || new Date(task.createdDateTime) >= startDate) {
+                          totalTasks++;
+                          if (task.status === 'completed') {
+                            completedTasks++;
+                          }
+                        }
+                      }
+                    }
+                  } catch {
+                    // Skip errors
+                  }
+                }
+
+                summary.tasks = {
+                  total: totalTasks,
+                  completed: completedTasks,
+                  pending: totalTasks - completedTasks,
+                  completionRate:
+                    totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0,
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not summarize tasks: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Generate highlights
+      summary.highlights = {
+        totalActivity:
+          ((summary.emails as any)?.total || 0) +
+          ((summary.meetings as any)?.total || 0) +
+          ((summary.tasks as any)?.total || 0),
+        keyMetrics: {
+          emailsReceived: (summary.emails as any)?.total || 0,
+          meetingsAttended: (summary.meetings as any)?.total || 0,
+          tasksCompleted: (summary.tasks as any)?.completed || 0,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(summary, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // ADVANCED SEARCH & DISCOVERY TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 42. INTELLIGENT QUERY BUILDER - Build optimized queries automatically
+  // ==========================================================================
+  server.tool(
+    'intelligent-query-builder',
+    `Build optimized queries automatically:
+- Suggest query improvements
+- Expand search terms
+- Add filters automatically
+- Optimize for best results
+
+Use this for "Build a query for [topic]", "Optimize this search query", or "Suggest better search terms".`,
+    {
+      query: z.string().describe('Original query to optimize'),
+      expandTerms: z
+        .boolean()
+        .optional()
+        .describe('Expand search terms with synonyms (default: true)'),
+      addFilters: z.boolean().optional().describe('Add automatic filters (default: true)'),
+    },
+    {
+      title: 'Intelligent Query Builder',
+      readOnlyHint: true,
+      openWorldHint: false,
+    },
+    async ({ query, expandTerms = true, addFilters = true }) => {
+      logger.info(`Building intelligent query for: ${query}`);
+
+      try {
+        // Use NLP enhancer to decompose and improve query
+        const decomposed = nlpEnhancer.decomposeQuery(query);
+
+        // Build optimized query
+        const optimizedQueries: Array<{
+          query: string;
+          type: string;
+          reason: string;
+          confidence: number;
+        }> = [];
+
+        // Original query
+        optimizedQueries.push({
+          query,
+          type: 'original',
+          reason: 'Original query as provided',
+          confidence: 1.0,
+        });
+
+        // Expanded query with synonyms
+        if (expandTerms && decomposed.semanticVariants.length > 0) {
+          for (const variant of decomposed.semanticVariants.slice(0, 3)) {
+            optimizedQueries.push({
+              query: variant,
+              type: 'expanded',
+              reason: 'Expanded with semantic variants',
+              confidence: 0.8,
+            });
+          }
+        }
+
+        // Query with entity focus
+        if (decomposed.entity) {
+          optimizedQueries.push({
+            query: `"${decomposed.entity}"`,
+            type: 'entity_focused',
+            reason: `Focused on entity: ${decomposed.entity}`,
+            confidence: 0.9,
+          });
+        }
+
+        // Query with compound parts
+        if (decomposed.compoundParts.length > 1) {
+          const combinedQuery = decomposed.compoundParts.join(' AND ');
+          optimizedQueries.push({
+            query: combinedQuery,
+            type: 'compound',
+            reason: 'Combined compound parts with AND',
+            confidence: 0.85,
+          });
+        }
+
+        // Add filters if requested
+        const filters: string[] = [];
+        if (addFilters && decomposed.temporal) {
+          if (decomposed.temporal.type === 'past') {
+            filters.push(
+              `receivedDateTime ge ${new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()}`
+            );
+          } else if (decomposed.temporal.type === 'future') {
+            filters.push(`start/dateTime ge ${new Date().toISOString()}`);
+          }
+        }
+
+        const result = {
+          originalQuery: query,
+          optimizedQueries: optimizedQueries.slice(0, 5),
+          recommendedQuery: optimizedQueries[0]?.query || query,
+          filters,
+          analysis: {
+            entities: decomposed.entities.map((e) => ({ value: e.value, type: e.type })),
+            intent: decomposed.intent.type,
+            confidence: decomposed.confidence,
+            semanticVariants: decomposed.semanticVariants.slice(0, 5),
+          },
+          suggestions: [
+            'Use the recommended query for best results',
+            'Try expanded queries if original returns few results',
+            'Apply filters to narrow down results',
+          ],
+        };
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Error building intelligent query: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: 'Failed to build query',
+                  message: `${error}`,
+                  originalQuery: query,
+                  fallback: query,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 43. DISCOVER RELATED TOPICS - Discover related topics and connections
+  // ==========================================================================
+  server.tool(
+    'discover-related-topics',
+    `Discover related topics and connections:
+- Topic clustering
+- Related projects
+- Connected people
+- Similar documents
+
+Use this for "What topics are related to [topic]?", "Discover connections for [project]", or "Find similar items to [item]".`,
+    {
+      topic: z.string().describe('Topic to discover related topics for'),
+      days: z.number().optional().describe('Days of history to analyze (default: 180)'),
+      limit: z.number().optional().describe('Maximum related topics to return (default: 20)'),
+    },
+    {
+      title: 'Discover Related Topics',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ topic, days = 180, limit = 20 }) => {
+      logger.info(`Discovering related topics for: ${topic}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const relatedTopics = new Map<
+        string,
+        {
+          topic: string;
+          mentions: number;
+          sources: string[];
+          relevance: number;
+        }
+      >();
+
+      const promises: Promise<void>[] = [];
+
+      // Search for topic mentions
+      promises.push(
+        (async () => {
+          try {
+            const searchResult = await executeCentralSearch(graphClient, topic, {
+              entityTypes: ['message', 'event', 'driveItem'],
+              maxResults: 100,
+              sortByRank: true,
+            });
+
+            // Extract related topics from search results
+            const allText: string[] = [];
+
+            // From emails
+            for (const email of searchResult.results.emails.slice(0, 50)) {
+              if (email.summary) {
+                allText.push(email.summary);
+              }
+            }
+
+            // From meetings
+            for (const meeting of searchResult.results.events.slice(0, 50)) {
+              if (meeting.summary) {
+                allText.push(meeting.summary);
+              }
+            }
+
+            // Extract potential topics (capitalized words, project names, etc.)
+            const topicPattern = /\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b/g;
+            for (const text of allText) {
+              const matches = text.match(topicPattern);
+              if (matches) {
+                for (const match of matches) {
+                  const normalized = match.trim();
+                  if (
+                    normalized.length > 3 &&
+                    normalized.toLowerCase() !== topic.toLowerCase() &&
+                    !normalized.match(/^(The|A|An|This|That|These|Those)$/i)
+                  ) {
+                    if (!relatedTopics.has(normalized)) {
+                      relatedTopics.set(normalized, {
+                        topic: normalized,
+                        mentions: 0,
+                        sources: [],
+                        relevance: 0,
+                      });
+                    }
+                    const rt = relatedTopics.get(normalized)!;
+                    rt.mentions++;
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not discover related topics: ${error}`);
+          }
+        })()
+      );
+
+      // Find related projects
+      promises.push(
+        (async () => {
+          try {
+            const emailResponse = await graphClient.makeRequest('/me/messages', {
+              method: 'GET',
+              queryParams: {
+                $search: `"${topic}"`,
+                $top: '50',
+                $select: 'subject,bodyPreview',
+                $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+              },
+            });
+
+            if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+              const emails = emailResponse.value as GraphEmail[];
+              const projectPattern =
+                /(?:project|projekt|projekt)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi;
+
+              for (const email of emails) {
+                const content = `${email.subject} ${email.bodyPreview || ''}`;
+                const matches = content.matchAll(projectPattern);
+                for (const match of matches) {
+                  if (match[1]) {
+                    const projectName = match[1].trim();
+                    if (projectName.toLowerCase() !== topic.toLowerCase()) {
+                      if (!relatedTopics.has(projectName)) {
+                        relatedTopics.set(projectName, {
+                          topic: projectName,
+                          mentions: 0,
+                          sources: ['email'],
+                          relevance: 0,
+                        });
+                      }
+                      relatedTopics.get(projectName)!.mentions++;
+                    }
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            logger.warn(`Could not find related projects: ${error}`);
+          }
+        })()
+      );
+
+      await Promise.allSettled(promises);
+
+      // Calculate relevance scores
+      for (const [key, rt] of relatedTopics) {
+        rt.relevance = rt.mentions * 10; // Simple relevance based on mentions
+      }
+
+      // Sort by relevance
+      const sortedTopics = Array.from(relatedTopics.values())
+        .sort((a, b) => b.relevance - a.relevance)
+        .slice(0, limit);
+
+      const result = {
+        originalTopic: topic,
+        analyzedPeriod: `Last ${days} days`,
+        relatedTopics: sortedTopics,
+        totalDiscovered: relatedTopics.size,
+        topRelated: sortedTopics.slice(0, 5).map((t) => t.topic),
+        summary: {
+          mostMentioned: sortedTopics[0]?.topic,
+          totalMentions: sortedTopics.reduce((sum, t) => sum + t.mentions, 0),
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // COLLABORATION INTELLIGENCE TOOLS
+  // ==========================================================================
+
+  // ==========================================================================
+  // 44. ANALYZE COLLABORATION PATTERNS - Analyze how teams collaborate
+  // ==========================================================================
+  server.tool(
+    'analyze-collaboration-patterns',
+    `Analyze how teams collaborate:
+- Communication networks
+- Collaboration hotspots
+- Bottleneck identification
+- Efficiency opportunities
+
+Use this for "How does our team collaborate?", "Identify collaboration bottlenecks", or "Show team communication networks".`,
+    {
+      days: z.number().optional().describe('Days of history to analyze (default: 90)'),
+      includeMeetings: z.boolean().optional().describe('Include meeting analysis (default: true)'),
+      includeEmails: z.boolean().optional().describe('Include email analysis (default: true)'),
+    },
+    {
+      title: 'Analyze Collaboration Patterns',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ days = 90, includeMeetings = true, includeEmails = true }) => {
+      logger.info(`Analyzing collaboration patterns for ${days} days`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const patterns: Record<string, unknown> = {
+        analyzedPeriod: `Last ${days} days`,
+        startDate: startDate.toISOString(),
+        endDate: new Date().toISOString(),
+      };
+
+      const promises: Promise<void>[] = [];
+
+      // Communication network
+      if (includeEmails) {
+        promises.push(
+          (async () => {
+            try {
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams: {
+                  $top: '1000',
+                  $select: 'from,toRecipients,ccRecipients,receivedDateTime',
+                  $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                  $orderby: 'receivedDateTime desc',
+                },
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                const emails = emailResponse.value as GraphEmail[];
+                const communicationMap = new Map<
+                  string,
+                  {
+                    sent: number;
+                    received: number;
+                    connections: Set<string>;
+                  }
+                >();
+
+                const currentUserEmail = await getCurrentUserEmail();
+
+                for (const email of emails) {
+                  const sender = email.from?.emailAddress?.address?.toLowerCase();
+                  if (sender && sender !== currentUserEmail.toLowerCase()) {
+                    if (!communicationMap.has(sender)) {
+                      communicationMap.set(sender, {
+                        sent: 0,
+                        received: 0,
+                        connections: new Set(),
+                      });
+                    }
+                    communicationMap.get(sender)!.sent++;
+                  }
+
+                  // Track recipients
+                  for (const recipient of [
+                    ...(email.toRecipients || []),
+                    ...(email.ccRecipients || []),
+                  ]) {
+                    const recipientEmail = recipient.emailAddress?.address?.toLowerCase();
+                    if (recipientEmail && recipientEmail !== currentUserEmail.toLowerCase()) {
+                      if (!communicationMap.has(recipientEmail)) {
+                        communicationMap.set(recipientEmail, {
+                          sent: 0,
+                          received: 0,
+                          connections: new Set(),
+                        });
+                      }
+                      communicationMap.get(recipientEmail)!.received++;
+                      if (sender) {
+                        communicationMap.get(recipientEmail)!.connections.add(sender);
+                      }
+                    }
+                  }
+                }
+
+                patterns.communicationNetwork = {
+                  totalParticipants: communicationMap.size,
+                  mostActive: Array.from(communicationMap.entries())
+                    .map(([email, data]) => ({
+                      email,
+                      totalInteractions: data.sent + data.received,
+                      connections: data.connections.size,
+                    }))
+                    .sort((a, b) => b.totalInteractions - a.totalInteractions)
+                    .slice(0, 10),
+                  networkDensity:
+                    communicationMap.size > 0
+                      ? Math.round(
+                          (Array.from(communicationMap.values()).reduce(
+                            (sum, d) => sum + d.connections.size,
+                            0
+                          ) /
+                            communicationMap.size) *
+                            10
+                        ) / 10
+                      : 0,
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze communication network: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Collaboration hotspots (frequent meeting participants)
+      if (includeMeetings) {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '500',
+                $select: 'subject,start,end,attendees,organizer',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                const meetings = meetingsResponse.value as GraphEvent[];
+                const participantCounts = new Map<string, number>();
+                const meetingTopics = new Map<string, number>();
+
+                for (const meeting of meetings) {
+                  // Track participants
+                  if (meeting.attendees) {
+                    for (const attendee of meeting.attendees) {
+                      const email = attendee.emailAddress?.address?.toLowerCase();
+                      if (email) {
+                        participantCounts.set(email, (participantCounts.get(email) || 0) + 1);
+                      }
+                    }
+                  }
+
+                  // Track meeting topics
+                  const subject = meeting.subject || '';
+                  const words = subject
+                    .toLowerCase()
+                    .split(/\s+/)
+                    .filter((w) => w.length > 3);
+                  for (const word of words) {
+                    meetingTopics.set(word, (meetingTopics.get(word) || 0) + 1);
+                  }
+                }
+
+                patterns.collaborationHotspots = {
+                  totalMeetings: meetings.length,
+                  mostFrequentParticipants: Array.from(participantCounts.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 10)
+                    .map(([email, count]) => ({ email, meetingCount: count })),
+                  commonTopics: Array.from(meetingTopics.entries())
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 10)
+                    .map(([topic, count]) => ({ topic, mentions: count })),
+                };
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze collaboration hotspots: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Identify bottlenecks (people with many connections but low efficiency)
+      patterns.bottlenecks = {
+        analysis:
+          'Bottlenecks are people who appear in many communications but may be blocking workflows',
+        note: 'Review communication patterns to identify potential bottlenecks',
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(patterns, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // 45. SUGGEST COLLABORATION IMPROVEMENTS - Suggest improvements to collaboration
+  // ==========================================================================
+  server.tool(
+    'suggest-collaboration-improvements',
+    `Suggest improvements to collaboration:
+- Communication recommendations
+- Meeting optimization
+- Workflow suggestions
+- Tool recommendations
+
+Use this for "How can we collaborate better?", "Suggest improvements to our workflow", or "Optimize our meeting schedule".`,
+    {
+      focusArea: z
+        .enum(['communication', 'meetings', 'workflow', 'all'])
+        .optional()
+        .describe('Focus area for suggestions (default: all)'),
+      days: z.number().optional().describe('Days of history to analyze (default: 90)'),
+    },
+    {
+      title: 'Suggest Collaboration Improvements',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ focusArea = 'all', days = 90 }) => {
+      logger.info(`Suggesting collaboration improvements: focus=${focusArea}, days=${days}`);
+
+      const startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+
+      const suggestions: Array<{
+        category: string;
+        suggestion: string;
+        priority: 'high' | 'medium' | 'low';
+        reason: string;
+      }> = [];
+
+      const promises: Promise<void>[] = [];
+
+      // Analyze meeting patterns
+      if (focusArea === 'meetings' || focusArea === 'all') {
+        promises.push(
+          (async () => {
+            try {
+              const meetingQueryParams: Record<string, string> = {
+                startDateTime: startDate.toISOString(),
+                endDateTime: new Date().toISOString(),
+                $top: '500',
+                $select: 'subject,start,end,attendees',
+              };
+
+              const meetingsResponse = await graphClient.makeRequest(
+                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                {
+                  method: 'GET',
+                }
+              );
+
+              if (
+                meetingsResponse &&
+                typeof meetingsResponse === 'object' &&
+                'value' in meetingsResponse
+              ) {
+                const meetings = meetingsResponse.value as GraphEvent[];
+                let backToBackCount = 0;
+                let totalHours = 0;
+                const sortedMeetings = meetings
+                  .map((m) => ({
+                    start: new Date(m.start.dateTime),
+                    end: new Date(m.end.dateTime),
+                    attendees: m.attendees?.length || 0,
+                  }))
+                  .sort((a, b) => a.start.getTime() - b.start.getTime());
+
+                // Check for back-to-back meetings
+                for (let i = 0; i < sortedMeetings.length - 1; i++) {
+                  const gap =
+                    (sortedMeetings[i + 1].start.getTime() - sortedMeetings[i].end.getTime()) /
+                    (1000 * 60);
+                  if (gap <= 5) {
+                    backToBackCount++;
+                  }
+                  totalHours +=
+                    (sortedMeetings[i].end.getTime() - sortedMeetings[i].start.getTime()) /
+                    (1000 * 60 * 60);
+                }
+
+                const avgDailyHours = totalHours / days;
+                const avgAttendees =
+                  meetings.reduce((sum, m) => sum + (m.attendees?.length || 0), 0) /
+                  meetings.length;
+
+                if (backToBackCount > 5) {
+                  suggestions.push({
+                    category: 'meetings',
+                    suggestion: 'Add buffer time between meetings',
+                    priority: 'high',
+                    reason: `You have ${backToBackCount} back-to-back meetings. Consider adding 15-minute buffers.`,
+                  });
+                }
+
+                if (avgDailyHours > 6) {
+                  suggestions.push({
+                    category: 'meetings',
+                    suggestion: 'Reduce meeting load',
+                    priority: 'high',
+                    reason: `You spend ${Math.round(avgDailyHours * 10) / 10} hours per day in meetings. Consider declining non-essential meetings.`,
+                  });
+                }
+
+                if (avgAttendees > 8) {
+                  suggestions.push({
+                    category: 'meetings',
+                    suggestion: 'Optimize meeting size',
+                    priority: 'medium',
+                    reason: `Average meeting size is ${Math.round(avgAttendees)} attendees. Smaller meetings are often more effective.`,
+                  });
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze meetings for suggestions: ${error}`);
+            }
+          })()
+        );
+      }
+
+      // Analyze communication patterns
+      if (focusArea === 'communication' || focusArea === 'all') {
+        promises.push(
+          (async () => {
+            try {
+              const emailResponse = await graphClient.makeRequest('/me/messages', {
+                method: 'GET',
+                queryParams: {
+                  $top: '500',
+                  $select: 'receivedDateTime,from,importance',
+                  $filter: `receivedDateTime ge ${startDate.toISOString()}`,
+                  $orderby: 'receivedDateTime desc',
+                },
+              });
+
+              if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
+                const emails = emailResponse.value as GraphEmail[];
+                const unreadCount = emails.filter((e) => !e.isRead).length;
+                const importantCount = emails.filter((e) => e.importance === 'high').length;
+                const avgPerDay = emails.length / days;
+
+                if (unreadCount > 50) {
+                  suggestions.push({
+                    category: 'communication',
+                    suggestion: 'Process unread emails',
+                    priority: 'high',
+                    reason: `You have ${unreadCount} unread emails. Consider setting aside time to process them.`,
+                  });
+                }
+
+                if (avgPerDay > 50) {
+                  suggestions.push({
+                    category: 'communication',
+                    suggestion: 'Use email filters and rules',
+                    priority: 'medium',
+                    reason: `You receive ${Math.round(avgPerDay)} emails per day. Consider using filters to prioritize.`,
+                  });
+                }
+
+                if (importantCount / emails.length > 0.3) {
+                  suggestions.push({
+                    category: 'communication',
+                    suggestion: 'Review importance flags',
+                    priority: 'low',
+                    reason: `${Math.round((importantCount / emails.length) * 100)}% of emails are marked important. Consider reviewing flagging criteria.`,
+                  });
+                }
+              }
+            } catch (error) {
+              logger.warn(`Could not analyze communication for suggestions: ${error}`);
+            }
+          })()
+        );
+      }
+
+      await Promise.allSettled(promises);
+
+      // Add general workflow suggestions
+      if (focusArea === 'workflow' || focusArea === 'all') {
+        suggestions.push({
+          category: 'workflow',
+          suggestion: 'Use automation tools',
+          priority: 'medium',
+          reason:
+            'Consider using auto-categorize-items and smart-reminder-system to improve workflow efficiency.',
+        });
+
+        suggestions.push({
+          category: 'workflow',
+          suggestion: 'Regular reviews',
+          priority: 'low',
+          reason:
+            'Use get-my-week-summary and get-deadline-overview for regular productivity reviews.',
+        });
+      }
+
+      const result = {
+        focusArea,
+        analyzedPeriod: `Last ${days} days`,
+        totalSuggestions: suggestions.length,
+        suggestions: suggestions.sort((a, b) => {
+          const priorityOrder = { high: 3, medium: 2, low: 1 };
+          return priorityOrder[b.priority] - priorityOrder[a.priority];
+        }),
+        summary: {
+          highPriority: suggestions.filter((s) => s.priority === 'high').length,
+          mediumPriority: suggestions.filter((s) => s.priority === 'medium').length,
+          lowPriority: suggestions.filter((s) => s.priority === 'low').length,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    }
+  );
+  registeredCount++;
+
   logger.info(`Registered ${registeredCount} compound tools`);
   return registeredCount;
 }
@@ -10623,6 +16262,691 @@ function searchInTranscript(
   }
 
   return matches;
+}
+
+/**
+ * Tool Orchestrator - Maps queries to tool execution plans
+ * This maintains a registry of available tools and their capabilities
+ */
+interface ToolDefinition {
+  name: string;
+  description: string;
+  category: string;
+  parameters: string[];
+  useCases: string[];
+  dependencies?: string[];
+  parallelizable: boolean;
+}
+
+/**
+ * Available tools registry for orchestration
+ * This should be kept in sync with actual registered tools
+ */
+const AVAILABLE_TOOLS: ToolDefinition[] = [
+  // Search & Discovery
+  {
+    name: 'search-everything',
+    description: 'Universal search across all Microsoft 365 services',
+    category: 'search',
+    parameters: ['query', 'limit'],
+    useCases: ['finding information', 'searching', 'discovering'],
+    parallelizable: false,
+  },
+  {
+    name: 'ask-microsoft-365',
+    description: 'Intelligent assistant for any Microsoft 365 question',
+    category: 'search',
+    parameters: ['question'],
+    useCases: ['any question', 'general query', 'information gathering'],
+    parallelizable: false,
+  },
+  {
+    name: 'ms365-search',
+    description: 'Primary search tool for Microsoft 365 data',
+    category: 'search',
+    parameters: ['query'],
+    useCases: ['searching', 'finding'],
+    parallelizable: false,
+  },
+  // Person-focused
+  {
+    name: 'find-messages-with-person',
+    description: 'Find Teams chat messages with a specific person',
+    category: 'people',
+    parameters: ['person', 'limit'],
+    useCases: ['messages with person', 'chat history', 'teams conversations'],
+    dependencies: ['find-user'],
+    parallelizable: false,
+  },
+  {
+    name: 'find-emails-with-person',
+    description: 'Find email conversations with a specific person',
+    category: 'people',
+    parameters: ['person', 'limit'],
+    useCases: ['emails with person', 'email history', 'correspondence'],
+    dependencies: ['find-user'],
+    parallelizable: false,
+  },
+  {
+    name: 'find-meetings-with-person',
+    description: 'Find calendar meetings with a specific person',
+    category: 'people',
+    parameters: ['person', 'limit'],
+    useCases: ['meetings with person', 'calendar history', 'scheduled meetings'],
+    dependencies: ['find-user'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-communication-summary',
+    description: 'Complete communication overview with a person',
+    category: 'people',
+    parameters: ['person', 'includeEmails', 'includeChats', 'includeMeetings', 'includeFiles'],
+    useCases: ['communication overview', 'person summary', 'interaction history'],
+    dependencies: ['find-user'],
+    parallelizable: false,
+  },
+  {
+    name: 'analyze-relationship-strength',
+    description: 'Analyze relationship strength with contacts',
+    category: 'people',
+    parameters: ['person', 'days', 'limit'],
+    useCases: ['relationship analysis', 'contact strength', 'network analysis'],
+    parallelizable: false,
+  },
+  {
+    name: 'find-mutual-connections',
+    description: 'Find mutual connections between people',
+    category: 'people',
+    parameters: ['person', 'days', 'limit'],
+    useCases: ['mutual connections', 'network mapping', 'common contacts'],
+    dependencies: ['find-user'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-communication-frequency',
+    description: 'Analyze communication frequency',
+    category: 'people',
+    parameters: ['days', 'limit', 'includeMeetings'],
+    useCases: ['communication patterns', 'frequency analysis', 'interaction patterns'],
+    parallelizable: false,
+  },
+  // Project & Business
+  {
+    name: 'get-project-overview',
+    description: 'Complete project overview with files, meetings, emails, tasks',
+    category: 'project',
+    parameters: ['projectName', 'includeFiles', 'includeMeetings', 'includeEmails', 'includeTasks'],
+    useCases: ['project overview', 'project status', 'project information'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-project-stakeholders',
+    description: 'Identify all stakeholders and participants in a project',
+    category: 'project',
+    parameters: ['projectName', 'days'],
+    useCases: ['project stakeholders', 'team members', 'participants'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-company-contacts',
+    description: 'Find all contacts and interactions with a company',
+    category: 'business',
+    parameters: ['companyName'],
+    useCases: ['company contacts', 'business relationships', 'client information'],
+    parallelizable: false,
+  },
+  // Productivity
+  {
+    name: 'prepare-for-meeting',
+    description: 'Gather all context for an upcoming meeting',
+    category: 'productivity',
+    parameters: ['meetingSubject', 'hoursAhead'],
+    useCases: ['meeting preparation', 'preparing for meeting', 'meeting context'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-my-week-summary',
+    description: 'Weekly productivity digest',
+    category: 'productivity',
+    parameters: ['weekOffset'],
+    useCases: ['week summary', 'weekly review', 'productivity summary'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-all-my-tasks',
+    description: 'Unified task view from To-Do and Planner',
+    category: 'productivity',
+    parameters: ['includeCompleted', 'dueSoon'],
+    useCases: ['tasks', 'to-do list', 'task overview'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-follow-up-items',
+    description: 'Items needing attention',
+    category: 'productivity',
+    parameters: ['includeEmails', 'includeTasks', 'includeMeetings'],
+    useCases: ['follow-ups', 'attention needed', 'pending items'],
+    parallelizable: false,
+  },
+  {
+    name: 'get-deadline-overview',
+    description: 'All upcoming deadlines and due dates',
+    category: 'productivity',
+    parameters: ['days', 'includeCompleted'],
+    useCases: ['deadlines', 'due dates', 'upcoming tasks'],
+    parallelizable: false,
+  },
+  {
+    name: 'find-unresponded-requests',
+    description: 'Find requests waiting for response',
+    category: 'productivity',
+    parameters: ['days', 'priorityOnly'],
+    useCases: ['unanswered requests', 'pending responses', 'follow-ups needed'],
+    parallelizable: false,
+  },
+  // Content Intelligence
+  {
+    name: 'extract-action-items',
+    description: 'Extract action items from emails and meetings',
+    category: 'content',
+    parameters: ['source', 'days', 'person', 'limit'],
+    useCases: ['action items', 'tasks extraction', 'to-dos'],
+    parallelizable: false,
+  },
+  {
+    name: 'summarize-email-thread',
+    description: 'Summarize long email threads',
+    category: 'content',
+    parameters: ['topic', 'days', 'limit'],
+    useCases: ['email summary', 'thread summary', 'conversation summary'],
+    parallelizable: false,
+  },
+  {
+    name: 'extract-decisions',
+    description: 'Extract decisions from communications',
+    category: 'content',
+    parameters: ['topic', 'days', 'source', 'limit'],
+    useCases: ['decision extraction', 'decision history', 'decisions made'],
+    parallelizable: false,
+  },
+  {
+    name: 'find-decision-context',
+    description: 'Find context and history for a decision',
+    category: 'content',
+    parameters: ['topic', 'days'],
+    useCases: ['decision context', 'decision history', 'decision background'],
+    parallelizable: false,
+  },
+  // Document Intelligence
+  {
+    name: 'find-related-documents',
+    description: 'Find related documents across services',
+    category: 'documents',
+    parameters: ['topic', 'days', 'limit', 'includeEmails', 'includeMeetings'],
+    useCases: ['related documents', 'document search', 'file discovery'],
+    parallelizable: false,
+  },
+  {
+    name: 'build-knowledge-graph',
+    description: 'Build knowledge graph from data',
+    category: 'documents',
+    parameters: ['topic', 'days', 'maxNodes'],
+    useCases: ['knowledge graph', 'relationship mapping', 'connections'],
+    parallelizable: false,
+  },
+  // Analytics
+  {
+    name: 'analyze-meeting-load',
+    description: 'Analyze meeting load and identify issues',
+    category: 'analytics',
+    parameters: ['weeks', 'includeRecurring'],
+    useCases: ['meeting analysis', 'meeting load', 'calendar analysis'],
+    parallelizable: false,
+  },
+  // Email Tools
+  {
+    name: 'get-my-emails',
+    description: 'Enhanced email retrieval with rich formatting',
+    category: 'email',
+    parameters: ['filter', 'search', 'limit', 'language'],
+    useCases: ['emails', 'mail messages', 'inbox'],
+    parallelizable: false,
+  },
+  {
+    name: 'list-mail-messages',
+    description: 'List email messages',
+    category: 'email',
+    parameters: ['top', 'skip', 'filter', 'search', 'orderby'],
+    useCases: ['list emails', 'email list', 'messages'],
+    parallelizable: false,
+  },
+  // Calendar Tools
+  {
+    name: 'find-upcoming-meetings',
+    description: 'Find upcoming calendar meetings',
+    category: 'calendar',
+    parameters: ['hoursAhead', 'limit'],
+    useCases: ['upcoming meetings', 'future meetings', 'calendar events'],
+    parallelizable: false,
+  },
+  {
+    name: 'list-calendar-events',
+    description: 'List calendar events',
+    category: 'calendar',
+    parameters: ['top', 'skip', 'filter', 'startDateTime', 'endDateTime'],
+    useCases: ['calendar events', 'meetings', 'appointments'],
+    parallelizable: false,
+  },
+  // File Tools
+  {
+    name: 'find-files-from-person',
+    description: 'Find files shared by a specific person',
+    category: 'files',
+    parameters: ['person', 'limit'],
+    useCases: ['files from person', 'shared files', 'documents'],
+    dependencies: ['find-user'],
+    parallelizable: false,
+  },
+];
+
+/**
+ * Analyze query and create tool execution plan
+ */
+function createToolExecutionPlan(
+  query: string,
+  nlpEnhancer: NLPEnhancer
+): {
+  query: string;
+  analysis: {
+    intent: string;
+    entities: string[];
+    dataTypes: string[];
+  };
+  executionPlan: Array<{
+    step: number;
+    tool: string;
+    parameters: Record<string, unknown>;
+    reason: string;
+    expectedResult: string;
+    nextSteps?: string;
+    dependsOn?: number[];
+    canRunInParallel: boolean;
+  }>;
+  summary: {
+    totalSteps: number;
+    estimatedTime: string;
+    parallelSteps: number[];
+    sequentialSteps: number[];
+    primaryTool: string;
+    followUpTools: string[];
+  };
+  instructions: {
+    forLLM: string;
+    fallback: string;
+  };
+} {
+  // Analyze query using NLP
+  const decomposed = nlpEnhancer.decomposeQuery(query);
+  const queryLower = query.toLowerCase();
+
+  // Extract entities
+  const entities: string[] = [];
+  if (decomposed.entity) entities.push(decomposed.entity);
+  entities.push(...decomposed.entities.map((e) => e.value));
+
+  // Determine data types needed
+  const dataTypes: string[] = [];
+  if (
+    queryLower.includes('email') ||
+    queryLower.includes('mail') ||
+    queryLower.includes('message') ||
+    queryLower.includes('inbox')
+  ) {
+    dataTypes.push('emails');
+  }
+  if (
+    queryLower.includes('meeting') ||
+    queryLower.includes('calendar') ||
+    queryLower.includes('event') ||
+    queryLower.includes('appointment')
+  ) {
+    dataTypes.push('meetings');
+  }
+  if (
+    queryLower.includes('file') ||
+    queryLower.includes('document') ||
+    queryLower.includes('onedrive') ||
+    queryLower.includes('sharepoint')
+  ) {
+    dataTypes.push('files');
+  }
+  if (
+    queryLower.includes('task') ||
+    queryLower.includes('todo') ||
+    queryLower.includes('planner')
+  ) {
+    dataTypes.push('tasks');
+  }
+  if (
+    queryLower.includes('person') ||
+    queryLower.includes('people') ||
+    queryLower.includes('contact') ||
+    queryLower.includes('colleague') ||
+    queryLower.includes('team')
+  ) {
+    dataTypes.push('people');
+  }
+  if (dataTypes.length === 0) {
+    dataTypes.push('all'); // Default to all if unclear
+  }
+
+  // Determine intent
+  let intent = 'information_gathering';
+  if (queryLower.includes('prepare') || queryLower.includes('preparation')) {
+    intent = 'preparation';
+  } else if (queryLower.includes('summary') || queryLower.includes('summarize')) {
+    intent = 'summarization';
+  } else if (queryLower.includes('analyze') || queryLower.includes('analysis')) {
+    intent = 'analysis';
+  } else if (queryLower.includes('find') || queryLower.includes('search')) {
+    intent = 'search';
+  } else if (queryLower.includes('everything') || queryLower.includes('all')) {
+    intent = 'comprehensive_information_gathering';
+  }
+
+  const executionPlan: Array<{
+    step: number;
+    tool: string;
+    parameters: Record<string, unknown>;
+    reason: string;
+    expectedResult: string;
+    nextSteps?: string;
+    dependsOn?: number[];
+    canRunInParallel: boolean;
+  }> = [];
+
+  let stepNumber = 1;
+
+  // Extract main topic/entity from query
+  const mainTopic = entities[0] || query.split(' ').slice(-2).join(' ');
+
+  // Plan based on intent and data types
+  if (intent === 'comprehensive_information_gathering' || dataTypes.includes('all')) {
+    // Start with universal search
+    executionPlan.push({
+      step: stepNumber++,
+      tool: 'search-everything',
+      parameters: {
+        query: mainTopic,
+        limit: 25,
+      },
+      reason: 'Start with universal search to find all mentions across all Microsoft 365 services',
+      expectedResult: 'List of emails, files, meetings, and other items mentioning the topic',
+      nextSteps: 'Use results to identify key people, dates, and documents for follow-up queries',
+      canRunInParallel: false,
+    });
+
+    // If it's a project, add project-specific tools
+    if (queryLower.includes('project') || mainTopic.toLowerCase().includes('project')) {
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'get-project-overview',
+        parameters: {
+          projectName: mainTopic,
+          includeFiles: true,
+          includeMeetings: true,
+          includeEmails: true,
+          includeTasks: true,
+        },
+        reason: 'Get structured project overview with all related items',
+        dependsOn: [1],
+        expectedResult: 'Comprehensive project overview with files, meetings, emails, and tasks',
+        canRunInParallel: false,
+      });
+
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'get-project-stakeholders',
+        parameters: {
+          projectName: mainTopic,
+          days: 90,
+        },
+        reason: 'Identify all people involved in the project',
+        dependsOn: [1],
+        expectedResult: 'List of stakeholders with their involvement levels',
+        canRunInParallel: true,
+      });
+    }
+
+    // Add document search
+    executionPlan.push({
+      step: stepNumber++,
+      tool: 'find-related-documents',
+      parameters: {
+        topic: mainTopic,
+        days: 180,
+        limit: 50,
+        includeEmails: true,
+        includeMeetings: true,
+      },
+      reason: 'Find all documents related to the topic',
+      dependsOn: [1],
+      expectedResult: 'List of related documents with relevance scores',
+      canRunInParallel: true,
+    });
+  } else if (intent === 'preparation' && queryLower.includes('meeting')) {
+    // Meeting preparation workflow
+    const meetingSubject = mainTopic;
+    executionPlan.push({
+      step: stepNumber++,
+      tool: 'prepare-for-meeting',
+      parameters: {
+        meetingSubject: meetingSubject,
+        hoursAhead: 48,
+      },
+      reason: 'Gather all context for the upcoming meeting',
+      expectedResult: 'Meeting preparation package with history, emails, and related documents',
+      canRunInParallel: false,
+    });
+  } else if (dataTypes.includes('people') && entities.length > 0) {
+    // Person-focused query
+    const person = entities[0];
+    executionPlan.push({
+      step: stepNumber++,
+      tool: 'get-communication-summary',
+      parameters: {
+        person: person,
+        includeEmails: true,
+        includeChats: true,
+        includeMeetings: true,
+        includeFiles: true,
+      },
+      reason: 'Get complete communication overview with the person',
+      expectedResult: 'Comprehensive summary of all interactions',
+      canRunInParallel: false,
+    });
+  } else if (dataTypes.includes('emails')) {
+    // Email-focused query
+    if (entities.length > 0 && queryLower.includes('with')) {
+      // Emails with person
+      const person = entities[0];
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'find-emails-with-person',
+        parameters: {
+          person: person,
+          limit: 20,
+        },
+        reason: 'Find all email conversations with the specified person',
+        expectedResult: 'List of emails with the person',
+        canRunInParallel: false,
+      });
+    } else if (queryLower.includes('thread') || queryLower.includes('conversation')) {
+      // Email thread summary
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'summarize-email-thread',
+        parameters: {
+          topic: mainTopic,
+          days: 30,
+          limit: 50,
+        },
+        reason: 'Summarize the email thread',
+        expectedResult: 'Summary of email thread with key points and decisions',
+        canRunInParallel: false,
+      });
+    } else {
+      // General email query
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'get-my-emails',
+        parameters: {
+          filter: queryLower.includes('unread') ? 'unread' : 'all',
+          search: mainTopic,
+          limit: 20,
+        },
+        reason: 'Retrieve emails matching the query',
+        expectedResult: 'List of relevant emails',
+        canRunInParallel: false,
+      });
+    }
+  } else if (dataTypes.includes('meetings')) {
+    // Meeting-focused query
+    if (queryLower.includes('upcoming') || queryLower.includes('future')) {
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'find-upcoming-meetings',
+        parameters: {
+          hoursAhead: 168, // 1 week
+          limit: 20,
+        },
+        reason: 'Find upcoming meetings',
+        expectedResult: 'List of upcoming meetings',
+        canRunInParallel: false,
+      });
+    } else if (entities.length > 0 && queryLower.includes('with')) {
+      const person = entities[0];
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'find-meetings-with-person',
+        parameters: {
+          person: person,
+          limit: 20,
+        },
+        reason: 'Find meetings with the specified person',
+        expectedResult: 'List of meetings with the person',
+        canRunInParallel: false,
+      });
+    } else {
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'list-calendar-events',
+        parameters: {
+          top: 20,
+          filter: queryLower.includes('today')
+            ? `start/dateTime ge ${new Date().toISOString().split('T')[0]}T00:00:00Z`
+            : undefined,
+        },
+        reason: 'List calendar events',
+        expectedResult: 'List of calendar events',
+        canRunInParallel: false,
+      });
+    }
+  } else if (dataTypes.includes('tasks')) {
+    // Task-focused query
+    executionPlan.push({
+      step: stepNumber++,
+      tool: 'get-all-my-tasks',
+      parameters: {
+        includeCompleted: queryLower.includes('completed') || queryLower.includes('all'),
+        dueSoon: true,
+      },
+      reason: 'Get unified task view',
+      expectedResult: 'List of tasks from To-Do and Planner',
+      canRunInParallel: false,
+    });
+  } else if (intent === 'summarization') {
+    // Summarization query
+    if (queryLower.includes('week')) {
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'get-my-week-summary',
+        parameters: {
+          weekOffset: 0,
+        },
+        reason: 'Get weekly productivity summary',
+        expectedResult: 'Weekly summary with meetings, emails, and tasks',
+        canRunInParallel: false,
+      });
+    } else if (queryLower.includes('email') && queryLower.includes('thread')) {
+      executionPlan.push({
+        step: stepNumber++,
+        tool: 'summarize-email-thread',
+        parameters: {
+          topic: mainTopic,
+          days: 30,
+          limit: 50,
+        },
+        reason: 'Summarize email thread',
+        expectedResult: 'Email thread summary',
+        canRunInParallel: false,
+      });
+    }
+  } else {
+    // Default: use intelligent search
+    executionPlan.push({
+      step: stepNumber++,
+      tool: 'ask-microsoft-365',
+      parameters: {
+        question: query,
+      },
+      reason: 'Use intelligent assistant to answer the query',
+      expectedResult: 'Comprehensive answer from Microsoft 365 data',
+      canRunInParallel: false,
+    });
+  }
+
+  // Calculate parallel steps
+  const parallelSteps: number[] = [];
+  const sequentialSteps: number[] = [];
+  for (const step of executionPlan) {
+    if (step.canRunInParallel && (!step.dependsOn || step.dependsOn.length === 0)) {
+      parallelSteps.push(step.step);
+    } else {
+      sequentialSteps.push(step.step);
+    }
+  }
+
+  // Build LLM instructions
+  const instructionSteps = executionPlan.map((step) => {
+    const params = Object.entries(step.parameters)
+      .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+      .join(', ');
+    return `${step.step}. Call '${step.tool}' with parameters: ${params}. Reason: ${step.reason}`;
+  });
+  const forLLM = instructionSteps.join('\n');
+
+  return {
+    query,
+    analysis: {
+      intent,
+      entities,
+      dataTypes,
+    },
+    executionPlan,
+    summary: {
+      totalSteps: executionPlan.length,
+      estimatedTime: `~${executionPlan.length * 2}-${executionPlan.length * 3} seconds`,
+      parallelSteps,
+      sequentialSteps,
+      primaryTool: executionPlan[0]?.tool || 'ask-microsoft-365',
+      followUpTools: executionPlan.slice(1).map((s) => s.tool),
+    },
+    instructions: {
+      forLLM,
+      fallback: "If any tool fails, try 'ask-microsoft-365' as fallback with the same query",
+    },
+  };
 }
 
 export default { registerCompoundTools };

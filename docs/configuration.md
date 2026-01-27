@@ -40,6 +40,17 @@ All configuration is done through environment variables. Copy `.example.env` to 
 | `MS365_MCP_MAX_RESEARCH_ITERATIONS` | Research iterations   | `5`     | No       |
 | `MS365_MCP_STOP_ON_ERROR`           | Stop on tool error    | `false` | No       |
 
+### LLM Optimization & Search Results
+
+| Variable                         | Description                                      | Default | Required |
+| -------------------------------- | ------------------------------------------------ | ------- | -------- |
+| `MS365_MCP_LLM_OPTIMIZE`         | Enable LLM optimization (60-80% token reduction) | `true`  | No       |
+| `MS365_MCP_MAX_SUMMARY_LENGTH`   | Maximum summary length in characters             | `150`   | No       |
+| `MS365_MCP_RELEVANCE_THRESHOLD`  | Minimum relevance score (0-100, 0 = no filter)   | `0`     | No       |
+| `MS365_MCP_MAX_ITEMS_PER_SOURCE` | Max items per source in summaries                | `10`    | No       |
+
+> **Note**: LLM optimization intelligently summarizes search results, extracting only the most relevant fields per entity type. This significantly reduces token usage while maintaining information quality. Set `MS365_MCP_LLM_OPTIMIZE=false` to disable and return full result objects.
+
 ### HTTP Server Configuration
 
 | Variable                            | Description                            | Default                           | Required |

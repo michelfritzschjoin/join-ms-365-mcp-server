@@ -169,13 +169,14 @@ These tools automatically chain multiple API calls to answer complex contextual 
 
 #### Person-Focused Tools
 
-| Tool                        | Description                                            | Mode |
-| --------------------------- | ------------------------------------------------------ | ---- |
-| `find-messages-with-person` | Find all Teams chat messages with a specific person    | All  |
-| `find-emails-with-person`   | Find all email conversations with a specific person    | All  |
-| `find-meetings-with-person` | Find past and upcoming meetings with a specific person | All  |
-| `find-files-from-person`    | Find files shared by or from a specific person         | All  |
-| `get-communication-summary` | Get complete communication overview with a person      | All  |
+| Tool                        | Description                                                       | Mode |
+| --------------------------- | ----------------------------------------------------------------- | ---- |
+| `find-messages-with-person` | Find all Teams chat messages with a specific person               | All  |
+| `find-emails-with-person`   | Find all email conversations with a specific person               | All  |
+| `find-meetings-with-person` | Find past and upcoming meetings with a specific person            | All  |
+| `find-upcoming-meetings`    | Find upcoming calendar meetings/events using rolling time windows | All  |
+| `find-files-from-person`    | Find files shared by or from a specific person                    | All  |
+| `get-communication-summary` | Get complete communication overview with a person                 | All  |
 
 #### Business & Productivity Tools
 
@@ -188,6 +189,74 @@ These tools automatically chain multiple API calls to answer complex contextual 
 | `get-project-overview` | Complete project overview (files, meetings, emails, tasks)     | All  |
 | `get-company-contacts` | Find all contacts and interactions with a company              | All  |
 | `get-follow-up-items`  | Items needing attention (flagged emails, overdue tasks, etc.)  | All  |
+
+#### Content Intelligence & Extraction Tools
+
+| Tool                     | Description                                   | Mode |
+| ------------------------ | --------------------------------------------- | ---- |
+| `extract-action-items`   | Extract action items from emails and meetings | All  |
+| `summarize-email-thread` | Summarize long email threads                  | All  |
+| `extract-decisions`      | Extract decisions from communications         | All  |
+
+#### Relationship Intelligence Tools
+
+| Tool                            | Description                                 | Mode |
+| ------------------------------- | ------------------------------------------- | ---- |
+| `analyze-relationship-strength` | Analyze relationship strength with contacts | All  |
+| `find-mutual-connections`       | Find mutual connections between people      | All  |
+| `get-communication-frequency`   | Analyze communication frequency             | All  |
+
+#### Document Intelligence Tools
+
+| Tool                     | Description                            | Mode |
+| ------------------------ | -------------------------------------- | ---- |
+| `find-related-documents` | Find related documents across services | All  |
+| `build-knowledge-graph`  | Build knowledge graph from data        | All  |
+
+#### Tool Orchestration & Intelligence Tools
+
+| Tool                       | Description                                                 | Mode |
+| -------------------------- | ----------------------------------------------------------- | ---- |
+| `plan-tool-execution`      | **THE ORCHESTRATOR** - Creates execution plan for ANY query | All  |
+| `suggest-tool-sequence`    | Suggests optimal tool sequences for scenarios               | All  |
+| `get-tool-recommendations` | AI-powered tool recommendations                             | All  |
+
+#### Business Workflow Tools
+
+| Tool                        | Description                           | Mode |
+| --------------------------- | ------------------------------------- | ---- |
+| `execute-business-workflow` | Execute predefined business workflows | All  |
+| `create-custom-workflow`    | Create and save custom workflows      | All  |
+
+#### Advanced Analytics & Insights Tools
+
+| Tool                        | Description                                   | Mode |
+| --------------------------- | --------------------------------------------- | ---- |
+| `analyze-business-metrics`  | Analyze business metrics across Microsoft 365 | All  |
+| `get-business-intelligence` | Comprehensive business intelligence dashboard | All  |
+| `analyze-team-performance`  | Team performance analytics                    | All  |
+
+#### Smart Automation Tools
+
+| Tool                    | Description                                   | Mode |
+| ----------------------- | --------------------------------------------- | ---- |
+| `auto-categorize-items` | Automatically categorize emails, files, tasks | All  |
+| `smart-reminder-system` | Intelligent reminder system                   | All  |
+| `auto-summarize-period` | Automatically summarize a time period         | All  |
+
+#### Advanced Search & Discovery Tools
+
+| Tool                        | Description                             | Mode |
+| --------------------------- | --------------------------------------- | ---- |
+| `intelligent-query-builder` | Build optimized queries automatically   | All  |
+| `discover-related-topics`   | Discover related topics and connections | All  |
+
+#### Collaboration Intelligence Tools
+
+| Tool                                 | Description                           | Mode |
+| ------------------------------------ | ------------------------------------- | ---- |
+| `analyze-collaboration-patterns`     | Analyze how teams collaborate         | All  |
+| `suggest-collaboration-improvements` | Suggest improvements to collaboration | All  |
 
 #### Usage Examples for Compound Tools
 
@@ -318,6 +387,320 @@ Perfect for "What needs my attention?" or "Show me urgent items"
     "includeEmails": true,
     "includeTasks": true,
     "includeMeetings": true
+  }
+}
+```
+
+**Extract Action Items:**
+
+Perfect for "What action items do I have from recent emails?" or "Extract tasks from yesterday's meeting"
+
+```json
+{
+  "tool": "extract-action-items",
+  "arguments": {
+    "source": "both",
+    "days": 7,
+    "limit": 50
+  }
+}
+```
+
+**Summarize Email Thread:**
+
+Perfect for "Summarize the email thread about [topic]" or "What was decided in this email chain?"
+
+```json
+{
+  "tool": "summarize-email-thread",
+  "arguments": {
+    "topic": "Project Apollo",
+    "days": 30,
+    "limit": 50
+  }
+}
+```
+
+**Extract Decisions:**
+
+Perfect for "What decisions were made about [topic]?" or "Extract all decisions from last week"
+
+```json
+{
+  "tool": "extract-decisions",
+  "arguments": {
+    "topic": "Budget planning",
+    "days": 90,
+    "source": "both",
+    "limit": 50
+  }
+}
+```
+
+**Analyze Relationship Strength:**
+
+Perfect for "How strong is my relationship with [person]?" or "Who do I communicate with most?"
+
+```json
+{
+  "tool": "analyze-relationship-strength",
+  "arguments": {
+    "person": "John Smith",
+    "days": 90,
+    "limit": 20
+  }
+}
+```
+
+**Find Mutual Connections:**
+
+Perfect for "Who do I know in common with [person]?" or "Find mutual connections for [person]"
+
+```json
+{
+  "tool": "find-mutual-connections",
+  "arguments": {
+    "person": "Jane Doe",
+    "days": 180,
+    "limit": 20
+  }
+}
+```
+
+**Get Communication Frequency:**
+
+Perfect for "Who do I email most often?" or "Show my communication frequency"
+
+```json
+{
+  "tool": "get-communication-frequency",
+  "arguments": {
+    "days": 90,
+    "limit": 30,
+    "includeMeetings": true
+  }
+}
+```
+
+**Find Related Documents:**
+
+Perfect for "Find documents related to [topic]" or "Show files related to this meeting"
+
+```json
+{
+  "tool": "find-related-documents",
+  "arguments": {
+    "topic": "Project Apollo",
+    "days": 180,
+    "limit": 50,
+    "includeEmails": true,
+    "includeMeetings": true
+  }
+}
+```
+
+**Build Knowledge Graph:**
+
+Perfect for "Build a knowledge graph for [topic]" or "Show connections for [project]"
+
+```json
+{
+  "tool": "build-knowledge-graph",
+  "arguments": {
+    "topic": "Project Apollo",
+    "days": 180,
+    "maxNodes": 50
+  }
+}
+```
+
+**Plan Tool Execution (THE ORCHESTRATOR):**
+
+**CRITICAL**: This is the most important tool for LLMs. Call this FIRST for any user query to get a detailed execution plan.
+
+Perfect for ANY query: "What do I know about Project Apollo?" → Get step-by-step plan
+
+```json
+{
+  "tool": "plan-tool-execution",
+  "arguments": {
+    "query": "Find everything about Project Apollo"
+  }
+}
+```
+
+**Suggest Tool Sequence:**
+
+Perfect for "What's the best way to prepare for a meeting?" or "How do I get a complete customer overview?"
+
+```json
+{
+  "tool": "suggest-tool-sequence",
+  "arguments": {
+    "scenario": "meeting_preparation",
+    "context": "Marketing team meeting"
+  }
+}
+```
+
+**Get Tool Recommendations:**
+
+Perfect for "What tools should I use for this query?" or "Recommend tools for analyzing [topic]"
+
+```json
+{
+  "tool": "get-tool-recommendations",
+  "arguments": {
+    "query": "Find all emails about budget",
+    "limit": 5
+  }
+}
+```
+
+**Execute Business Workflow:**
+
+Perfect for "Execute customer onboarding workflow for [company]" or "Run meeting preparation workflow"
+
+```json
+{
+  "tool": "execute-business-workflow",
+  "arguments": {
+    "workflow": "customer_onboarding",
+    "context": "Acme Corp"
+  }
+}
+```
+
+**Analyze Business Metrics:**
+
+Perfect for "Analyze my business metrics this quarter" or "Show team collaboration patterns"
+
+```json
+{
+  "tool": "analyze-business-metrics",
+  "arguments": {
+    "period": "quarter",
+    "includeCommunication": true,
+    "includeProjects": true,
+    "includeCollaboration": true
+  }
+}
+```
+
+**Get Business Intelligence:**
+
+Perfect for "Show my business intelligence dashboard" or "What are the key trends this month?"
+
+```json
+{
+  "tool": "get-business-intelligence",
+  "arguments": {
+    "period": "month",
+    "compareWithPrevious": true
+  }
+}
+```
+
+**Auto Categorize Items:**
+
+Perfect for "Categorize my recent emails" or "Auto-organize files by project"
+
+```json
+{
+  "tool": "auto-categorize-items",
+  "arguments": {
+    "source": "emails",
+    "days": 7,
+    "limit": 50
+  }
+}
+```
+
+**Smart Reminder System:**
+
+Perfect for "What should I follow up on?" or "Show me upcoming deadlines"
+
+```json
+{
+  "tool": "smart-reminder-system",
+  "arguments": {
+    "action": "list",
+    "days": 7
+  }
+}
+```
+
+**Auto Summarize Period:**
+
+Perfect for "Summarize my week" or "What happened this month?"
+
+```json
+{
+  "tool": "auto-summarize-period",
+  "arguments": {
+    "period": "week",
+    "includeEmails": true,
+    "includeMeetings": true,
+    "includeTasks": true
+  }
+}
+```
+
+**Intelligent Query Builder:**
+
+Perfect for "Build a query for [topic]" or "Optimize this search query"
+
+```json
+{
+  "tool": "intelligent-query-builder",
+  "arguments": {
+    "query": "project budget",
+    "expandTerms": true,
+    "addFilters": true
+  }
+}
+```
+
+**Discover Related Topics:**
+
+Perfect for "What topics are related to [topic]?" or "Discover connections for [project]"
+
+```json
+{
+  "tool": "discover-related-topics",
+  "arguments": {
+    "topic": "Project Apollo",
+    "days": 180,
+    "limit": 20
+  }
+}
+```
+
+**Analyze Collaboration Patterns:**
+
+Perfect for "How does our team collaborate?" or "Identify collaboration bottlenecks"
+
+```json
+{
+  "tool": "analyze-collaboration-patterns",
+  "arguments": {
+    "days": 90,
+    "includeMeetings": true,
+    "includeEmails": true
+  }
+}
+```
+
+**Suggest Collaboration Improvements:**
+
+Perfect for "How can we collaborate better?" or "Suggest improvements to our workflow"
+
+```json
+{
+  "tool": "suggest-collaboration-improvements",
+  "arguments": {
+    "focusArea": "all",
+    "days": 90
   }
 }
 ```

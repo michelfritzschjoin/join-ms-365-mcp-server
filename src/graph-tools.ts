@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import type KnowledgeBase from './knowledge-base.js';
 import { formatGraphResponse } from './response-formatter.js';
+import { createThinkingProcess } from './thinking-process.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -74,10 +75,37 @@ type ResourceContent = ResourceTextContent | ResourceBlobContent;
 
 type ContentItem = TextContent | ImageContent | AudioContent | ResourceContent;
 
+/**
+ * Thinking step for transparent reasoning display
+ */
+interface ThinkingStep {
+  type: 'reasoning' | 'decision' | 'action' | 'result' | 'error' | 'info';
+  category: string;
+  message: string;
+  duration?: number;
+  icon?: string;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * Thinking process result for tool responses
+ */
+interface ThinkingProcessResult {
+  enabled: boolean;
+  level: string;
+  summary: string;
+  totalDuration: number;
+  stepCount: number;
+  steps: ThinkingStep[];
+  markdown: string;
+}
+
 interface CallToolResult {
   content: ContentItem[];
   _meta?: Record<string, unknown>;
   isError?: boolean;
+  /** Optional thinking process for transparent reasoning display in OpenWebUI */
+  thinking?: ThinkingProcessResult;
 
   [key: string]: unknown;
 }
@@ -115,18 +143,33 @@ async function executeGraphTool(
   resetSessionIfNeeded();
   const startTime = Date.now();
 
+  // Initialize thinking process for transparent reasoning
+  const thinking = createThinkingProcess(tool.alias);
+  thinking.addReasoning('intent', `Processing tool call: ${tool.alias}`);
+
   try {
     const parameterDefinitions = tool.parameters || [];
+    thinking.addInfo('parameters', `Received ${Object.keys(params).length} parameter(s)`, {
+      paramNames: Object.keys(params),
+    });
 
     // Apply default $select for detailed content - no date filter by default
     // Date filters are only applied when user explicitly specifies a time range
     const isCalendarTool = tool.path.includes('/events') || tool.path.includes('calendar');
     const isMailTool = tool.path.includes('/messages') || tool.path.includes('/mail');
 
+    // Track tool type for thinking
+    if (isCalendarTool) {
+      thinking.addDecision('intent', 'Identified as calendar-related operation');
+    } else if (isMailTool) {
+      thinking.addDecision('intent', 'Identified as mail-related operation');
+    }
+
     // Apply default $top for calendar events to get more results (Microsoft Graph defaults to only 10)
     if (isCalendarTool && !params['$top'] && !params['top']) {
       params['$top'] = 100;
       logger.info('Applied default $top=100 for calendar events (MS Graph default is only 10)');
+      thinking.addDecision('optimization', 'Applied default $top=100 for calendar events');
     }
 
     // For calendarView, add default date range if not provided (required parameters)
@@ -462,10 +505,19 @@ async function executeGraphTool(
     }
 
     logger.info(`Making graph request to ${path} with options: ${JSON.stringify(options)}`);
+    thinking.startAction(
+      'api-call',
+      `Calling Microsoft Graph API: ${tool.method.toUpperCase()} ${path.split('?')[0]}`
+    );
     let response = await graphClient.graphRequest(path, options);
+    thinking.completeAction('api-call', 'Graph API call completed');
 
     const fetchAllPages = params.fetchAllPages === true;
     if (fetchAllPages && response?.content?.[0]?.text) {
+      thinking.addDecision(
+        'optimization',
+        'fetchAllPages enabled - will retrieve all paginated results'
+      );
       try {
         let combinedResponse = JSON.parse(response.content[0].text);
         let allItems = combinedResponse.value || [];
@@ -473,6 +525,10 @@ async function executeGraphTool(
         let pageCount = 1;
 
         const maxPages = parseInt(process.env.MS365_MCP_MAX_PAGES || '500', 10); // Default 500, configurable via ENV
+        thinking.addInfo(
+          'processing',
+          `Pagination: starting with ${allItems.length} items, max ${maxPages} pages`
+        );
 
         while (nextLink && pageCount < maxPages) {
           logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);
@@ -502,6 +558,7 @@ async function executeGraphTool(
 
         if (pageCount >= maxPages) {
           logger.warn(`Reached maximum page limit (${maxPages}) for pagination`);
+          thinking.addInfo('processing', `Reached maximum page limit (${maxPages})`);
         }
 
         combinedResponse.value = allItems;
@@ -515,26 +572,38 @@ async function executeGraphTool(
         logger.info(
           `Pagination complete: collected ${allItems.length} items across ${pageCount} pages`
         );
+        thinking.completeAction(
+          'processing',
+          `Pagination complete: ${allItems.length} items from ${pageCount} pages`
+        );
       } catch (e) {
         logger.error(`Error during pagination: ${e}`);
+        thinking.addError('processing', `Pagination error: ${(e as Error).message}`);
       }
     }
 
     if (response?.content?.[0]?.text) {
       const responseText = response.content[0].text;
       logger.info(`Response size: ${responseText.length} characters`);
+      thinking.addInfo('processing', `Response received: ${responseText.length} characters`);
 
       try {
         const jsonResponse = JSON.parse(responseText);
         if (jsonResponse.value && Array.isArray(jsonResponse.value)) {
           logger.info(`Response contains ${jsonResponse.value.length} items`);
+          thinking.addInfo('processing', `Response contains ${jsonResponse.value.length} items`);
         }
         if (jsonResponse['@odata.nextLink']) {
           logger.info(`Response has pagination nextLink: ${jsonResponse['@odata.nextLink']}`);
+          thinking.addInfo('processing', 'Response has additional pages available');
         }
 
         // Format calendar and mail responses with structured output and local time
         if (isCalendarTool || isMailTool) {
+          thinking.startAction(
+            'formatting',
+            `Formatting ${isCalendarTool ? 'calendar' : 'mail'} response`
+          );
           const { formatted, isFormatted, type } = formatGraphResponse(
             jsonResponse,
             tool.alias,
@@ -543,10 +612,15 @@ async function executeGraphTool(
           if (isFormatted) {
             response.content[0].text = JSON.stringify(formatted, null, 2);
             logger.info(`Applied structured ${type} formatting with server local time`);
+            thinking.completeAction(
+              'formatting',
+              `Applied ${type} formatting with local time conversion`
+            );
           }
         }
       } catch {
         // Non-JSON response
+        thinking.addInfo('processing', 'Response is non-JSON (binary or raw data)');
       }
     }
 
@@ -588,14 +662,22 @@ async function executeGraphTool(
       toolUsageTracker.sessionStartTime = Date.now();
     }
 
+    // Build final response with thinking process
+    const thinkingResult = thinking.formatForResponse();
+    thinking.addDecision('result', `Tool execution completed successfully`);
+
     return {
       content,
       _meta: response._meta,
       isError: response.isError,
+      ...(thinkingResult.thinking
+        ? { thinking: thinkingResult.thinking as ThinkingProcessResult }
+        : {}),
     };
   } catch (error) {
     const errorMessage = (error as Error).message;
     logger.error(`Error in tool ${tool.alias}: ${errorMessage}`);
+    thinking.addError('error-handling', `Tool execution failed: ${errorMessage}`);
 
     // Check if this is an authentication error and provide a clear message
     const isAuthError =
@@ -604,7 +686,11 @@ async function executeGraphTool(
       errorMessage.includes('not logged in') ||
       (error as { name?: string }).name === 'AuthenticationError';
 
+    // Build thinking result even for errors
+    const thinkingResult = thinking.formatForResponse();
+
     if (isAuthError) {
+      thinking.addDecision('error-handling', 'Authentication required - user must login first');
       return {
         content: [
           {
@@ -620,6 +706,9 @@ async function executeGraphTool(
           },
         ],
         isError: true,
+        ...(thinkingResult.thinking
+          ? { thinking: thinkingResult.thinking as ThinkingProcessResult }
+          : {}),
       };
     }
 
@@ -633,6 +722,9 @@ async function executeGraphTool(
         },
       ],
       isError: true,
+      ...(thinkingResult.thinking
+        ? { thinking: thinkingResult.thinking as ThinkingProcessResult }
+        : {}),
     };
   }
 }

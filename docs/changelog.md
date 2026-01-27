@@ -17,11 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* return explicit error when dashboard is accessed without password ([346c270](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/346c270f7f81f1285cf076df75a64843cb74f2d4))
+- return explicit error when dashboard is accessed without password ([346c270](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/346c270f7f81f1285cf076df75a64843cb74f2d4))
 
 ### Bug Fixes
 
-* increase oauth code max length to 4000 chars ([1b582d0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/1b582d0e313d23223156a5183e148e45f7bf304b))
+- increase oauth code max length to 4000 chars ([1b582d0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/1b582d0e313d23223156a5183e148e45f7bf304b))
 
 ## [1.2.4](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.2.3...v1.2.4) (2026-01-27)
 
