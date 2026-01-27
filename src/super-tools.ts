@@ -18,6 +18,35 @@ import GraphClient from './graph-client.js';
 import logger from './logger.js';
 import { addThinkingToResponse, isThinkingEnabled } from './thinking-process.js';
 
+/**
+ * Helper function to call Graph API endpoints
+ * Wraps graphClient.makeRequest with a simpler interface
+ */
+async function callGraph(
+  graphClient: GraphClient,
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+  endpoint: string,
+  queryParams?: Record<string, string>,
+  body?: unknown
+): Promise<string> {
+  const options: {
+    method: string;
+    queryParams?: Record<string, string>;
+    body?: string;
+  } = { method };
+
+  if (queryParams && Object.keys(queryParams).length > 0) {
+    options.queryParams = queryParams;
+  }
+
+  if (body) {
+    options.body = JSON.stringify(body);
+  }
+
+  const result = await graphClient.makeRequest(endpoint, options);
+  return typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+}
+
 // Common schemas
 const paginationSchema = {
   top: z.number().optional().describe('Maximum number of items to return (default: 25)'),
@@ -150,21 +179,21 @@ async function handleEmail(
       if (input.orderby) params.$orderby = input.orderby;
       if (input.skip) params.$skip = String(input.skip);
 
-      const result = await graphClient.callEndpoint('GET', endpoint, params);
+      const result = await callGraph(graphClient, 'GET', endpoint, params);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'get': {
       if (!input.messageId) throw new Error('messageId is required for action "get"');
       thinking.push(`Getting email with ID: ${input.messageId}`);
-      const result = await graphClient.callEndpoint('GET', `/me/messages/${input.messageId}`);
+      const result = await callGraph(graphClient, 'GET', `/me/messages/${input.messageId}`);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'folders': {
       thinking.push('Listing mail folders');
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await graphClient.callEndpoint('GET', '/me/mailFolders', params);
+      const result = await callGraph(graphClient, 'GET', '/me/mailFolders', params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -174,7 +203,7 @@ async function handleEmail(
       const endpoint = input.attachmentId
         ? `/me/messages/${input.messageId}/attachments/${input.attachmentId}`
         : `/me/messages/${input.messageId}/attachments`;
-      const result = await graphClient.callEndpoint('GET', endpoint);
+      const result = await callGraph(graphClient, 'GET', endpoint);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -185,7 +214,7 @@ async function handleEmail(
         $search: `"${input.search}"`,
         $top: String(input.top || 25),
       };
-      const result = await graphClient.callEndpoint('GET', '/me/messages', params);
+      const result = await callGraph(graphClient, 'GET', '/me/messages', params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -203,7 +232,7 @@ async function handleEmail(
         body: { contentType: 'Text', content: input.body },
         toRecipients: recipients,
       };
-      const result = await graphClient.callEndpoint('POST', '/me/sendMail', undefined, {
+      const result = await callGraph(graphClient, 'POST', '/me/sendMail', undefined, {
         message,
         saveToSentItems: true,
       });
@@ -217,11 +246,7 @@ async function handleEmail(
       if (!input.messageId) throw new Error('messageId is required for action "reply"');
       if (!input.body) throw new Error('body is required for action "reply"');
       thinking.push(`Replying to email: ${input.messageId}`);
-      const result = await graphClient.callEndpoint(
-        'POST',
-        `/me/messages/${input.messageId}/reply`,
-        undefined,
-        { comment: input.body }
+      const result = await callGraph(graphClient, 'POST', `/me/messages/${input.messageId}/reply`, undefined, { comment: input.body }
       );
       return addThinkingToResponse(
         result || JSON.stringify({ success: true, message: 'Reply sent' }),
@@ -232,7 +257,7 @@ async function handleEmail(
     case 'delete': {
       if (!input.messageId) throw new Error('messageId is required for action "delete"');
       thinking.push(`Deleting email: ${input.messageId}`);
-      const result = await graphClient.callEndpoint('DELETE', `/me/messages/${input.messageId}`);
+      const result = await callGraph(graphClient, 'DELETE', `/me/messages/${input.messageId}`);
       return addThinkingToResponse(
         result || JSON.stringify({ success: true, message: 'Email deleted' }),
         thinking
@@ -243,11 +268,7 @@ async function handleEmail(
       if (!input.messageId) throw new Error('messageId is required for action "move"');
       if (!input.folderId) throw new Error('folderId (destination) is required for action "move"');
       thinking.push(`Moving email ${input.messageId} to folder ${input.folderId}`);
-      const result = await graphClient.callEndpoint(
-        'POST',
-        `/me/messages/${input.messageId}/move`,
-        undefined,
-        { destinationId: input.folderId }
+      const result = await callGraph(graphClient, 'POST', `/me/messages/${input.messageId}/move`, undefined, { destinationId: input.folderId }
       );
       return addThinkingToResponse(result, thinking);
     }
@@ -320,10 +341,7 @@ async function handleCalendar(
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
       if (input.orderby) params.$orderby = input.orderby;
-      const result = await graphClient.callEndpoint(
-        'GET',
-        '/me/events',
-        params,
+      const result = await callGraph(graphClient, 'GET', '/me/events', params,
         undefined,
         headers
       );
@@ -333,10 +351,7 @@ async function handleCalendar(
     case 'get': {
       if (!input.eventId) throw new Error('eventId is required for action "get"');
       thinking.push(`Getting event: ${input.eventId}`);
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/events/${input.eventId}`,
-        undefined,
+      const result = await callGraph(graphClient, 'GET', `/me/events/${input.eventId}`, undefined,
         undefined,
         headers
       );
@@ -354,10 +369,7 @@ async function handleCalendar(
         $top: String(input.top || 50),
       };
       if (input.orderby) params.$orderby = input.orderby;
-      const result = await graphClient.callEndpoint(
-        'GET',
-        '/me/calendarView',
-        params,
+      const result = await callGraph(graphClient, 'GET', '/me/calendarView', params,
         undefined,
         headers
       );
@@ -366,7 +378,7 @@ async function handleCalendar(
 
     case 'calendars': {
       thinking.push('Listing all calendars');
-      const result = await graphClient.callEndpoint('GET', '/me/calendars');
+      const result = await callGraph(graphClient, '', '');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -376,10 +388,7 @@ async function handleCalendar(
       thinking.push(`Listing events from calendar: ${input.calendarId}`);
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/calendars/${input.calendarId}/events`,
-        params,
+      const result = await callGraph(graphClient, 'GET', `/me/calendars/${input.calendarId}/events`, params,
         undefined,
         headers
       );
@@ -406,10 +415,7 @@ async function handleCalendar(
           type: 'required',
         }));
       }
-      const result = await graphClient.callEndpoint(
-        'POST',
-        '/me/events',
-        undefined,
+      const result = await callGraph(graphClient, 'POST', '/me/events', undefined,
         event,
         headers
       );
@@ -427,10 +433,7 @@ async function handleCalendar(
         updates.start = { dateTime: input.startDateTime, timeZone: input.timezone || 'UTC' };
       if (input.endDateTime)
         updates.end = { dateTime: input.endDateTime, timeZone: input.timezone || 'UTC' };
-      const result = await graphClient.callEndpoint(
-        'PATCH',
-        `/me/events/${input.eventId}`,
-        undefined,
+      const result = await callGraph(graphClient, 'PATCH', `/me/events/${input.eventId}`, undefined,
         updates,
         headers
       );
@@ -440,7 +443,7 @@ async function handleCalendar(
     case 'delete-event': {
       if (!input.eventId) throw new Error('eventId is required for delete-event');
       thinking.push(`Deleting event: ${input.eventId}`);
-      const result = await graphClient.callEndpoint('DELETE', `/me/events/${input.eventId}`);
+      const result = await callGraph(graphClient, 'DELETE', `/me/events/${input.eventId}`);
       return addThinkingToResponse(
         result || JSON.stringify({ success: true, message: 'Event deleted' }),
         thinking
@@ -489,21 +492,21 @@ async function handleTeams(
   switch (input.action) {
     case 'list-teams': {
       thinking.push('Listing joined teams');
-      const result = await graphClient.callEndpoint('GET', '/me/joinedTeams');
+      const result = await callGraph(graphClient, '', '');
       return addThinkingToResponse(result, thinking);
     }
 
     case 'get-team': {
       if (!input.teamId) throw new Error('teamId is required');
       thinking.push(`Getting team: ${input.teamId}`);
-      const result = await graphClient.callEndpoint('GET', `/teams/${input.teamId}`);
+      const result = await callGraph(graphClient, 'GET', `/teams/${input.teamId}`);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'channels': {
       if (!input.teamId) throw new Error('teamId is required for channels');
       thinking.push(`Listing channels for team: ${input.teamId}`);
-      const result = await graphClient.callEndpoint('GET', `/teams/${input.teamId}/channels`);
+      const result = await callGraph(graphClient, 'GET', `/teams/${input.teamId}/channels`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -513,18 +516,14 @@ async function handleTeams(
       }
       thinking.push(`Listing messages in channel: ${input.channelId}`);
       const params: Record<string, string> = { $top: String(input.top || 25) };
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/teams/${input.teamId}/channels/${input.channelId}/messages`,
-        params
-      );
+      const result = await callGraph(graphClient, 'GET', `/teams/${input.teamId}/channels/${input.channelId}/messages`, params);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'chats': {
       thinking.push('Listing chats');
       const params: Record<string, string> = { $top: String(input.top || 25) };
-      const result = await graphClient.callEndpoint('GET', '/me/chats', params);
+      const result = await callGraph(graphClient, 'GET', '/me/chats', params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -532,11 +531,7 @@ async function handleTeams(
       if (!input.chatId) throw new Error('chatId is required for chat-messages');
       thinking.push(`Listing messages in chat: ${input.chatId}`);
       const params: Record<string, string> = { $top: String(input.top || 25) };
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/chats/${input.chatId}/messages`,
-        params
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/chats/${input.chatId}/messages`, params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -581,7 +576,7 @@ async function handleFiles(
   switch (input.action) {
     case 'drives': {
       thinking.push('Listing drives');
-      const result = await graphClient.callEndpoint('GET', '/me/drives');
+      const result = await callGraph(graphClient, '', '');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -594,7 +589,7 @@ async function handleFiles(
           ? `/me/drive/items/${itemId}/children`
           : `/drives/${driveId}/items/${itemId}/children`;
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await graphClient.callEndpoint('GET', endpoint, params);
+      const result = await callGraph(graphClient, 'GET', endpoint, params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -606,7 +601,7 @@ async function handleFiles(
         driveId === 'me'
           ? `/me/drive/items/${input.itemId}`
           : `/drives/${driveId}/items/${input.itemId}`;
-      const result = await graphClient.callEndpoint('GET', endpoint);
+      const result = await callGraph(graphClient, 'GET', endpoint);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -618,7 +613,7 @@ async function handleFiles(
         driveId === 'me'
           ? `/me/drive/items/${input.itemId}/content`
           : `/drives/${driveId}/items/${input.itemId}/content`;
-      const result = await graphClient.callEndpoint('GET', endpoint);
+      const result = await callGraph(graphClient, 'GET', endpoint);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -626,17 +621,14 @@ async function handleFiles(
       const driveId = input.driveId || 'me';
       thinking.push('Getting drive root');
       const endpoint = driveId === 'me' ? '/me/drive/root' : `/drives/${driveId}/root`;
-      const result = await graphClient.callEndpoint('GET', endpoint);
+      const result = await callGraph(graphClient, 'GET', endpoint);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'search': {
       if (!input.search) throw new Error('search query is required');
       thinking.push(`Searching files for: ${input.search}`);
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/drive/root/search(q='${input.search}')`
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.search}')`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -699,7 +691,7 @@ async function handleTasks(
   switch (input.action) {
     case 'todo-lists': {
       thinking.push('Listing To-Do task lists');
-      const result = await graphClient.callEndpoint('GET', '/me/todo/lists');
+      const result = await callGraph(graphClient, '', '');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -708,11 +700,7 @@ async function handleTasks(
       thinking.push(`Listing tasks in list: ${input.taskListId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/todo/lists/${input.taskListId}/tasks`,
-        params
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/todo/lists/${input.taskListId}/tasks`, params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -721,30 +709,27 @@ async function handleTasks(
         throw new Error('taskListId and taskId are required');
       }
       thinking.push(`Getting task: ${input.taskId}`);
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'planner-tasks': {
       thinking.push('Listing Planner tasks assigned to me');
-      const result = await graphClient.callEndpoint('GET', '/me/planner/tasks');
+      const result = await callGraph(graphClient, '', '');
       return addThinkingToResponse(result, thinking);
     }
 
     case 'planner-plans': {
       if (!input.planId) throw new Error('planId is required');
       thinking.push(`Getting Planner plan: ${input.planId}`);
-      const result = await graphClient.callEndpoint('GET', `/planner/plans/${input.planId}`);
+      const result = await callGraph(graphClient, 'GET', `/planner/plans/${input.planId}`);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'plan-tasks': {
       if (!input.planId) throw new Error('planId is required');
       thinking.push(`Listing tasks in plan: ${input.planId}`);
-      const result = await graphClient.callEndpoint('GET', `/planner/plans/${input.planId}/tasks`);
+      const result = await callGraph(graphClient, 'GET', `/planner/plans/${input.planId}/tasks`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -757,12 +742,7 @@ async function handleTasks(
       if (input.dueDateTime) {
         task.dueDateTime = { dateTime: input.dueDateTime, timeZone: 'UTC' };
       }
-      const result = await graphClient.callEndpoint(
-        'POST',
-        `/me/todo/lists/${input.taskListId}/tasks`,
-        undefined,
-        task
-      );
+      const result = await callGraph(graphClient, 'POST', `/me/todo/lists/${input.taskListId}/tasks`, undefined, task);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -776,12 +756,7 @@ async function handleTasks(
       if (input.isCompleted !== undefined) {
         updates.status = input.isCompleted ? 'completed' : 'notStarted';
       }
-      const result = await graphClient.callEndpoint(
-        'PATCH',
-        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`,
-        undefined,
-        updates
-      );
+      const result = await callGraph(graphClient, 'PATCH', `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`, undefined, updates);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -789,10 +764,7 @@ async function handleTasks(
       if (!input.taskListId) throw new Error('taskListId is required for delete-todo');
       if (!input.taskId) throw new Error('taskId is required for delete-todo');
       thinking.push(`Deleting To-Do task: ${input.taskId}`);
-      const result = await graphClient.callEndpoint(
-        'DELETE',
-        `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`
-      );
+      const result = await callGraph(graphClient, 'DELETE', `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`);
       return addThinkingToResponse(
         result || JSON.stringify({ success: true, message: 'Task deleted' }),
         thinking
@@ -841,14 +813,14 @@ async function handleContacts(
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
       if (input.search) params.$search = `"${input.search}"`;
-      const result = await graphClient.callEndpoint('GET', '/me/contacts', params);
+      const result = await callGraph(graphClient, 'GET', '/me/contacts', params);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'get': {
       if (!input.contactId) throw new Error('contactId is required');
       thinking.push(`Getting contact: ${input.contactId}`);
-      const result = await graphClient.callEndpoint('GET', `/me/contacts/${input.contactId}`);
+      const result = await callGraph(graphClient, 'GET', `/me/contacts/${input.contactId}`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -857,7 +829,7 @@ async function handleContacts(
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
       if (input.search) params.$search = `"${input.search}"`;
-      const result = await graphClient.callEndpoint('GET', '/users', params, undefined, {
+      const result = await callGraph(graphClient, 'GET', '/users', params, undefined, {
         ConsistencyLevel: 'eventual',
       });
       return addThinkingToResponse(result, thinking);
@@ -865,7 +837,7 @@ async function handleContacts(
 
     case 'current-user': {
       thinking.push('Getting current user info');
-      const result = await graphClient.callEndpoint('GET', '/me');
+      const result = await callGraph(graphClient, '', '');
       return addThinkingToResponse(result, thinking);
     }
 
@@ -876,7 +848,7 @@ async function handleContacts(
         $search: `"${input.search}"`,
         $top: String(input.top || 25),
       };
-      const result = await graphClient.callEndpoint('GET', '/users', params, undefined, {
+      const result = await callGraph(graphClient, 'GET', '/users', params, undefined, {
         ConsistencyLevel: 'eventual',
       });
       return addThinkingToResponse(result, thinking);
@@ -924,14 +896,14 @@ async function handleMeetings(
       thinking.push('Listing online meetings');
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
-      const result = await graphClient.callEndpoint('GET', '/me/onlineMeetings', params);
+      const result = await callGraph(graphClient, 'GET', '/me/onlineMeetings', params);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'get': {
       if (!input.meetingId) throw new Error('meetingId is required');
       thinking.push(`Getting meeting: ${input.meetingId}`);
-      const result = await graphClient.callEndpoint('GET', `/me/onlineMeetings/${input.meetingId}`);
+      const result = await callGraph(graphClient, 'GET', `/me/onlineMeetings/${input.meetingId}`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -941,7 +913,7 @@ async function handleMeetings(
       const endpoint = input.recordingId
         ? `/me/onlineMeetings/${input.meetingId}/recordings/${input.recordingId}`
         : `/me/onlineMeetings/${input.meetingId}/recordings`;
-      const result = await graphClient.callEndpoint('GET', endpoint);
+      const result = await callGraph(graphClient, 'GET', endpoint);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -951,7 +923,7 @@ async function handleMeetings(
       const endpoint = input.transcriptId
         ? `/me/onlineMeetings/${input.meetingId}/transcripts/${input.transcriptId}`
         : `/me/onlineMeetings/${input.meetingId}/transcripts`;
-      const result = await graphClient.callEndpoint('GET', endpoint);
+      const result = await callGraph(graphClient, 'GET', endpoint);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -960,10 +932,7 @@ async function handleMeetings(
         throw new Error('meetingId and transcriptId are required');
       }
       thinking.push(`Getting transcript content: ${input.transcriptId}`);
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/onlineMeetings/${input.meetingId}/transcripts/${input.transcriptId}/content`
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/onlineMeetings/${input.meetingId}/transcripts/${input.transcriptId}/content`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1011,28 +980,28 @@ async function handleSharePoint(
       thinking.push('Searching SharePoint sites');
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.search) params.search = input.search;
-      const result = await graphClient.callEndpoint('GET', '/sites', params);
+      const result = await callGraph(graphClient, 'GET', '/sites', params);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'get-site': {
       if (!input.siteId) throw new Error('siteId is required');
       thinking.push(`Getting site: ${input.siteId}`);
-      const result = await graphClient.callEndpoint('GET', `/sites/${input.siteId}`);
+      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}`);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'site-drives': {
       if (!input.siteId) throw new Error('siteId is required');
       thinking.push(`Listing drives for site: ${input.siteId}`);
-      const result = await graphClient.callEndpoint('GET', `/sites/${input.siteId}/drives`);
+      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/drives`);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'site-lists': {
       if (!input.siteId) throw new Error('siteId is required');
       thinking.push(`Listing lists for site: ${input.siteId}`);
-      const result = await graphClient.callEndpoint('GET', `/sites/${input.siteId}/lists`);
+      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/lists`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1043,11 +1012,7 @@ async function handleSharePoint(
       thinking.push(`Listing items in list: ${input.listId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/sites/${input.siteId}/lists/${input.listId}/items`,
-        params
-      );
+      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/lists/${input.listId}/items`, params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1055,7 +1020,7 @@ async function handleSharePoint(
       if (!input.siteId) throw new Error('siteId is required');
       thinking.push(`Listing items in site: ${input.siteId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await graphClient.callEndpoint('GET', `/sites/${input.siteId}/items`, params);
+      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/items`, params);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1098,17 +1063,14 @@ async function handleNotes(
   switch (input.action) {
     case 'notebooks': {
       thinking.push('Listing OneNote notebooks');
-      const result = await graphClient.callEndpoint('GET', '/me/onenote/notebooks');
+      const result = await callGraph(graphClient, '', '');
       return addThinkingToResponse(result, thinking);
     }
 
     case 'sections': {
       if (!input.notebookId) throw new Error('notebookId is required');
       thinking.push(`Listing sections in notebook: ${input.notebookId}`);
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/onenote/notebooks/${input.notebookId}/sections`
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/onenote/notebooks/${input.notebookId}/sections`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1116,21 +1078,14 @@ async function handleNotes(
       if (!input.sectionId) throw new Error('sectionId is required');
       thinking.push(`Listing pages in section: ${input.sectionId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/onenote/sections/${input.sectionId}/pages`,
-        params
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/onenote/sections/${input.sectionId}/pages`, params);
       return addThinkingToResponse(result, thinking);
     }
 
     case 'page-content': {
       if (!input.pageId) throw new Error('pageId is required');
       thinking.push(`Getting page content: ${input.pageId}`);
-      const result = await graphClient.callEndpoint(
-        'GET',
-        `/me/onenote/pages/${input.pageId}/content`
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/onenote/pages/${input.pageId}/content`);
       return addThinkingToResponse(result, thinking);
     }
 
@@ -1219,12 +1174,7 @@ async function handleSearch(
   };
 
   try {
-    const result = await graphClient.callEndpoint(
-      'POST',
-      '/search/query',
-      undefined,
-      searchRequest
-    );
+    const result = await callGraph(graphClient, 'POST', '/search/query', undefined, searchRequest);
     const parsedResult = JSON.parse(result);
 
     // Extract and format results for better readability
@@ -1346,17 +1296,14 @@ async function handleAssistant(
       thinking.push('Searching across emails, calendar, files, and chats...');
 
       // Search emails
-      const emailResult = await graphClient.callEndpoint('GET', '/me/messages', {
+      const emailResult = await callGraph(graphClient, 'GET', '/me/messages', {
         $search: `"${input.query}"`,
         $top: String(Math.min(limit, 10)),
       });
       results.emails = JSON.parse(emailResult);
 
       // Search files
-      const filesResult = await graphClient.callEndpoint(
-        'GET',
-        `/me/drive/root/search(q='${input.query}')`
-      );
+      const filesResult = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.query}')`);
       results.files = JSON.parse(filesResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1366,16 +1313,13 @@ async function handleAssistant(
       if (!input.query) throw new Error('query is required for search action');
       thinking.push(`Searching everything for: ${input.query}`);
 
-      const emailResult = await graphClient.callEndpoint('GET', '/me/messages', {
+      const emailResult = await callGraph(graphClient, 'GET', '/me/messages', {
         $search: `"${input.query}"`,
         $top: String(limit),
       });
       results.emails = JSON.parse(emailResult);
 
-      const filesResult = await graphClient.callEndpoint(
-        'GET',
-        `/me/drive/root/search(q='${input.query}')`
-      );
+      const filesResult = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.query}')`);
       results.files = JSON.parse(filesResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1387,13 +1331,13 @@ async function handleAssistant(
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
 
-      const eventsResult = await graphClient.callEndpoint('GET', '/me/calendarView', {
+      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
         startDateTime: today.toISOString(),
         endDateTime: tomorrow.toISOString(),
       });
       results.todayEvents = JSON.parse(eventsResult);
 
-      const emailsResult = await graphClient.callEndpoint('GET', '/me/messages', {
+      const emailsResult = await callGraph(graphClient, 'GET', '/me/messages', {
         $top: '10',
         $orderby: 'receivedDateTime desc',
       });
@@ -1408,13 +1352,13 @@ async function handleAssistant(
       const weekEnd = new Date(today);
       weekEnd.setDate(weekEnd.getDate() + 7);
 
-      const eventsResult = await graphClient.callEndpoint('GET', '/me/calendarView', {
+      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
         startDateTime: today.toISOString(),
         endDateTime: weekEnd.toISOString(),
       });
       results.weekEvents = JSON.parse(eventsResult);
 
-      const tasksResult = await graphClient.callEndpoint('GET', '/me/planner/tasks');
+      const tasksResult = await callGraph(graphClient, '', '');
       results.tasks = JSON.parse(tasksResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1424,7 +1368,7 @@ async function handleAssistant(
       if (!input.person) throw new Error('person is required');
       thinking.push(`Getting all info about: ${input.person}`);
 
-      const emailsResult = await graphClient.callEndpoint('GET', '/me/messages', {
+      const emailsResult = await callGraph(graphClient, 'GET', '/me/messages', {
         $filter: `from/emailAddress/address eq '${input.person}' or contains(from/emailAddress/name, '${input.person}')`,
         $top: String(limit),
       });
@@ -1437,16 +1381,13 @@ async function handleAssistant(
       if (!input.topic) throw new Error('topic is required');
       thinking.push(`Getting project overview for: ${input.topic}`);
 
-      const emailsResult = await graphClient.callEndpoint('GET', '/me/messages', {
+      const emailsResult = await callGraph(graphClient, 'GET', '/me/messages', {
         $search: `"${input.topic}"`,
         $top: String(limit),
       });
       results.emails = JSON.parse(emailsResult);
 
-      const filesResult = await graphClient.callEndpoint(
-        'GET',
-        `/me/drive/root/search(q='${input.topic}')`
-      );
+      const filesResult = await callGraph(graphClient, 'GET', `/me/drive/root/search(q='${input.topic}')`);
       results.files = JSON.parse(filesResult);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1455,13 +1396,13 @@ async function handleAssistant(
     case 'follow-ups': {
       thinking.push('Getting pending follow-up items');
 
-      const flaggedEmails = await graphClient.callEndpoint('GET', '/me/messages', {
+      const flaggedEmails = await callGraph(graphClient, 'GET', '/me/messages', {
         $filter: "flag/flagStatus eq 'flagged'",
         $top: String(limit),
       });
       results.flaggedEmails = JSON.parse(flaggedEmails);
 
-      const tasks = await graphClient.callEndpoint('GET', '/me/planner/tasks');
+      const tasks = await callGraph(graphClient, '', '');
       results.tasks = JSON.parse(tasks);
 
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
@@ -1473,7 +1414,7 @@ async function handleAssistant(
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
 
-      const eventsResult = await graphClient.callEndpoint('GET', '/me/calendarView', {
+      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
         startDateTime: today.toISOString(),
         endDateTime: tomorrow.toISOString(),
       });
