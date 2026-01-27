@@ -656,38 +656,37 @@ export function registerGraphTools(
       // SECURITY: Limit pattern length first to prevent ReDoS
       const trimmedPattern = enabledToolsPattern.trim().substring(0, 200);
 
-      // SECURITY: Check if original pattern is syntactically valid (before sanitization)
-      // This catches syntax errors like unclosed brackets, but we limit length for safety
-      try {
-        // Test with limited length to prevent ReDoS while checking syntax
-        new RegExp(trimmedPattern, 'i');
-      } catch (syntaxError) {
-        // Original pattern has syntax errors - fall back to all tools
-        throw new Error(
-          `Invalid regex syntax in original pattern: ${(syntaxError as Error).message}`
-        );
-      }
-
-      // Basic validation: reject patterns with obvious ReDoS indicators
-      if (
-        trimmedPattern.includes('(.*)*') ||
-        trimmedPattern.includes('(.*+)*') ||
-        trimmedPattern.includes('(.*?)*') ||
-        trimmedPattern.match(/\(\.\*\){2,}/) // Multiple nested quantifiers
-      ) {
-        throw new Error('Potentially dangerous regex pattern detected');
-      }
-
-      // SECURITY: Sanitize regex pattern - allow safe characters including pipe for alternation
-      // Only allow alphanumeric, spaces, basic wildcards (*, ?, .), and pipe (|) for alternation
-      const safePattern = trimmedPattern.replace(/[^\w\s.*?|()-]/g, '');
+      // SECURITY: Sanitize pattern FIRST - only allow safe characters
+      // This prevents regex injection by removing all special regex metacharacters except safe ones
+      // Only allow: alphanumeric, spaces, hyphens, underscores, and pipe for alternation
+      const safePattern = trimmedPattern.replace(/[^\w\s|_-]/g, '');
       if (safePattern.length === 0) {
         throw new Error('Pattern contains only unsafe characters');
       }
 
-      // Create the sanitized regex
-      enabledToolsRegex = new RegExp(safePattern, 'i');
-      logger.info(`Tool filtering enabled with pattern: ${trimmedPattern.substring(0, 50)}...`);
+      // SECURITY: Detect if original pattern contained regex metacharacters
+      // If brackets, backslashes, or other regex syntax is present, it's likely invalid user input
+      const hasRegexSyntax = /[[\]\\^$(){}+]/.test(trimmedPattern);
+      if (hasRegexSyntax) {
+        throw new Error('Pattern contains regex metacharacters - use simple text patterns only');
+      }
+
+      // SECURITY: Basic validation - reject patterns with obvious issues
+      if (safePattern.includes('||') || safePattern.startsWith('|') || safePattern.endsWith('|')) {
+        throw new Error('Invalid alternation pattern');
+      }
+
+      // SECURITY: Convert to simple case-insensitive matching
+      // Split by pipe for alternation, then match each part literally
+      const patterns = safePattern.split('|').filter((p) => p.length > 0);
+      if (patterns.length === 0) {
+        throw new Error('No valid patterns found');
+      }
+
+      // Create regex from sanitized patterns - now safe since we've removed all metacharacters
+      const escapedPatterns = patterns.map((p) => p.trim()).filter((p) => p.length > 0);
+      enabledToolsRegex = new RegExp(escapedPatterns.join('|'), 'i');
+      logger.info(`Tool filtering enabled with pattern: ${safePattern.substring(0, 50)}...`);
     } catch (error) {
       // SECURITY: Fall back gracefully - register all tools if pattern is invalid
       // This includes syntax errors, ReDoS patterns, or empty patterns

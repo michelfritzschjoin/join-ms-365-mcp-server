@@ -25,7 +25,9 @@ on:
     branches: [ "main" ]
   schedule:
     - cron: '26 22 * * 2'
-
+permissions:
+  contents: read
+  
 jobs:
   MSDO:
     # currently only windows latest is supported

@@ -33,58 +33,91 @@ function sanitizeHtml(html: string): string {
     return '';
   }
 
-  // SECURITY: Remove dangerous tags and their content first (non-greedy to prevent ReDoS)
-  // Use more specific patterns to avoid incomplete matching
-  let sanitized = html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '')
-    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe\s*>/gi, '')
-    .replace(/<object\b[^>]*>[\s\S]*?<\/object\s*>/gi, '')
-    .replace(/<embed\b[^>]*>/gi, '')
-    .replace(/<link\b[^>]*>/gi, '')
-    .replace(/<meta\b[^>]*>/gi, '')
-    .replace(/<form\b[^>]*>[\s\S]*?<\/form\s*>/gi, '')
-    .replace(/<input\b[^>]*>/gi, '')
-    .replace(/<button\b[^>]*>[\s\S]*?<\/button\s*>/gi, '');
+  let sanitized = html;
+  let previousLength: number;
+  let iterations = 0;
+  const maxIterations = 10; // Prevent infinite loops
 
-  // SECURITY: Remove all remaining HTML tags (use non-greedy to prevent issues)
-  sanitized = sanitized.replace(/<[^>]+?>/g, ' ');
+  // SECURITY: Iterative sanitization to handle nested/malformed tags
+  // Continue until no more changes are made or max iterations reached
+  do {
+    previousLength = sanitized.length;
+    iterations++;
 
-  // SECURITY: Decode HTML entities in single pass to prevent double-escaping
-  // Use a map-based approach for safer entity decoding
-  const entityMap: Record<string, string> = {
-    '&nbsp;': ' ',
-    '&amp;': '&',
-    '&lt;': '<',
-    '&gt;': '>',
-    '&quot;': '"',
-    '&#39;': "'",
-    '&#x27;': "'",
-    '&#x2F;': '/',
-    '&#x60;': '`',
-    '&#x3D;': '=',
-  };
+    // SECURITY: Remove dangerous tags - use simple patterns without complex regex
+    // Remove script tags (case insensitive, handles attributes)
+    sanitized = sanitized.replace(/<script[^]*?<\/script>/gi, '');
+    sanitized = sanitized.replace(/<script[^>]*>/gi, '');
 
-  // Replace named entities first (before numeric to avoid conflicts)
-  for (const [entity, replacement] of Object.entries(entityMap)) {
-    sanitized = sanitized.replace(
-      new RegExp(entity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
-      replacement
-    );
+    // Remove style tags
+    sanitized = sanitized.replace(/<style[^]*?<\/style>/gi, '');
+    sanitized = sanitized.replace(/<style[^>]*>/gi, '');
+
+    // Remove iframe tags
+    sanitized = sanitized.replace(/<iframe[^]*?<\/iframe>/gi, '');
+    sanitized = sanitized.replace(/<iframe[^>]*>/gi, '');
+
+    // Remove object tags
+    sanitized = sanitized.replace(/<object[^]*?<\/object>/gi, '');
+    sanitized = sanitized.replace(/<object[^>]*>/gi, '');
+
+    // Remove other dangerous self-closing or void tags
+    sanitized = sanitized.replace(/<embed[^>]*\/?>/gi, '');
+    sanitized = sanitized.replace(/<link[^>]*\/?>/gi, '');
+    sanitized = sanitized.replace(/<meta[^>]*\/?>/gi, '');
+    sanitized = sanitized.replace(/<base[^>]*\/?>/gi, '');
+
+    // Remove form-related tags
+    sanitized = sanitized.replace(/<form[^]*?<\/form>/gi, '');
+    sanitized = sanitized.replace(/<form[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<input[^>]*\/?>/gi, '');
+    sanitized = sanitized.replace(/<button[^]*?<\/button>/gi, '');
+    sanitized = sanitized.replace(/<button[^>]*>/gi, '');
+    sanitized = sanitized.replace(/<textarea[^]*?<\/textarea>/gi, '');
+    sanitized = sanitized.replace(/<select[^]*?<\/select>/gi, '');
+
+    // Remove event handlers from any remaining tags (onclick, onerror, etc.)
+    sanitized = sanitized.replace(/\s+on\w+\s*=\s*["'][^"']*["']/gi, '');
+    sanitized = sanitized.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
+  } while (sanitized.length !== previousLength && iterations < maxIterations);
+
+  // SECURITY: Remove all remaining HTML tags
+  sanitized = sanitized.replace(/<\/?[a-zA-Z][^>]*>/g, ' ');
+
+  // SECURITY: Remove any remaining angle brackets that might be part of malformed tags
+  sanitized = sanitized.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // SECURITY: Decode common HTML entities (single pass, specific entities only)
+  const entityReplacements: [string, string][] = [
+    ['&nbsp;', ' '],
+    ['&amp;', '&'],
+    ['&lt;', '<'],
+    ['&gt;', '>'],
+    ['&quot;', '"'],
+    ['&#39;', "'"],
+    ['&#x27;', "'"],
+    ['&#x2F;', '/'],
+    ['&#x60;', '`'],
+    ['&#x3D;', '='],
+  ];
+
+  for (const [entity, replacement] of entityReplacements) {
+    // Use split/join for safe replacement without regex
+    sanitized = sanitized.split(entity).join(replacement);
   }
 
-  // Decode numeric entities (decimal) - only safe ASCII range
-  sanitized = sanitized.replace(/&#(\d{1,7});/g, (_, dec) => {
+  // Decode numeric entities (decimal) - only safe ASCII range, limited length
+  sanitized = sanitized.replace(/&#(\d{1,4});/g, (match, dec) => {
     const code = parseInt(dec, 10);
     // Only decode safe printable ASCII (32-126)
-    return code >= 32 && code <= 126 ? String.fromCharCode(code) : '';
+    return code >= 32 && code <= 126 ? String.fromCharCode(code) : match;
   });
 
-  // Decode hex entities - only safe ASCII range
-  sanitized = sanitized.replace(/&#x([0-9a-fA-F]{1,6});/g, (_, hex) => {
+  // Decode hex entities - only safe ASCII range, limited length
+  sanitized = sanitized.replace(/&#x([0-9a-fA-F]{1,4});/g, (match, hex) => {
     const code = parseInt(hex, 16);
     // Only decode safe printable ASCII (32-126)
-    return code >= 32 && code <= 126 ? String.fromCharCode(code) : '';
+    return code >= 32 && code <= 126 ? String.fromCharCode(code) : match;
   });
 
   // Normalize whitespace (single pass)

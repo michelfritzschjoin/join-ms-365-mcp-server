@@ -4,7 +4,6 @@ import logger from './logger.js';
 import fs, { existsSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import { createHash } from 'crypto';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints, getDefaultClientId } from './cloud-config.js';
 
@@ -93,29 +92,32 @@ function buildScopesFromEndpoints(
     try {
       // SECURITY: Sanitize regex pattern - only allow safe characters
       // Prevent ReDoS by limiting pattern length and complexity
-      const sanitizedPattern = enabledToolsPattern.trim().substring(0, 200);
+      const trimmedPattern = enabledToolsPattern.trim().substring(0, 200);
 
-      // Basic validation: reject patterns with obvious ReDoS indicators
-      if (
-        sanitizedPattern.includes('(.*)*') ||
-        sanitizedPattern.includes('(.*+)*') ||
-        sanitizedPattern.includes('(.*?)*') ||
-        sanitizedPattern.match(/\(\.\*\){2,}/) // Multiple nested quantifiers
-      ) {
-        throw new Error('Potentially dangerous regex pattern detected');
-      }
-
-      // SECURITY: Sanitize regex pattern - allow safe characters including pipe for alternation
-      // Only allow alphanumeric, spaces, basic wildcards (*, ?, .), and pipe (|) for alternation
-      const safePattern = sanitizedPattern.replace(/[^\w\s.*?|()-]/g, '');
+      // SECURITY: Sanitize pattern FIRST - only allow safe characters
+      // This prevents regex injection by removing all special regex metacharacters except safe ones
+      // Only allow: alphanumeric, spaces, hyphens, underscores, and pipe for alternation
+      const safePattern = trimmedPattern.replace(/[^\w\s|_-]/g, '');
       if (safePattern.length === 0) {
         throw new Error('Pattern contains only unsafe characters');
       }
 
-      enabledToolsRegex = new RegExp(safePattern, 'i');
-      logger.info(
-        `Building scopes with tool filter pattern: ${sanitizedPattern.substring(0, 50)}...`
-      );
+      // SECURITY: Basic validation - reject patterns with obvious issues
+      if (safePattern.includes('||') || safePattern.startsWith('|') || safePattern.endsWith('|')) {
+        throw new Error('Invalid alternation pattern');
+      }
+
+      // SECURITY: Convert to simple case-insensitive matching
+      // Split by pipe for alternation, then match each part literally
+      const patterns = safePattern.split('|').filter((p) => p.length > 0);
+      if (patterns.length === 0) {
+        throw new Error('No valid patterns found');
+      }
+
+      // Create regex from sanitized patterns - now safe since we've removed all metacharacters
+      const escapedPatterns = patterns.map((p) => p.trim()).filter((p) => p.length > 0);
+      enabledToolsRegex = new RegExp(escapedPatterns.join('|'), 'i');
+      logger.info(`Building scopes with tool filter pattern: ${safePattern.substring(0, 50)}...`);
     } catch (error) {
       logger.error(
         `Invalid tool filter regex pattern: ${enabledToolsPattern.substring(0, 50)}. Building scopes without filter.`
@@ -261,13 +263,14 @@ class AuthManager {
       if (selectedAccountData) {
         const parsed = JSON.parse(selectedAccountData);
         this.selectedAccountId = parsed.accountId;
-        // SECURITY: Don't log account ID - use hash for correlation only
+        // SECURITY: Don't log full account ID - use redacted prefix for correlation
         if (this.selectedAccountId) {
-          const hash = createHash('sha256')
-            .update(this.selectedAccountId)
-            .digest('hex')
-            .substring(0, 8);
-          logger.info(`Loaded selected account: [hash:${hash}]`);
+          // Use first 4 chars + length indicator for correlation (no crypto needed)
+          const redacted =
+            this.selectedAccountId.length > 4
+              ? `${this.selectedAccountId.substring(0, 4)}...[${this.selectedAccountId.length}]`
+              : '[redacted]';
+          logger.info(`Loaded selected account: ${redacted}`);
         }
       }
     } catch (error) {
@@ -372,13 +375,13 @@ class AuthManager {
       if (selectedAccount) {
         return selectedAccount;
       }
-      // SECURITY: Don't log account ID - use hash for correlation only
+      // SECURITY: Don't log full account ID - use redacted prefix for correlation
       if (this.selectedAccountId) {
-        const hash = createHash('sha256')
-          .update(this.selectedAccountId)
-          .digest('hex')
-          .substring(0, 8);
-        logger.warn(`Selected account [hash:${hash}] not found, falling back to first account`);
+        const redacted =
+          this.selectedAccountId.length > 4
+            ? `${this.selectedAccountId.substring(0, 4)}...[${this.selectedAccountId.length}]`
+            : '[redacted]';
+        logger.warn(`Selected account ${redacted} not found, falling back to first account`);
       } else {
         logger.warn('Selected account not found, falling back to first account');
       }
