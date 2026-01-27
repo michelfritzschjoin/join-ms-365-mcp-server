@@ -3,13 +3,17 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import AuthManager from './auth.js';
 
 export function registerAuthTools(server: McpServer, authManager: AuthManager): void {
-  server.tool(
+  server.registerTool(
     'login',
-    'REQUIRED: Authenticate with Microsoft 365 using device code flow. ' +
-      'This tool MUST be called before using any other Microsoft 365 tools. ' +
-      'It will provide a URL and code that the user must enter in a browser to authenticate.',
     {
-      force: z.boolean().default(false).describe('Force a new login even if already logged in'),
+      title: 'login',
+      description:
+        'REQUIRED: Authenticate with Microsoft 365 using device code flow. ' +
+        'This tool MUST be called before using any other Microsoft 365 tools. ' +
+        'It will provide a URL and code that the user must enter in a browser to authenticate.',
+      inputSchema: z.object({
+        force: z.boolean().default(false).describe('Force a new login even if already logged in'),
+      }),
     },
     async ({ force }) => {
       try {
@@ -57,34 +61,46 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
     }
   );
 
-  server.tool('logout', 'Log out from Microsoft account', {}, async () => {
-    try {
-      await authManager.logout();
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ message: 'Logged out successfully' }),
-          },
-        ],
-      };
-    } catch {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ error: 'Logout failed' }),
-          },
-        ],
-      };
+  server.registerTool(
+    'logout',
+    {
+      title: 'logout',
+      description: 'Log out from Microsoft account',
+      inputSchema: z.object({}),
+    },
+    async () => {
+      try {
+        await authManager.logout();
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ message: 'Logged out successfully' }),
+            },
+          ],
+        };
+      } catch {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'Logout failed' }),
+            },
+          ],
+        };
+      }
     }
-  });
+  );
 
-  server.tool(
+  server.registerTool(
     'verify-login',
-    'Check if the user is currently authenticated with Microsoft 365. ' +
-      'Use this to verify login status before attempting to use other tools.',
-    {},
+    {
+      title: 'verify-login',
+      description:
+        'Check if the user is currently authenticated with Microsoft 365. ' +
+        'Use this to verify login status before attempting to use other tools.',
+      inputSchema: z.object({}),
+    },
     async () => {
       const testResult = await authManager.testLogin();
 
@@ -99,42 +115,55 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
     }
   );
 
-  server.tool('list-accounts', 'List all available Microsoft accounts', {}, async () => {
-    try {
-      const accounts = await authManager.listAccounts();
-      const selectedAccountId = authManager.getSelectedAccountId();
-      const result = accounts.map((account) => ({
-        id: account.homeAccountId,
-        username: account.username,
-        name: account.name,
-        selected: account.homeAccountId === selectedAccountId,
-      }));
-
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ accounts: result }),
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({ error: `Failed to list accounts: ${(error as Error).message}` }),
-          },
-        ],
-      };
-    }
-  });
-
-  server.tool(
-    'select-account',
-    'Select a specific Microsoft account to use',
+  server.registerTool(
+    'list-accounts',
     {
-      accountId: z.string().describe('The account ID to select'),
+      title: 'list-accounts',
+      description: 'List all available Microsoft accounts',
+      inputSchema: z.object({}),
+    },
+    async () => {
+      try {
+        const accounts = await authManager.listAccounts();
+        const selectedAccountId = authManager.getSelectedAccountId();
+        const result = accounts.map((account) => ({
+          id: account.homeAccountId,
+          username: account.username,
+          name: account.name,
+          selected: account.homeAccountId === selectedAccountId,
+        }));
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ accounts: result }),
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: `Failed to list accounts: ${(error as Error).message}`,
+              }),
+            },
+          ],
+        };
+      }
+    }
+  );
+
+  server.registerTool(
+    'select-account',
+    {
+      title: 'select-account',
+      description: 'Select a specific Microsoft account to use',
+      inputSchema: z.object({
+        accountId: z.string().describe('The account ID to select'),
+      }),
     },
     async ({ accountId }) => {
       try {
@@ -173,11 +202,14 @@ export function registerAuthTools(server: McpServer, authManager: AuthManager): 
     }
   );
 
-  server.tool(
+  server.registerTool(
     'remove-account',
-    'Remove a Microsoft account from the cache',
     {
-      accountId: z.string().describe('The account ID to remove'),
+      title: 'remove-account',
+      description: 'Remove a Microsoft account from the cache',
+      inputSchema: z.object({
+        accountId: z.string().describe('The account ID to remove'),
+      }),
     },
     async ({ accountId }) => {
       try {

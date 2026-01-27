@@ -23,6 +23,25 @@ ms-365-mcp-server --login
 4. Grant the requested permissions
 5. Return to the terminal - authentication is complete
 
+### 1b. OAuth (HTTP Mode / Open WebUI)
+
+When using the server in **HTTP mode** behind an MCP client that supports OAuth (for example **Open WebUI**), authentication is typically handled via the server’s OAuth discovery endpoints and `/authorize` flow (not the device-code `login` tool).
+
+**What you need:**
+
+- An Azure AD App Registration (recommended for production)
+- A public HTTPS base URL for the server (recommended)
+
+**Azure App Registration redirect URI:**
+
+- Add your server callback as a redirect URI, e.g. `https://ms365-mcp.yourdomain.com/callback`
+
+**Troubleshooting (“No OAuth session found” in Open WebUI):**
+
+- This means the user has not connected their Microsoft account yet in Open WebUI.
+- Trigger the OAuth connect flow in your MCP client, then retry your question/tool call.
+- If the MCP client sends `Authorization: Bearer ` (empty), the server will return a **401** with `WWW-Authenticate` and OAuth discovery metadata to help the client start the login flow.
+
 ### 2. Bring Your Own Token (BYOT)
 
 For programmatic access with pre-existing tokens:

@@ -26,6 +26,7 @@ import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js'
 import { getQueryStore } from './query-store.js';
 import { z } from 'zod';
 import { isThinkingEnabled, getThinkingLevel } from './thinking-process.js';
+import { createRequire } from 'module';
 
 /**
  * Extract chat ID from request headers
@@ -180,6 +181,122 @@ class MicrosoftGraphServer {
       version,
     });
 
+    // ------------------------------------------------------------------------
+    // Compatibility shim for MCP SDK tool registration
+    //
+    // OpenWebUI calls `tools/list`, and the MCP SDK will normalize tool schemas.
+    // If tools were registered using raw-shape schemas, the SDK may throw when it
+    // encounters malformed shapes (e.g. undefined values). To make tool schemas
+    // robust, we transparently convert raw-shape schemas into `z.object(...)`
+    // and register via `registerTool()`, while keeping existing call sites intact.
+    // ------------------------------------------------------------------------
+    {
+      const mcpServer = this.server as unknown as {
+        tool: (name: string, ...rest: unknown[]) => unknown;
+        registerTool: (
+          name: string,
+          config: {
+            title?: string;
+            description?: string;
+            inputSchema?: unknown;
+            annotations?: Record<string, unknown>;
+            _meta?: Record<string, unknown>;
+          },
+          cb: (args: unknown, extra?: unknown) => unknown
+        ) => unknown;
+      };
+
+      const originalTool = mcpServer.tool.bind(mcpServer);
+
+      const isPlainObject = (value: unknown): value is Record<string, unknown> =>
+        typeof value === 'object' && value !== null && !Array.isArray(value);
+
+      const looksLikeZodSchema = (value: unknown): boolean =>
+        isPlainObject(value) &&
+        (typeof (value as any).parse === 'function' ||
+          (value as any)._def != null ||
+          (value as any)._zod != null);
+
+      mcpServer.tool = (name: string, ...rest: unknown[]) => {
+        // Match the SDK's legacy overloads (name, [description], [shape], [annotations], cb)
+        let description: string | undefined;
+        const args = [...rest];
+        if (typeof args[0] === 'string') {
+          description = args.shift() as string;
+        }
+
+        const callback = args[args.length - 1];
+        if (typeof callback !== 'function') {
+          // Fall back to original behavior if we can't parse
+          return originalTool(name, ...(rest as any));
+        }
+
+        const beforeCallback = args.slice(0, -1);
+        const first = beforeCallback[0];
+        const second = beforeCallback[1];
+
+        let rawShape: Record<string, unknown> | undefined;
+        let annotations: Record<string, unknown> | undefined;
+
+        // Detect raw shapes (plain objects where at least one value looks like a Zod schema
+        // OR is undefined). This intentionally catches malformed raw shapes too, so we can
+        // sanitize them and prevent tools/list crashes.
+        if (isPlainObject(first) && !looksLikeZodSchema(first)) {
+          const values = Object.values(first);
+          const couldBeRawShape =
+            values.length === 0 || values.some((v) => v === undefined || looksLikeZodSchema(v));
+
+          if (couldBeRawShape) {
+            rawShape = first;
+            if (isPlainObject(second)) {
+              annotations = second;
+            }
+          } else {
+            // Treat as annotations object
+            annotations = first;
+          }
+        } else if (isPlainObject(first)) {
+          annotations = first;
+        }
+
+        // Only apply the shim when we have a raw shape. Otherwise, preserve original behavior.
+        if (!rawShape) {
+          return originalTool(name, ...(rest as any));
+        }
+
+        const titleFromAnnotations =
+          annotations && typeof annotations.title === 'string' ? annotations.title : undefined;
+
+        // Remove `title` from annotations because MCP expects `title` as a top-level tool field.
+        const { title: _ignoredTitle, ...annotationsWithoutTitle } = annotations || {};
+
+        // Sanitize the raw shape: ensure NO undefined values slip through (the MCP SDK's
+        // zod-compat objectFromShape will throw if it hits an undefined value while
+        // checking schema versions).
+        const sanitizedShape: Record<string, z.ZodTypeAny> = {};
+        for (const [key, value] of Object.entries(rawShape)) {
+          if (looksLikeZodSchema(value)) {
+            sanitizedShape[key] = value as z.ZodTypeAny;
+            continue;
+          }
+
+          // Fallback: accept anything, optional. This is safer than crashing tools/list.
+          sanitizedShape[key] = z.any().optional();
+        }
+
+        return mcpServer.registerTool(
+          name,
+          {
+            title: titleFromAnnotations || name,
+            description,
+            inputSchema: z.object(sanitizedShape),
+            annotations: annotationsWithoutTitle,
+          },
+          callback as any
+        );
+      };
+    }
+
     const shouldRegisterAuthTools = !this.options.http || this.options.enableAuthTools;
     if (shouldRegisterAuthTools) {
       registerAuthTools(this.server, this.authManager);
@@ -239,6 +356,71 @@ class MicrosoftGraphServer {
       this.options.readOnly
     );
     logger.info(`Registered ${compoundToolCount} compound tools (multi-step contextual tools)`);
+
+    // Validate tool schemas early: OpenWebUI calls tools/list and the MCP SDK will
+    // attempt to normalize schemas. If any raw-shape schema contains undefined
+    // values, the SDK can throw (e.g. reading `_zod` of undefined).
+    try {
+      const internalTools = (this.server as unknown as { _registeredTools?: Record<string, any> })
+        ._registeredTools;
+      if (internalTools) {
+        const invalid: Array<{ name: string; problems: string[] }> = [];
+
+        for (const [name, tool] of Object.entries(internalTools)) {
+          const inputSchema = tool?.inputSchema;
+          if (!inputSchema || typeof inputSchema !== 'object') continue;
+
+          // Detect raw shapes: they are plain objects, not schema instances.
+          const looksLikeSchemaInstance =
+            typeof (inputSchema as any).parse === 'function' ||
+            (inputSchema as any)._def != null ||
+            (inputSchema as any)._zod != null;
+          if (looksLikeSchemaInstance) continue;
+
+          const values = Object.values(inputSchema as Record<string, unknown>);
+          const problems: string[] = [];
+          if (values.some((v) => v === undefined)) {
+            const badKeys = Object.entries(inputSchema as Record<string, unknown>)
+              .filter(([, v]) => v === undefined)
+              .map(([k]) => k);
+            problems.push(`undefined schema values for keys: ${badKeys.join(', ')}`);
+          }
+
+          // Heuristic: schema values should look like Zod schemas
+          const nonSchemaKeys = Object.entries(inputSchema as Record<string, unknown>)
+            .filter(([, v]) => {
+              if (!v || typeof v !== 'object') return true;
+              const candidate = v as any;
+              return (
+                typeof candidate.parse !== 'function' &&
+                candidate._def == null &&
+                candidate._zod == null
+              );
+            })
+            .map(([k]) => k);
+          if (nonSchemaKeys.length > 0) {
+            problems.push(`non-schema values for keys: ${nonSchemaKeys.join(', ')}`);
+          }
+
+          if (problems.length > 0) {
+            invalid.push({ name, problems });
+          }
+        }
+
+        if (invalid.length > 0) {
+          logger.error('Invalid tool input schemas detected (may break tools/list)', {
+            count: invalid.length,
+            invalid,
+          });
+        } else {
+          logger.info('Tool schema validation passed (no invalid raw-shape schemas detected)');
+        }
+      }
+    } catch (schemaValidationError) {
+      logger.warn('Tool schema validation failed (non-fatal)', {
+        error: (schemaValidationError as Error).message,
+      });
+    }
   }
 
   async start(): Promise<void> {
@@ -295,6 +477,107 @@ class MicrosoftGraphServer {
 
       app.use(express.json());
       app.use(express.urlencoded({ extended: true }));
+
+      // Debug endpoint: inspect registered tool schemas (helps diagnose tools/list crashes)
+      // SECURITY: Requires `Authorization: Bearer debug` (dev-only troubleshooting).
+      app.get('/debug/tool-schemas', (req, res) => {
+        const authHeader = req.headers.authorization || '';
+        if (authHeader !== 'Bearer debug') {
+          return res.status(404).json({ error: 'Not found' });
+        }
+
+        try {
+          const require = createRequire(import.meta.url);
+          const internalTools = (
+            this.server as unknown as { _registeredTools?: Record<string, any> }
+          )._registeredTools;
+          if (!internalTools) {
+            return res.status(500).json({ error: 'No tools registry available' });
+          }
+
+          const invalid: Array<{ name: string; issues: string[] }> = [];
+          const rawShapes: Array<{ name: string; keys: string[] }> = [];
+          const jsonSchemaFailures: Array<{ name: string; error: string }> = [];
+
+          // Attempt the same conversion that `tools/list` performs in the MCP SDK to
+          // pinpoint which tool schema crashes (e.g. `_zod` related errors).
+          // NOTE: This is debug-only and should never be enabled in normal operation.
+          const { normalizeObjectSchema } =
+            require('@modelcontextprotocol/sdk/dist/cjs/server/zod-compat.js') as {
+              normalizeObjectSchema: (schema: unknown) => unknown;
+            };
+          const { toJsonSchemaCompat } =
+            require('@modelcontextprotocol/sdk/dist/cjs/server/zod-json-schema-compat.js') as {
+              toJsonSchemaCompat: (
+                schema: unknown,
+                options: { strictUnions: boolean; pipeStrategy: 'input' | 'output' }
+              ) => unknown;
+            };
+
+          for (const [name, tool] of Object.entries(internalTools)) {
+            const inputSchema = tool?.inputSchema;
+            if (!inputSchema || typeof inputSchema !== 'object') continue;
+
+            const looksLikeSchemaInstance =
+              typeof (inputSchema as any).parse === 'function' ||
+              (inputSchema as any)._def != null ||
+              (inputSchema as any)._zod != null;
+            if (looksLikeSchemaInstance) continue;
+
+            const entries = Object.entries(inputSchema as Record<string, unknown>);
+            rawShapes.push({ name, keys: entries.map(([k]) => k) });
+
+            const issues: string[] = [];
+            const undefinedKeys = entries.filter(([, v]) => v === undefined).map(([k]) => k);
+            if (undefinedKeys.length > 0) {
+              issues.push(`undefined schema values: ${undefinedKeys.join(', ')}`);
+            }
+
+            const nonSchemaKeys = entries
+              .filter(([, v]) => {
+                if (!v || typeof v !== 'object') return true;
+                const candidate = v as any;
+                return (
+                  typeof candidate.parse !== 'function' &&
+                  candidate._def == null &&
+                  candidate._zod == null
+                );
+              })
+              .map(([k]) => k);
+            if (nonSchemaKeys.length > 0) {
+              issues.push(`non-schema values: ${nonSchemaKeys.join(', ')}`);
+            }
+
+            if (issues.length > 0) {
+              invalid.push({ name, issues });
+            }
+
+            // Try JSON schema conversion (this is where tools/list can crash)
+            try {
+              const obj = normalizeObjectSchema(inputSchema);
+              if (obj) {
+                toJsonSchemaCompat(obj, { strictUnions: true, pipeStrategy: 'input' });
+              }
+            } catch (err) {
+              jsonSchemaFailures.push({
+                name,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+
+          return res.json({
+            totalTools: Object.keys(internalTools).length,
+            rawShapeTools: rawShapes.length,
+            invalidRawShapeTools: invalid.length,
+            invalid,
+            jsonSchemaFailuresCount: jsonSchemaFailures.length,
+            jsonSchemaFailures: jsonSchemaFailures.slice(0, 50),
+          });
+        } catch (error) {
+          return res.status(500).json({ error: (error as Error).message });
+        }
+      });
 
       // Apply middleware in order
       app.use(securityHeadersMiddleware);

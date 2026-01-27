@@ -26,6 +26,86 @@ export function createMicrosoftBearerTokenAuthMiddleware(
   const requireAuth = config.requireAuth ?? true;
   const baseUrl = config.baseUrl ?? '';
 
+  function isValidBearerTokenValue(token: string): boolean {
+    const trimmedToken = token.trim();
+    if (trimmedToken.length === 0) return false;
+
+    const lower = trimmedToken.toLowerCase();
+    if (lower === 'null' || lower === 'undefined' || lower === 'none') return false;
+
+    // Avoid treating obvious placeholders as valid tokens.
+    // Do NOT enforce JWT shape here (Graph access tokens are usually JWT, but not guaranteed).
+    return true;
+  }
+
+  function isLikelyExpiredJwt(token: string): boolean {
+    const trimmedToken = token.trim();
+    const parts = trimmedToken.split('.');
+    if (parts.length !== 3) return false;
+
+    try {
+      // Base64URL decode (no padding)
+      const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padding = payload.length % 4 === 0 ? '' : '='.repeat(4 - (payload.length % 4));
+      const decoded = Buffer.from(payload + padding, 'base64').toString('utf8');
+      const parsed = JSON.parse(decoded) as { exp?: number };
+      if (typeof parsed.exp !== 'number') return false;
+
+      // exp is seconds since epoch; allow small clock skew
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      return parsed.exp < nowSeconds + 30;
+    } catch {
+      return false;
+    }
+  }
+
+  function respondWithOAuthRequired(
+    req: Request,
+    res: Response,
+    discoveryUrl: string,
+    reason: 'missing_token' | 'invalid_token'
+  ): void {
+    const authorizeUrl = `${discoveryUrl}/authorize`;
+
+    // Help clients start the OAuth flow:
+    // - RFC 9728 discovery via WWW-Authenticate
+    // - Location header pointing at our /authorize entrypoint
+    res.set(
+      'WWW-Authenticate',
+      `Bearer resource_metadata="${discoveryUrl}/.well-known/oauth-protected-resource"`
+    );
+    res.set('Location', authorizeUrl);
+
+    // If this looks like a human/browser request, redirect straight into the flow.
+    const accept = (req.headers.accept || '').toLowerCase();
+    const prefersHtml = accept.includes('text/html') && !accept.includes('application/json');
+    if (prefersHtml && req.method.toUpperCase() === 'GET') {
+      res.redirect(302, authorizeUrl);
+      return;
+    }
+
+    res.status(401).json({
+      jsonrpc: '2.0',
+      error: {
+        code: -32001,
+        message: 'Authentication required',
+        data: {
+          type: 'oauth_required',
+          reason,
+          description:
+            'You must authenticate with Microsoft 365 before accessing this resource. ' +
+            'Start the OAuth flow using the provided discovery metadata or the authorize URL.',
+          oauth_discovery: `${discoveryUrl}/.well-known/oauth-protected-resource`,
+          authorization_endpoint: authorizeUrl,
+          authorization_url: authorizeUrl,
+          token_endpoint: `${discoveryUrl}/token`,
+          registration_endpoint: `${discoveryUrl}/register`,
+        },
+      },
+      id: null,
+    });
+  }
+
   return (
     req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
     res: Response,
@@ -35,6 +115,37 @@ export function createMicrosoftBearerTokenAuthMiddleware(
 
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const accessToken = authHeader.substring(7);
+
+      // Some clients may send `Authorization: Bearer ` (empty) when no OAuth session exists.
+      // Treat that as "no token" so clients can trigger the OAuth flow via RFC 9728 metadata.
+      if (!isValidBearerTokenValue(accessToken)) {
+        if (!requireAuth) {
+          logger.debug(
+            'Request with empty/invalid Bearer token - authentication not required in current mode'
+          );
+          next();
+          return;
+        }
+
+        logger.warn('Authentication required but Bearer token is empty/invalid');
+
+        const protocol = req.secure ? 'https' : 'http';
+        const host = req.get('host') || 'localhost';
+        const discoveryUrl = baseUrl || `${protocol}://${host}`;
+
+        respondWithOAuthRequired(req, res, discoveryUrl, 'missing_token');
+        return;
+      }
+
+      // If the token is a JWT and is already expired, proactively trigger OAuth flow.
+      if (requireAuth && isLikelyExpiredJwt(accessToken)) {
+        logger.warn('Bearer token appears expired - returning oauth_required');
+        const protocol = req.secure ? 'https' : 'http';
+        const host = req.get('host') || 'localhost';
+        const discoveryUrl = baseUrl || `${protocol}://${host}`;
+        respondWithOAuthRequired(req, res, discoveryUrl, 'invalid_token');
+        return;
+      }
 
       // For Microsoft Graph, we don't validate the token here - we'll let the API calls fail if it's invalid
       // and handle token refresh in the GraphClient
@@ -63,28 +174,7 @@ export function createMicrosoftBearerTokenAuthMiddleware(
       const host = req.get('host') || 'localhost';
       const discoveryUrl = baseUrl || `${protocol}://${host}`;
 
-      // Set WWW-Authenticate header as per RFC 9728 (OAuth 2.0 Protected Resource Metadata)
-      res.set(
-        'WWW-Authenticate',
-        `Bearer resource_metadata="${discoveryUrl}/.well-known/oauth-protected-resource"`
-      );
-
-      res.status(401).json({
-        jsonrpc: '2.0',
-        error: {
-          code: -32001,
-          message: 'Authentication required',
-          data: {
-            type: 'oauth_required',
-            description:
-              'You must authenticate with Microsoft 365 before accessing this resource. ' +
-              'Please complete the OAuth flow to obtain an access token.',
-            oauth_discovery: `${discoveryUrl}/.well-known/oauth-protected-resource`,
-            authorization_endpoint: `${discoveryUrl}/authorize`,
-          },
-        },
-        id: null,
-      });
+      respondWithOAuthRequired(req, res, discoveryUrl, 'missing_token');
     }
   };
 }

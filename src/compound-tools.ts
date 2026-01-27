@@ -11102,8 +11102,8 @@ Use this for "What action items do I have from recent emails?", "Extract tasks f
         /(?:action item|action|todo|to do|task|follow up|follow-up)[\s:]+(.+?)(?:\.|$)/gi,
         /(?:need to|must|should|will|going to)\s+(.+?)(?:\.|$)/gi,
         /(?:please|can you|could you)\s+(.+?)(?:\.|\?|$)/gi,
-        /(?:deadline|due|by)\s+([^\.]+)/gi,
-        /(?:assign(?:ed)? to|@)([^\s\.]+)/gi,
+        /(?:deadline|due|by)\s+([^.]+)/gi,
+        /(?:assign(?:ed)? to|@)([^\s.]+)/gi,
       ];
 
       // Extract from emails
@@ -12750,8 +12750,8 @@ Use this for "Find documents related to [topic]", "Show files related to this me
 
                   // Look for file references (common patterns)
                   const filePatterns = [
-                    /(?:see|check|review|attached|attachment)[\s:]+([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
-                    /([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                    /(?:see|check|review|attached|attachment)[\s:]+([^\s.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                    /([^\s.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
                   ];
 
                   for (const pattern of filePatterns) {
@@ -12834,8 +12834,8 @@ Use this for "Find documents related to [topic]", "Show files related to this me
                   ) {
                     // Look for file references in meeting notes
                     const filePatterns = [
-                      /(?:see|check|review|document|file)[\s:]+([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
-                      /([^\s\.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                      /(?:see|check|review|document|file)[\s:]+([^\s.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
+                      /([^\s.]+\.(?:docx?|xlsx?|pptx?|pdf|txt))/gi,
                     ];
 
                     for (const pattern of filePatterns) {

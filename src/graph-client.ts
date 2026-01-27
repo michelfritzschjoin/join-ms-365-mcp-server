@@ -95,8 +95,9 @@ class GraphClient {
     if (!accessToken) {
       throw new AuthenticationError(
         'AUTHENTICATION REQUIRED: You are not logged in to Microsoft 365. ' +
-          'Please use the "login" tool first to authenticate before using any Microsoft 365 tools. ' +
-          'After running the "login" tool, follow the device code instructions to complete authentication.'
+          'If you are using an MCP client with OAuth (for example Open WebUI), complete the OAuth authorization flow ' +
+          'and retry the request. If you are running this server in CLI/stdio mode, call the "login" tool to ' +
+          'authenticate via device code flow.'
       );
     }
 

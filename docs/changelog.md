@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* add query logging for mcp tool calls to dashboard ([f889935](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/f8899358d7e36775cfdcbc535e15cf8509757c1b))
+- add query logging for mcp tool calls to dashboard ([f889935](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/f8899358d7e36775cfdcbc535e15cf8509757c1b))
 
 ## [1.3.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.2.4...v1.3.0) (2026-01-27)
 

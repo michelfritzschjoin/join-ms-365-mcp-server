@@ -664,7 +664,7 @@ async function executeGraphTool(
 
     // Build final response with thinking process
     const thinkingResult = thinking.formatForResponse();
-    thinking.addDecision('result', `Tool execution completed successfully`);
+    thinking.addDecision('processing', `Tool execution completed successfully`);
 
     return {
       content,
@@ -698,9 +698,11 @@ async function executeGraphTool(
             text: JSON.stringify({
               error: 'AUTHENTICATION REQUIRED',
               message:
-                'You must log in to Microsoft 365 before using this tool. ' +
-                'Please call the "login" tool first and follow the device code instructions.',
-              action_required: 'Call the "login" tool to authenticate',
+                'You must authenticate with Microsoft 365 before using this tool. ' +
+                'If your MCP client supports OAuth (for example Open WebUI), complete the OAuth login flow. ' +
+                'If you are using CLI/stdio mode, call the "login" tool to authenticate via device code flow.',
+              action_required:
+                'Complete OAuth login in your MCP client OR call the "login" tool (CLI/stdio mode)',
               tool_to_call: 'login',
             }),
           },
@@ -873,15 +875,17 @@ export function registerGraphTools(
       '\n\n⚠️ REQUIRES AUTHENTICATION: You must call the "login" tool first if not already authenticated.';
 
     try {
-      server.tool(
+      server.registerTool(
         tool.alias,
-        toolDescription,
-        paramSchema,
         {
           title: tool.alias,
-          readOnlyHint: tool.method.toUpperCase() === 'GET',
-          destructiveHint: ['POST', 'PATCH', 'DELETE'].includes(tool.method.toUpperCase()),
-          openWorldHint: true, // All tools call Microsoft Graph API
+          description: toolDescription,
+          inputSchema: z.object(paramSchema),
+          annotations: {
+            readOnlyHint: tool.method.toUpperCase() === 'GET',
+            destructiveHint: ['POST', 'PATCH', 'DELETE'].includes(tool.method.toUpperCase()),
+            openWorldHint: true, // All tools call Microsoft Graph API
+          },
         },
         async (params) => executeGraphTool(tool, endpointConfig, graphClient, params)
       );
@@ -933,26 +937,28 @@ export function registerDiscoveryTools(
   const toolsRegistry = buildToolsRegistry(readOnly, orgMode);
   logger.info(`Discovery mode: ${toolsRegistry.size} tools available in registry`);
 
-  server.tool(
+  server.registerTool(
     'search-tools',
-    `Search through ${toolsRegistry.size} available Microsoft Graph API tools. Use this to find tools by name, path, or description before executing them.`,
-    {
-      query: z
-        .string()
-        .describe('Search query to filter tools (searches name, path, and description)')
-        .optional(),
-      category: z
-        .string()
-        .describe(
-          'Filter by category: mail, calendar, files, contacts, tasks, onenote, search, users, excel'
-        )
-        .optional(),
-      limit: z.number().describe('Maximum results to return (default: 20, max: 50)').optional(),
-    },
     {
       title: 'search-tools',
-      readOnlyHint: true,
-      openWorldHint: true, // Searches Microsoft Graph API tools
+      description: `Search through ${toolsRegistry.size} available Microsoft Graph API tools. Use this to find tools by name, path, or description before executing them.`,
+      inputSchema: z.object({
+        query: z
+          .string()
+          .describe('Search query to filter tools (searches name, path, and description)')
+          .optional(),
+        category: z
+          .string()
+          .describe(
+            'Filter by category: mail, calendar, files, contacts, tasks, onenote, search, users, excel'
+          )
+          .optional(),
+        limit: z.number().describe('Maximum results to return (default: 20, max: 50)').optional(),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        openWorldHint: true, // Searches Microsoft Graph API tools
+      },
     },
     async ({ query, category, limit = 20 }) => {
       const maxLimit = Math.min(limit, 50);
@@ -1009,21 +1015,24 @@ export function registerDiscoveryTools(
     }
   );
 
-  server.tool(
+  server.registerTool(
     'execute-tool',
-    'Execute a Microsoft Graph API tool by name. Use search-tools first to find available tools and their parameters.',
-    {
-      tool_name: z.string().describe('Name of the tool to execute (e.g., "list-mail-messages")'),
-      parameters: z
-        .record(z.any())
-        .describe('Parameters to pass to the tool as key-value pairs')
-        .optional(),
-    },
     {
       title: 'execute-tool',
-      readOnlyHint: false,
-      destructiveHint: true, // Can execute any tool, including write operations
-      openWorldHint: true, // Executes against Microsoft Graph API
+      description:
+        'Execute a Microsoft Graph API tool by name. Use search-tools first to find available tools and their parameters.',
+      inputSchema: z.object({
+        tool_name: z.string().describe('Name of the tool to execute (e.g., "list-mail-messages")'),
+        parameters: z
+          .record(z.string(), z.any())
+          .describe('Parameters to pass to the tool as key-value pairs')
+          .optional(),
+      }),
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true, // Can execute any tool, including write operations
+        openWorldHint: true, // Executes against Microsoft Graph API
+      },
     },
     async ({ tool_name, parameters = {} }) => {
       const toolData = toolsRegistry.get(tool_name);
