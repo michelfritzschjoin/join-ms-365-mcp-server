@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.1.0...v1.2.0) (2026-01-27)
+
+### Features
+
+* add query logging and analytics dashboard ([97b84ef](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/97b84ef400cae9dc1a176c775239e8ea66b3b031))
+
 ## [1.1.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.0.0...v1.1.0) (2026-01-26)
 
 ### Features
