@@ -643,7 +643,7 @@
     "pathPattern": "/users/{user-id}/onlineMeetings",
     "method": "get",
     "toolName": "list-user-online-meetings",
-    "scopes": ["OnlineMeetings.Read.All"]
+    "scopes": ["OnlineMeetings.Read"]
   },
   {
     "pathPattern": "/users/{user-id}/onlineMeetings/{onlineMeeting-id}/transcripts",
