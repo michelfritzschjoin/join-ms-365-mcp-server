@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* improve dashboard authentication for https with secure cookies and redirect ([40d22a9](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/40d22a9a920904e6d079384da511b2ef41a0ca8e))
+- improve dashboard authentication for https with secure cookies and redirect ([40d22a9](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/40d22a9a920904e6d079384da511b2ef41a0ca8e))
 
 ## [1.2.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.1.0...v1.2.0) (2026-01-27)
 

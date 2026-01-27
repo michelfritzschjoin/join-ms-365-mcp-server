@@ -653,26 +653,48 @@ export function registerGraphTools(
   let enabledToolsRegex: RegExp | undefined;
   if (enabledToolsPattern) {
     try {
-      // SECURITY: Sanitize regex pattern - only allow safe characters
-      // Prevent ReDoS by limiting pattern length and complexity
-      const sanitizedPattern = enabledToolsPattern.trim().substring(0, 200);
+      // SECURITY: Limit pattern length first to prevent ReDoS
+      const trimmedPattern = enabledToolsPattern.trim().substring(0, 200);
+
+      // SECURITY: Check if original pattern is syntactically valid (before sanitization)
+      // This catches syntax errors like unclosed brackets, but we limit length for safety
+      try {
+        // Test with limited length to prevent ReDoS while checking syntax
+        new RegExp(trimmedPattern, 'i');
+      } catch (syntaxError) {
+        // Original pattern has syntax errors - fall back to all tools
+        throw new Error(
+          `Invalid regex syntax in original pattern: ${(syntaxError as Error).message}`
+        );
+      }
 
       // Basic validation: reject patterns with obvious ReDoS indicators
       if (
-        sanitizedPattern.includes('(.*)*') ||
-        sanitizedPattern.includes('(.*+)*') ||
-        sanitizedPattern.includes('(.*?)*') ||
-        sanitizedPattern.match(/\(\.\*\){2,}/) // Multiple nested quantifiers
+        trimmedPattern.includes('(.*)*') ||
+        trimmedPattern.includes('(.*+)*') ||
+        trimmedPattern.includes('(.*?)*') ||
+        trimmedPattern.match(/\(\.\*\){2,}/) // Multiple nested quantifiers
       ) {
         throw new Error('Potentially dangerous regex pattern detected');
       }
 
-      enabledToolsRegex = new RegExp(sanitizedPattern, 'i');
-      logger.info(`Tool filtering enabled with pattern: ${sanitizedPattern.substring(0, 50)}...`);
-    } catch {
+      // SECURITY: Sanitize regex pattern - allow safe characters including pipe for alternation
+      // Only allow alphanumeric, spaces, basic wildcards (*, ?, .), and pipe (|) for alternation
+      const safePattern = trimmedPattern.replace(/[^\w\s.*?|()-]/g, '');
+      if (safePattern.length === 0) {
+        throw new Error('Pattern contains only unsafe characters');
+      }
+
+      // Create the sanitized regex
+      enabledToolsRegex = new RegExp(safePattern, 'i');
+      logger.info(`Tool filtering enabled with pattern: ${trimmedPattern.substring(0, 50)}...`);
+    } catch (error) {
+      // SECURITY: Fall back gracefully - register all tools if pattern is invalid
+      // This includes syntax errors, ReDoS patterns, or empty patterns
       logger.error(
-        `Invalid tool filter regex pattern: ${enabledToolsPattern.substring(0, 50)}. Ignoring filter.`
+        `Invalid tool filter regex pattern: ${enabledToolsPattern.substring(0, 50)}. Ignoring filter. Error: ${(error as Error).message}`
       );
+      enabledToolsRegex = undefined; // undefined means no filtering - register all tools
     }
   }
 

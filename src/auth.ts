@@ -4,6 +4,7 @@ import logger from './logger.js';
 import fs, { existsSync, readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { createHash } from 'crypto';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints, getDefaultClientId } from './cloud-config.js';
 
@@ -104,7 +105,14 @@ function buildScopesFromEndpoints(
         throw new Error('Potentially dangerous regex pattern detected');
       }
 
-      enabledToolsRegex = new RegExp(sanitizedPattern, 'i');
+      // SECURITY: Sanitize regex pattern - allow safe characters including pipe for alternation
+      // Only allow alphanumeric, spaces, basic wildcards (*, ?, .), and pipe (|) for alternation
+      const safePattern = sanitizedPattern.replace(/[^\w\s.*?|()-]/g, '');
+      if (safePattern.length === 0) {
+        throw new Error('Pattern contains only unsafe characters');
+      }
+
+      enabledToolsRegex = new RegExp(safePattern, 'i');
       logger.info(
         `Building scopes with tool filter pattern: ${sanitizedPattern.substring(0, 50)}...`
       );
@@ -253,8 +261,14 @@ class AuthManager {
       if (selectedAccountData) {
         const parsed = JSON.parse(selectedAccountData);
         this.selectedAccountId = parsed.accountId;
-        // SECURITY: Don't log full account ID - only first 8 chars for correlation
-        logger.info(`Loaded selected account: ${this.selectedAccountId?.substring(0, 8)}...`);
+        // SECURITY: Don't log account ID - use hash for correlation only
+        if (this.selectedAccountId) {
+          const hash = createHash('sha256')
+            .update(this.selectedAccountId)
+            .digest('hex')
+            .substring(0, 8);
+          logger.info(`Loaded selected account: [hash:${hash}]`);
+        }
       }
     } catch (error) {
       logger.error(`Error loading selected account: ${(error as Error).message}`);
@@ -358,10 +372,16 @@ class AuthManager {
       if (selectedAccount) {
         return selectedAccount;
       }
-      // SECURITY: Don't log full account ID - only first 8 chars for correlation
-      logger.warn(
-        `Selected account ${this.selectedAccountId?.substring(0, 8)}... not found, falling back to first account`
-      );
+      // SECURITY: Don't log account ID - use hash for correlation only
+      if (this.selectedAccountId) {
+        const hash = createHash('sha256')
+          .update(this.selectedAccountId)
+          .digest('hex')
+          .substring(0, 8);
+        logger.warn(`Selected account [hash:${hash}] not found, falling back to first account`);
+      } else {
+        logger.warn('Selected account not found, falling back to first account');
+      }
     }
 
     // Fall back to first account (backward compatibility)

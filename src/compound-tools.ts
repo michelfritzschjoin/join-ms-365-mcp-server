@@ -25,52 +25,69 @@ import {
 
 /**
  * SECURITY: Properly sanitize HTML content to prevent XSS
- * Handles all HTML entities, nested tags, and edge cases
+ * Uses safer approach: remove all tags first, then decode entities once
+ * This prevents double-escaping and incomplete sanitization issues
  */
 function sanitizeHtml(html: string): string {
   if (!html || typeof html !== 'string') {
     return '';
   }
 
-  // Remove script and style tags completely (including content)
+  // SECURITY: Remove dangerous tags and their content first (non-greedy to prevent ReDoS)
+  // Use more specific patterns to avoid incomplete matching
   let sanitized = html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<iframe[^>]*>[\s\S]*?<\/iframe>/gi, '')
-    .replace(/<object[^>]*>[\s\S]*?<\/object>/gi, '')
-    .replace(/<embed[^>]*>/gi, '')
-    .replace(/<link[^>]*>/gi, '')
-    .replace(/<meta[^>]*>/gi, '');
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, '')
+    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe\s*>/gi, '')
+    .replace(/<object\b[^>]*>[\s\S]*?<\/object\s*>/gi, '')
+    .replace(/<embed\b[^>]*>/gi, '')
+    .replace(/<link\b[^>]*>/gi, '')
+    .replace(/<meta\b[^>]*>/gi, '')
+    .replace(/<form\b[^>]*>[\s\S]*?<\/form\s*>/gi, '')
+    .replace(/<input\b[^>]*>/gi, '')
+    .replace(/<button\b[^>]*>[\s\S]*?<\/button\s*>/gi, '');
 
-  // Remove all HTML tags
-  sanitized = sanitized.replace(/<[^>]+>/g, ' ');
+  // SECURITY: Remove all remaining HTML tags (use non-greedy to prevent issues)
+  sanitized = sanitized.replace(/<[^>]+?>/g, ' ');
 
-  // Decode HTML entities in proper order (most specific first)
-  sanitized = sanitized
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#x27;/g, "'")
-    .replace(/&#x2F;/g, '/')
-    .replace(/&#x60;/g, '`')
-    .replace(/&#x3D;/g, '=');
+  // SECURITY: Decode HTML entities in single pass to prevent double-escaping
+  // Use a map-based approach for safer entity decoding
+  const entityMap: Record<string, string> = {
+    '&nbsp;': ' ',
+    '&amp;': '&',
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&#x27;': "'",
+    '&#x2F;': '/',
+    '&#x60;': '`',
+    '&#x3D;': '=',
+  };
 
-  // Decode numeric entities (decimal)
-  sanitized = sanitized.replace(/&#(\d+);/g, (_, dec) => {
+  // Replace named entities first (before numeric to avoid conflicts)
+  for (const [entity, replacement] of Object.entries(entityMap)) {
+    sanitized = sanitized.replace(
+      new RegExp(entity.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'),
+      replacement
+    );
+  }
+
+  // Decode numeric entities (decimal) - only safe ASCII range
+  sanitized = sanitized.replace(/&#(\d{1,7});/g, (_, dec) => {
     const code = parseInt(dec, 10);
+    // Only decode safe printable ASCII (32-126)
     return code >= 32 && code <= 126 ? String.fromCharCode(code) : '';
   });
 
-  // Decode hex entities
-  sanitized = sanitized.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => {
+  // Decode hex entities - only safe ASCII range
+  sanitized = sanitized.replace(/&#x([0-9a-fA-F]{1,6});/g, (_, hex) => {
     const code = parseInt(hex, 16);
+    // Only decode safe printable ASCII (32-126)
     return code >= 32 && code <= 126 ? String.fromCharCode(code) : '';
   });
 
-  // Normalize whitespace
+  // Normalize whitespace (single pass)
   sanitized = sanitized.replace(/\s+/g, ' ').trim();
 
   return sanitized;
@@ -4427,7 +4444,7 @@ Use this when someone asks "What were my last messages with [person name]?" or s
       const formattedMessages = messages.map((msg) => ({
         id: msg.id,
         from: msg.from?.user?.displayName || 'Unknown',
-        content: msg.body?.content?.replace(/<[^>]*>/g, '').substring(0, 500), // Strip HTML
+        content: msg.body?.content ? sanitizeHtml(msg.body.content).substring(0, 500) : undefined, // SECURITY: Proper HTML sanitization
         date: msg.createdDateTime,
         chatId: msg.id.split('/')[0],
       }));

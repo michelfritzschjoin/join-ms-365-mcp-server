@@ -314,13 +314,20 @@ export class EntityExtractor {
   private extractSource(obj: Record<string, unknown>): string {
     if (obj['webUrl'] && typeof obj['webUrl'] === 'string') {
       const url = obj['webUrl'] as string;
-      // SECURITY: Use proper URL validation instead of substring matching
+      // SECURITY: Use exact hostname matching with whitelist instead of substring matching
       try {
         const urlObj = new URL(url);
         const hostname = urlObj.hostname.toLowerCase();
-        if (hostname.includes('sharepoint.com')) return 'sharepoint';
-        if (hostname.includes('teams.microsoft.com')) return 'teams';
-        if (hostname.includes('outlook.office.com')) return 'outlook';
+        // Use exact matching or endsWith for specific domains to prevent bypass
+        if (hostname === 'sharepoint.com' || hostname.endsWith('.sharepoint.com')) {
+          return 'sharepoint';
+        }
+        if (hostname === 'teams.microsoft.com' || hostname.endsWith('.teams.microsoft.com')) {
+          return 'teams';
+        }
+        if (hostname === 'outlook.office.com' || hostname.endsWith('.outlook.office.com')) {
+          return 'outlook';
+        }
       } catch {
         // Invalid URL, skip
       }

@@ -164,3 +164,4 @@ CLAUDE.md
 
 # Knowledge Base runtime data (persists learned patterns)
 data/knowledge-base.json
+/.cursor

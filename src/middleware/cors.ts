@@ -37,12 +37,14 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction):
 
   // Set CORS headers
   // SECURITY: Never allow credentials with wildcard origin (CORS spec violation)
-  if (allowedOrigin) {
+  // Check for wildcard BEFORE setting any headers to prevent misconfiguration
+  if (allowedOrigin && allowedOrigin !== '*') {
     res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
-    // Only set credentials if origin is not wildcard
-    if (allowedOrigin !== '*') {
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-    }
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+  } else if (allowedOrigin === '*') {
+    // Wildcard origin - explicitly do NOT set credentials
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    // Credentials header is intentionally NOT set for wildcard
   }
 
   // Set allowed methods

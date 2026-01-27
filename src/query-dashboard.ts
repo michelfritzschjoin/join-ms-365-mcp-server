@@ -365,8 +365,8 @@ export function createDashboardRouter(): Router {
     res.send(getDashboardPageHtml());
   });
 
-  // API: Get queries
-  router.get('/api/queries', requireAuth, (req, res) => {
+  // API: Get queries with rate limiting
+  router.get('/api/queries', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
       const filter: QueryFilter = {
         limit: parseInt((req.query.limit as string) || '50', 10),
@@ -408,8 +408,8 @@ export function createDashboardRouter(): Router {
     }
   });
 
-  // API: Get statistics
-  router.get('/api/stats', requireAuth, (req, res) => {
+  // API: Get statistics with rate limiting
+  router.get('/api/stats', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
       const stats = queryStore.getStats();
       res.json(stats);
@@ -419,8 +419,8 @@ export function createDashboardRouter(): Router {
     }
   });
 
-  // API: Get tool names (for filter dropdown)
-  router.get('/api/tools', requireAuth, (req, res) => {
+  // API: Get tool names (for filter dropdown) with rate limiting
+  router.get('/api/tools', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
       const tools = queryStore.getToolNames();
       res.json({ tools });
@@ -430,8 +430,8 @@ export function createDashboardRouter(): Router {
     }
   });
 
-  // API: Export user data (GDPR)
-  router.get('/api/export/:userIdHash', requireAuth, (req, res) => {
+  // API: Export user data (GDPR) with rate limiting
+  router.get('/api/export/:userIdHash', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
       const queries = queryStore.exportUserQueries(req.params.userIdHash);
 
@@ -452,8 +452,8 @@ export function createDashboardRouter(): Router {
     }
   });
 
-  // API: Delete user data (GDPR Right to Erasure)
-  router.delete('/api/user/:userIdHash', requireAuth, (req, res) => {
+  // API: Delete user data (GDPR Right to Erasure) with rate limiting
+  router.delete('/api/user/:userIdHash', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
       const deleted = queryStore.deleteUserQueries(req.params.userIdHash);
 
