@@ -375,4 +375,39 @@ export function createThinkingProcess(toolName: string): ThinkingProcessManager 
   return new ThinkingProcessManager(toolName);
 }
 
+/**
+ * Add thinking steps to a response string
+ * Used by Super-Tools for simple thinking process output
+ *
+ * @param result - The actual result data (JSON string or plain text)
+ * @param thinkingSteps - Array of thinking step messages
+ * @returns Formatted response with thinking process prepended
+ */
+export function addThinkingToResponse(result: string, thinkingSteps: string[]): string {
+  if (!isThinkingEnabled() || thinkingSteps.length === 0) {
+    return result;
+  }
+
+  const level = getThinkingLevel();
+
+  // Format thinking steps based on level
+  let thinkingOutput = '';
+
+  if (level === 'minimal') {
+    // Just show the last step
+    thinkingOutput = `💭 ${thinkingSteps[thinkingSteps.length - 1]}`;
+  } else if (level === 'normal') {
+    // Show all steps with icons
+    thinkingOutput = thinkingSteps.map((step) => `💭 ${step}`).join('\n');
+  } else {
+    // Verbose: show with timestamps and full detail
+    const timestamp = new Date().toISOString();
+    thinkingOutput =
+      `🧠 Thinking Process (${timestamp}):\n` + thinkingSteps.map((step, i) => `  ${i + 1}. ${step}`).join('\n');
+  }
+
+  // Combine thinking with result
+  return `${thinkingOutput}\n\n---\n\n${result}`;
+}
+
 export default ThinkingProcessManager;
