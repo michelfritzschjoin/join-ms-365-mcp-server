@@ -225,10 +225,79 @@ class MicrosoftGraphServer {
         }
         // Additional validation: ensure _zod is not undefined if present
         const schema = value as any;
+        // Check for the specific Zod v4 issue: _zod property exists but is undefined
+        if ('_zod' in schema && schema._zod === undefined) {
+          return false; // _zod exists but is undefined - this causes tools/list crash
+        }
         if (schema._zod !== undefined && schema._zod === null) {
           return false; // _zod is explicitly null, not valid
         }
         return true;
+      };
+
+      /**
+       * Safely recreate a Zod schema to avoid _zod undefined issues
+       * This creates a fresh z.any() or z.string() etc. based on the original schema type
+       */
+      const safeRecreateSchema = (value: unknown): z.ZodTypeAny => {
+        if (!value || typeof value !== 'object') {
+          return z.any().optional();
+        }
+
+        const schemaAny = value as any;
+
+        // Check for _zod undefined issue
+        if ('_zod' in schemaAny && schemaAny._zod === undefined) {
+          logger.debug('Recreating schema due to undefined _zod');
+          return z.any().optional();
+        }
+
+        // Try to determine schema type and recreate safely
+        try {
+          // Check if it's a valid Zod schema by trying to get its type
+          const typeName = schemaAny._zod?.def?.typeName || schemaAny._def?.typeName;
+
+          if (typeName === 'ZodString') {
+            const desc = schemaAny._zod?.def?.description || schemaAny.description;
+            const isOptional = schemaAny._zod?.def?.isOptional?.() || schemaAny.isOptional?.();
+            let schema = z.string();
+            if (desc) schema = schema.describe(desc);
+            return isOptional ? schema.optional() : schema;
+          }
+
+          if (typeName === 'ZodNumber') {
+            const desc = schemaAny._zod?.def?.description || schemaAny.description;
+            const isOptional = schemaAny._zod?.def?.isOptional?.() || schemaAny.isOptional?.();
+            let schema = z.number();
+            if (desc) schema = schema.describe(desc);
+            return isOptional ? schema.optional() : schema;
+          }
+
+          if (typeName === 'ZodBoolean') {
+            const desc = schemaAny._zod?.def?.description || schemaAny.description;
+            const isOptional = schemaAny._zod?.def?.isOptional?.() || schemaAny.isOptional?.();
+            let schema = z.boolean();
+            if (desc) schema = schema.describe(desc);
+            return isOptional ? schema.optional() : schema;
+          }
+
+          if (typeName === 'ZodArray') {
+            const desc = schemaAny._zod?.def?.description || schemaAny.description;
+            const isOptional = schemaAny._zod?.def?.isOptional?.() || schemaAny.isOptional?.();
+            let schema = z.array(z.any());
+            if (desc) schema = schema.describe(desc);
+            return isOptional ? schema.optional() : schema;
+          }
+
+          // For any other type, use z.any() as safe fallback
+          if (isValidZodSchema(value)) {
+            return value as z.ZodTypeAny;
+          }
+        } catch {
+          // Schema introspection failed
+        }
+
+        return z.any().optional();
       };
 
       // Wrap registerTool to sanitize schemas before registration
@@ -263,11 +332,8 @@ class MicrosoftGraphServer {
                       if (value === undefined) {
                         continue; // Skip undefined values
                       }
-                      if (isValidZodSchema(value)) {
-                        sanitizedShape[key] = value as z.ZodTypeAny;
-                      } else {
-                        sanitizedShape[key] = z.any().optional();
-                      }
+                      // ALWAYS recreate schemas to avoid _zod undefined issues
+                      sanitizedShape[key] = safeRecreateSchema(value);
                     }
                     config.inputSchema = z.object(sanitizedShape);
                   }
@@ -415,13 +481,8 @@ class MicrosoftGraphServer {
             continue;
           }
 
-          if (isValidZodSchema(value)) {
-            sanitizedShape[key] = value as z.ZodTypeAny;
-            continue;
-          }
-
-          // Fallback: accept anything, optional. This is safer than crashing tools/list.
-          sanitizedShape[key] = z.any().optional();
+          // ALWAYS recreate schemas to avoid _zod undefined issues
+          sanitizedShape[key] = safeRecreateSchema(value);
         }
 
         return mcpServer.registerTool(
