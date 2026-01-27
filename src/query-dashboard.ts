@@ -211,10 +211,20 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
   const ipAddress = req.ip || req.socket.remoteAddress || 'unknown';
 
   if (!token || !validateSession(token, ipAddress)) {
-    res.status(401).json({
-      error: 'Unauthorized',
-      message: 'Please login to access the dashboard',
-    });
+    // For HTML requests (browser), redirect to login
+    // For API requests (JSON), return 401 JSON
+    const acceptHeader = req.get('Accept') || '';
+    const isApiRequest = acceptHeader.includes('application/json') || req.path.startsWith('/api/');
+
+    if (isApiRequest) {
+      res.status(401).json({
+        error: 'Unauthorized',
+        message: 'Please login to access the dashboard',
+      });
+    } else {
+      // Redirect to login page for browser requests
+      res.redirect('/dashboard/login');
+    }
     return;
   }
 
@@ -280,10 +290,20 @@ export function createDashboardRouter(): Router {
 
     logger.info('Dashboard login successful', { ip: ipAddress });
 
-    res.setHeader(
-      'Set-Cookie',
-      `dashboard_session=${sessionToken}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_DURATION_MS / 1000}`
-    );
+    // Set secure cookie (Secure flag for HTTPS, SameSite for CSRF protection)
+    const isSecure = req.secure || req.get('X-Forwarded-Proto') === 'https';
+    const cookieOptions = [
+      `dashboard_session=${sessionToken}`,
+      'Path=/',
+      'HttpOnly',
+      isSecure ? 'Secure' : '',
+      'SameSite=Lax', // Lax allows navigation from external sites
+      `Max-Age=${SESSION_DURATION_MS / 1000}`,
+    ]
+      .filter(Boolean)
+      .join('; ');
+
+    res.setHeader('Set-Cookie', cookieOptions);
 
     res.json({
       success: true,
@@ -300,7 +320,19 @@ export function createDashboardRouter(): Router {
       sessions.delete(token);
     }
 
-    res.setHeader('Set-Cookie', 'dashboard_session=; Path=/; HttpOnly; Max-Age=0');
+    const isSecure = req.secure || req.get('X-Forwarded-Proto') === 'https';
+    const cookieOptions = [
+      'dashboard_session=',
+      'Path=/',
+      'HttpOnly',
+      isSecure ? 'Secure' : '',
+      'SameSite=Lax',
+      'Max-Age=0',
+    ]
+      .filter(Boolean)
+      .join('; ');
+
+    res.setHeader('Set-Cookie', cookieOptions);
 
     res.json({
       success: true,

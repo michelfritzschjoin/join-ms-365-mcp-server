@@ -11,17 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* add query logging and analytics dashboard ([97b84ef](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/97b84ef400cae9dc1a176c775239e8ea66b3b031))
+- add query logging and analytics dashboard ([97b84ef](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/97b84ef400cae9dc1a176c775239e8ea66b3b031))
+
+### Bug Fixes
+
+- improve dashboard authentication for https with secure cookies and redirect ([7a2c8c0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/7a2c8c0))
 
 ## [1.1.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.0.0...v1.1.0) (2026-01-26)
 
 ### Features
 
-* add structured response formatting with server local time for calendar and mail ([cfd203f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/cfd203fee0d881ab672a0690ca25194f6b039253))
+- add structured response formatting with server local time for calendar and mail ([cfd203f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/cfd203fee0d881ab672a0690ca25194f6b039253))
 
 ### Bug Fixes
 
-* set timezone to europe/berlin in docker for correct date handling ([bd69a4f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bd69a4fd7f290898e8bba63009866d19f199083f))
+- set timezone to europe/berlin in docker for correct date handling ([bd69a4f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bd69a4fd7f290898e8bba63009866d19f199083f))
 
 ## 1.0.0 (2026-01-26)
 

@@ -95,11 +95,58 @@ export interface FormattedMailResponse {
 }
 
 /**
+ * Convert date string to server local time, handling timezone from Graph API
+ * @param dateTimeString - The date/time string from Graph API (e.g., "2026-01-27T14:00:00.0000000")
+ * @param timeZone - The timezone from Graph API (e.g., "UTC", "Europe/Berlin")
+ */
+export function convertToLocalTime(dateTimeString: string, timeZone?: string): Date {
+  // If no timezone specified or already has Z suffix, parse directly
+  if (!timeZone || dateTimeString.endsWith('Z')) {
+    return new Date(dateTimeString);
+  }
+
+  // If timezone is UTC, append Z to ensure correct parsing
+  if (timeZone === 'UTC' || timeZone === 'Etc/UTC' || timeZone === 'Etc/GMT') {
+    // Append Z to indicate UTC
+    const utcDateString = dateTimeString.endsWith('Z') ? dateTimeString : dateTimeString + 'Z';
+    return new Date(utcDateString);
+  }
+
+  // For other timezones, we need to handle the conversion properly
+  // The dateTime string is in the specified timezone, not UTC
+  try {
+    // Try to use Intl.DateTimeFormat to get the offset for the specified timezone
+    const date = new Date(dateTimeString);
+
+    // Get the offset difference between the event's timezone and local timezone
+    const eventTzDate = new Date(date.toLocaleString('en-US', { timeZone: timeZone }));
+    const localTzDate = new Date(date.toLocaleString('en-US'));
+
+    // Calculate offset difference in milliseconds
+    const offsetDiff = localTzDate.getTime() - eventTzDate.getTime();
+
+    // Adjust the date by the offset difference
+    return new Date(date.getTime() + offsetDiff);
+  } catch {
+    // Fallback: if timezone conversion fails, return the date as-is
+    return new Date(dateTimeString);
+  }
+}
+
+/**
+ * @deprecated Use convertToLocalTime instead
  * Convert UTC date string to server local time
  */
 export function utcToLocalTime(utcDateString: string): Date {
-  const date = new Date(utcDateString);
-  return date;
+  // Assume UTC if no timezone specified and no Z suffix
+  if (
+    !utcDateString.endsWith('Z') &&
+    !utcDateString.includes('+') &&
+    !utcDateString.includes('-', 10)
+  ) {
+    return new Date(utcDateString + 'Z');
+  }
+  return new Date(utcDateString);
 }
 
 /**
@@ -187,12 +234,17 @@ export function getServerTimezone(): string {
  * Format a single calendar event from Graph API response
  */
 export function formatCalendarEvent(event: Record<string, unknown>): FormattedCalendarEvent {
-  // Extract start and end times
+  // Extract start and end times with timezone info
   const startObj = event.start as { dateTime?: string; timeZone?: string } | undefined;
   const endObj = event.end as { dateTime?: string; timeZone?: string } | undefined;
 
-  const startDateTime = startObj?.dateTime ? utcToLocalTime(startObj.dateTime) : new Date();
-  const endDateTime = endObj?.dateTime ? utcToLocalTime(endObj.dateTime) : new Date();
+  // Use convertToLocalTime with the timezone from Graph API
+  const startDateTime = startObj?.dateTime
+    ? convertToLocalTime(startObj.dateTime, startObj.timeZone)
+    : new Date();
+  const endDateTime = endObj?.dateTime
+    ? convertToLocalTime(endObj.dateTime, endObj.timeZone)
+    : new Date();
 
   // Extract organizer
   const organizerObj = event.organizer as
@@ -713,6 +765,7 @@ export default {
   isMailResponse,
   // General functions
   formatGraphResponse,
+  convertToLocalTime,
   utcToLocalTime,
   formatLocalDate,
   formatLocalTime,
