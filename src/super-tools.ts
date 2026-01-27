@@ -17,6 +17,14 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import GraphClient from './graph-client.js';
 import logger from './logger.js';
 import { addThinkingToResponse, isThinkingEnabled } from './thinking-process.js';
+import {
+  formatCalendarResponse,
+  calendarResponseToText,
+  formatMailResponse,
+  mailResponseToText,
+  isCalendarResponse,
+  isMailResponse,
+} from './response-formatter.js';
 
 /**
  * Helper function to call Graph API endpoints
@@ -191,6 +199,15 @@ async function handleEmail(
       if (input.skip) params.$skip = String(input.skip);
 
       const result = await callGraph(graphClient, 'GET', endpoint, params);
+      const parsedResult = JSON.parse(result);
+      
+      // Format mail response with quick summary
+      if (isMailResponse(parsedResult)) {
+        const formatted = formatMailResponse(parsedResult);
+        const formattedText = mailResponseToText(formatted);
+        return addThinkingToResponse(formattedText, thinking);
+      }
+      
       return addThinkingToResponse(result, thinking);
     }
 
@@ -226,6 +243,15 @@ async function handleEmail(
         $top: String(input.top || 25),
       };
       const result = await callGraph(graphClient, 'GET', '/me/messages', params);
+      const parsedResult = JSON.parse(result);
+      
+      // Format mail response with quick summary
+      if (isMailResponse(parsedResult)) {
+        const formatted = formatMailResponse(parsedResult);
+        const formattedText = mailResponseToText(formatted);
+        return addThinkingToResponse(formattedText, thinking);
+      }
+      
       return addThinkingToResponse(result, thinking);
     }
 
@@ -352,10 +378,16 @@ async function handleCalendar(
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
       if (input.orderby) params.$orderby = input.orderby;
-      const result = await callGraph(graphClient, 'GET', '/me/events', params,
-        undefined,
-        headers
-      );
+      const result = await callGraph(graphClient, 'GET', '/me/events', params, undefined, headers);
+      const parsedResult = JSON.parse(result);
+      
+      // Format calendar response with quick summary
+      if (isCalendarResponse(parsedResult)) {
+        const formatted = formatCalendarResponse(parsedResult);
+        const formattedText = calendarResponseToText(formatted);
+        return addThinkingToResponse(formattedText, thinking);
+      }
+      
       return addThinkingToResponse(result, thinking);
     }
 
@@ -380,10 +412,16 @@ async function handleCalendar(
         $top: String(input.top || 50),
       };
       if (input.orderby) params.$orderby = input.orderby;
-      const result = await callGraph(graphClient, 'GET', '/me/calendarView', params,
-        undefined,
-        headers
-      );
+      const result = await callGraph(graphClient, 'GET', '/me/calendarView', params, undefined, headers);
+      const parsedResult = JSON.parse(result);
+      
+      // Format calendar response with quick summary
+      if (isCalendarResponse(parsedResult)) {
+        const formatted = formatCalendarResponse(parsedResult, input.startDateTime, input.endDateTime);
+        const formattedText = calendarResponseToText(formatted);
+        return addThinkingToResponse(formattedText, thinking);
+      }
+      
       return addThinkingToResponse(result, thinking);
     }
 
@@ -399,10 +437,16 @@ async function handleCalendar(
       thinking.push(`Listing events from calendar: ${input.calendarId}`);
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
-      const result = await callGraph(graphClient, 'GET', `/me/calendars/${input.calendarId}/events`, params,
-        undefined,
-        headers
-      );
+      const result = await callGraph(graphClient, 'GET', `/me/calendars/${input.calendarId}/events`, params, undefined, headers);
+      const parsedResult = JSON.parse(result);
+      
+      // Format calendar response with quick summary
+      if (isCalendarResponse(parsedResult)) {
+        const formatted = formatCalendarResponse(parsedResult);
+        const formattedText = calendarResponseToText(formatted);
+        return addThinkingToResponse(formattedText, thinking);
+      }
+      
       return addThinkingToResponse(result, thinking);
     }
 
