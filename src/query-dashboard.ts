@@ -19,15 +19,27 @@
 
 import { Router, Request, Response, NextFunction } from 'express';
 import { randomBytes, timingSafeEqual } from 'crypto';
+import rateLimit from 'express-rate-limit';
 import { getQueryStore, type QueryFilter } from './query-store.js';
 import logger from './logger.js';
-import { rateLimitMiddleware, createRateLimitMiddleware } from './middleware/rate-limit.js';
+import { rateLimitMiddleware } from './middleware/rate-limit.js';
 
-// SECURITY: Strict rate limiter for login endpoints (5 attempts per 15 minutes)
-const loginRateLimiter = createRateLimitMiddleware(
-  15 * 60 * 1000, // 15 minutes
-  5 // Only 5 attempts
-);
+// SECURITY: Strict rate limiter for login endpoints using express-rate-limit
+// This is recognized by security scanners like CodeQL
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // Limit each IP to 5 login attempts per window
+  message: { error: 'Too many login attempts', message: 'Please try again later' },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  handler: (req, res) => {
+    logger.warn('Login rate limit exceeded', { ip: req.ip });
+    res.status(429).json({
+      error: 'Too many login attempts',
+      message: 'Please try again in 15 minutes',
+    });
+  },
+});
 
 /**
  * Session store for dashboard authentication
