@@ -124,9 +124,11 @@ function displayEnvironmentVariables(): void {
     'CGPT_JOIN_LICENSE',
   ]);
 
-  console.log('\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m');
-  console.log('\x1b[33m  Environment Variables (Masked)\x1b[0m');
-  console.log('\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n');
+  // CRITICAL: MCP STDIO servers MUST NOT write to stdout
+  // Use console.error (stderr) for all diagnostic output
+  console.error('\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m');
+  console.error('\x1b[33m  Environment Variables (Masked)\x1b[0m');
+  console.error('\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n');
 
   let hasVariables = false;
   for (const varName of relevantVars) {
@@ -134,15 +136,17 @@ function displayEnvironmentVariables(): void {
     if (value !== undefined) {
       hasVariables = true;
       const displayValue = sensitiveVars.has(varName) ? maskSensitiveValue(value) : value;
-      console.log(`  \x1b[36m${varName.padEnd(40)}\x1b[0m = ${displayValue}`);
+      console.error(`  \x1b[36m${varName.padEnd(40)}\x1b[0m = ${displayValue}`);
     }
   }
 
   if (!hasVariables) {
-    console.log('  \x1b[90m(No relevant environment variables set)\x1b[0m');
+    console.error('  \x1b[90m(No relevant environment variables set)\x1b[0m');
   }
 
-  console.log('\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n');
+  console.error(
+    '\n\x1b[33m═══════════════════════════════════════════════════════════════\x1b[0m\n'
+  );
 }
 
 /**
@@ -167,7 +171,9 @@ function displayBanner(): void {
 ╚═══════════════════════════════════════════════════════════════╝
 `;
 
-  console.log('\x1b[36m%s\x1b[0m', banner); // Cyan color
+  // CRITICAL: MCP STDIO servers MUST NOT write to stdout
+  // Use console.error (stderr) for all diagnostic output
+  console.error('\x1b[36m%s\x1b[0m', banner); // Cyan color
 }
 
 async function main(): Promise<void> {

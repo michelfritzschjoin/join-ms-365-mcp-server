@@ -48,6 +48,9 @@ const isSilent = process.env.SILENT === 'true' || process.env.SILENT === '1';
 if (!isSilent) {
   logger.add(
     new winston.transports.Console({
+      // CRITICAL: MCP STDIO servers MUST write to stderr, not stdout
+      // Writing to stdout corrupts JSON-RPC messages
+      stderrLevels: ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'],
       format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
     })
   );
@@ -62,6 +65,9 @@ export const enableConsoleLogging = (): void => {
   if (!hasConsoleTransport) {
     logger.add(
       new winston.transports.Console({
+        // CRITICAL: MCP STDIO servers MUST write to stderr, not stdout
+        // Writing to stdout corrupts JSON-RPC messages
+        stderrLevels: ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'],
         format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
         silent: process.env.SILENT === 'true' || process.env.SILENT === '1',
       })

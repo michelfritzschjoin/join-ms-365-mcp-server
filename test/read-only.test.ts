@@ -47,15 +47,25 @@ vi.mock('../src/logger.js', () => {
 });
 
 describe('Read-Only Mode', () => {
-  let mockServer: { tool: ReturnType<typeof vi.fn> };
+  let mockServer: {
+    tool: ReturnType<typeof vi.fn>;
+    registerTool: ReturnType<typeof vi.fn>;
+  };
+  let toolCalls: string[];
 
   beforeEach(() => {
     vi.clearAllMocks();
 
     delete process.env.READ_ONLY;
 
+    toolCalls = [];
     mockServer = {
-      tool: vi.fn(),
+      tool: vi.fn((name: string) => {
+        toolCalls.push(name);
+      }),
+      registerTool: vi.fn((name: string) => {
+        toolCalls.push(name);
+      }),
     };
   });
 
@@ -71,9 +81,8 @@ describe('Read-Only Mode', () => {
 
     registerGraphTools(mockServer, {} as GraphClient, options.readOnly);
 
-    expect(mockServer.tool).toHaveBeenCalledTimes(1);
-
-    const toolCalls = mockServer.tool.mock.calls.map((call: unknown[]) => call[0]);
+    // Check combined calls from both tool() and registerTool()
+    expect(toolCalls.length).toBe(1);
     expect(toolCalls).toContain('list-mail-messages');
     expect(toolCalls).not.toContain('send-mail');
     expect(toolCalls).not.toContain('delete-mail-message');
@@ -87,9 +96,8 @@ describe('Read-Only Mode', () => {
 
     registerGraphTools(mockServer, {} as GraphClient, options.readOnly);
 
-    expect(mockServer.tool).toHaveBeenCalledTimes(3);
-
-    const toolCalls = mockServer.tool.mock.calls.map((call: unknown[]) => call[0]);
+    // Check combined calls from both tool() and registerTool()
+    expect(toolCalls.length).toBe(3);
     expect(toolCalls).toContain('list-mail-messages');
     expect(toolCalls).toContain('send-mail');
     expect(toolCalls).toContain('delete-mail-message');

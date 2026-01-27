@@ -40,117 +40,65 @@ vi.mock('../src/generated/client.js', () => ({
 describe('Tool Filtering', () => {
   let server: McpServer;
   let graphClient: GraphClient;
-  let toolSpy: ReturnType<typeof vi.spyOn>;
+  let toolCalls: string[];
 
   beforeEach(() => {
     server = new McpServer({ name: 'test', version: '1.0.0' });
     graphClient = {} as GraphClient;
-    toolSpy = vi.spyOn(server, 'tool').mockImplementation(() => {});
+    toolCalls = [];
+
+    // Mock both tool() and registerTool() to capture tool names
+    vi.spyOn(server, 'tool').mockImplementation((name: string) => {
+      toolCalls.push(name);
+    });
+    vi.spyOn(server, 'registerTool').mockImplementation((name: string) => {
+      toolCalls.push(name);
+    });
   });
 
   it('should register all tools when no filter is provided', () => {
     registerGraphTools(server, graphClient, false);
 
-    expect(toolSpy).toHaveBeenCalledTimes(5);
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
-    expect(toolSpy).toHaveBeenCalledWith(
-      'send-mail',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-calendar-events',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-excel-worksheets',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
-    expect(toolSpy).toHaveBeenCalledWith(
-      'get-current-user',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
+    expect(toolCalls.length).toBe(5);
+    expect(toolCalls).toContain('list-mail-messages');
+    expect(toolCalls).toContain('send-mail');
+    expect(toolCalls).toContain('list-calendar-events');
+    expect(toolCalls).toContain('list-excel-worksheets');
+    expect(toolCalls).toContain('get-current-user');
   });
 
   it('should filter tools by regex pattern - mail only', () => {
     registerGraphTools(server, graphClient, false, 'mail');
 
-    expect(toolSpy).toHaveBeenCalledTimes(2);
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
-    expect(toolSpy).toHaveBeenCalledWith(
-      'send-mail',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
+    expect(toolCalls.length).toBe(2);
+    expect(toolCalls).toContain('list-mail-messages');
+    expect(toolCalls).toContain('send-mail');
   });
 
   it('should filter tools by regex pattern - calendar or excel', () => {
     registerGraphTools(server, graphClient, false, 'calendar|excel');
 
-    expect(toolSpy).toHaveBeenCalledTimes(2);
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-calendar-events',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-excel-worksheets',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
+    expect(toolCalls.length).toBe(2);
+    expect(toolCalls).toContain('list-calendar-events');
+    expect(toolCalls).toContain('list-excel-worksheets');
   });
 
   it('should handle invalid regex patterns gracefully', () => {
     registerGraphTools(server, graphClient, false, '[invalid regex');
 
-    expect(toolSpy).toHaveBeenCalledTimes(5);
+    expect(toolCalls.length).toBe(5);
   });
 
   it('should combine read-only and filtering correctly', () => {
     registerGraphTools(server, graphClient, true, 'mail');
 
-    expect(toolSpy).toHaveBeenCalledTimes(1);
-    expect(toolSpy).toHaveBeenCalledWith(
-      'list-mail-messages',
-      expect.any(String),
-      expect.any(Object),
-      expect.any(Object),
-      expect.any(Function)
-    );
+    expect(toolCalls.length).toBe(1);
+    expect(toolCalls).toContain('list-mail-messages');
   });
 
   it('should register no tools when pattern matches nothing', () => {
     registerGraphTools(server, graphClient, false, 'nonexistent');
 
-    expect(toolSpy).toHaveBeenCalledTimes(0);
+    expect(toolCalls.length).toBe(0);
   });
 });
