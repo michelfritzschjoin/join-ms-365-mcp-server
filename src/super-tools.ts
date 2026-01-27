@@ -1205,9 +1205,42 @@ async function handleSearch(
 
   thinking.push(`🔍 Microsoft 365 Search: "${input.query}"`);
 
-  // Build entity types - default to all if not specified
-  const entityTypes = input.entityTypes || ['message', 'event', 'driveItem', 'site'];
+  // Detect person-related queries and Teams keywords (needed for both entity type selection and query improvement)
+  const personPatterns = [
+    /\b(mit|von|to|from|with)\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b/i, // "mit Ricardo", "von Max Müller"
+    /\b([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b/, // Standalone names like "Ricardo"
+    /\b(chat|nachricht|message|teams)\s+(mit|von|to|from|with)\s+([A-ZÄÖÜ][a-zäöüß]+)/i, // "Chat mit Ricardo"
+  ];
+  const hasPersonQuery = personPatterns.some(pattern => pattern.test(input.query));
+  const hasTeamsKeywords = /\b(teams|chat|nachricht|message)\b/i.test(input.query);
+  const personMatch = input.query.match(personPatterns[0]) || input.query.match(personPatterns[1]);
+  const personName = personMatch ? (personMatch[2] || personMatch[1]) : null;
+
+  // Intelligent entity type detection based on query
+  let entityTypes = input.entityTypes;
+  
+  if (!entityTypes) {
+    // Default: include all common types including chatMessage
+    entityTypes = ['message', 'event', 'driveItem', 'site', 'chatMessage'];
+    
+    if (hasPersonQuery || hasTeamsKeywords) {
+      // Prioritize chatMessage and person for person/Teams queries
+      entityTypes = ['chatMessage', 'message', 'person', 'event'];
+      thinking.push('💡 Detected person/Teams query - prioritizing chatMessage and person');
+    }
+  }
+  
   thinking.push(`Searching in: ${entityTypes.join(', ')}`);
+
+  // Improve query for better search results
+  // Simplify query for Teams/person searches to just the person name
+  let searchQuery = input.query;
+  
+  if (personName && (hasTeamsKeywords || entityTypes.includes('chatMessage'))) {
+    // For Teams/person queries, simplify to just the person name for better results
+    searchQuery = personName;
+    thinking.push(`💡 Simplified query to person name: "${searchQuery}" for better Teams search results`);
+  }
 
   // Build the search request
   const searchRequest = {
@@ -1215,7 +1248,7 @@ async function handleSearch(
       {
         entityTypes: entityTypes,
         query: {
-          queryString: input.query,
+          queryString: searchQuery,
         },
         from: input.from || 0,
         size: input.size || 25,
@@ -1264,8 +1297,30 @@ async function handleSearch(
       `Found ${totalHits} results across ${Object.keys(formattedResults).length} entity types`
     );
 
+    // Use personName and hasTeamsKeywords from earlier detection
+
     // Provide guidance on which tools to use based on results
     const toolSuggestions: string[] = [];
+    
+    // If no results found and searching for person/Teams, suggest compound tools
+    if (totalHits === 0 && (personName || hasTeamsKeywords)) {
+      if (hasTeamsKeywords || entityTypes.includes('chatMessage')) {
+        toolSuggestions.push(
+          '💡 Try compound tool "find-messages-with-person" for Teams chats with a specific person'
+        );
+        toolSuggestions.push('💡 Try "teams" tool with action "chats" to list all chats');
+      }
+      if (personName) {
+        toolSuggestions.push(
+          `💡 Try compound tool "find-emails-with-person" to find emails with ${personName}`
+        );
+        toolSuggestions.push(
+          `💡 Try compound tool "discover-person" for comprehensive info about ${personName}`
+        );
+      }
+    }
+    
+    // Suggest tools based on found entity types
     for (const entityType of Object.keys(formattedResults)) {
       if (entityType.includes('message')) {
         toolSuggestions.push('Use "email" tool for detailed email operations');
@@ -1280,12 +1335,28 @@ async function handleSearch(
         toolSuggestions.push('Use "sharepoint" tool for SharePoint operations');
       }
       if (entityType.includes('chatMessage')) {
-        toolSuggestions.push('Use "teams" tool for Teams operations');
+        toolSuggestions.push('Use "teams" tool with action "chat-messages" for Teams chat details');
+        if (personName) {
+          toolSuggestions.push(
+            `💡 Try compound tool "find-messages-with-person" for all chats with ${personName}`
+          );
+        }
+      }
+      if (entityType.includes('person')) {
+        if (personName) {
+          toolSuggestions.push(
+            `💡 Try compound tool "discover-person" for comprehensive info about ${personName}`
+          );
+        }
       }
     }
 
     if (toolSuggestions.length > 0) {
       thinking.push('💡 Suggested next tools: ' + [...new Set(toolSuggestions)].join(', '));
+    } else if (totalHits === 0) {
+      thinking.push(
+        '💡 No results found. Try refining your search query or use specific tools like "teams", "email", or "calendar"'
+      );
     }
 
     const output = {
