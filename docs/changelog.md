@@ -7,6 +7,16 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.5.0...v1.5.1) (2026-01-27)
+
+### Bug Fixes
+
+* robust schema recreation to prevent _zod undefined crash in tools/list ([486129c](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/486129cb53b5a7fab3717442aaf5c433fa196c15))
+
+### Documentation
+
+* add version management rule and update readme with version info ([2026bdb](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/2026bdb6a93e499723a03bd99c8d07f5fd6b0873))
+
 ## [1.5.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.4.0...v1.5.0) (2026-01-27)
 
 ### Features
