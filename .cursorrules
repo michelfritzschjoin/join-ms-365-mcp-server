@@ -1,0 +1,41 @@
+# Version Management Rule
+
+## Version Display Synchronization
+
+**CRITICAL**: Die Version muss IMMER dynamisch aus `package.json` gelesen werden und darf NIEMALS hardcodiert sein.
+
+### Requirements:
+
+1. **Version Source**: Die Version wird ausschließlich aus `package.json` zur Laufzeit gelesen über `src/version.ts`
+   - Die Version wird NICHT hardcodiert in Banner, CLI oder anderen Stellen
+   - `src/version.ts` liest die Version dynamisch aus `package.json`
+
+2. **Version Display**: Die Version wird angezeigt in:
+   - Banner (`src/index.ts` - `displayBanner()` Funktion)
+   - CLI (`src/cli.ts` - Commander `.version()`)
+   - Alle anderen Stellen müssen `version` aus `src/version.ts` importieren
+
+3. **When Version Changes**:
+   - Wenn `package.json` Version geändert wird, muss NICHTS anderes geändert werden
+   - Die Anzeige aktualisiert sich automatisch zur Laufzeit
+   - Nach Version-Änderung: `npm run build` ausführen, um Build zu aktualisieren
+
+4. **Verification**:
+   - Stelle sicher, dass keine hardcodierte Versionsnummer in Banner, CLI oder anderen Dateien existiert
+   - Alle Version-Referenzen müssen `import { version } from './version.js'` verwenden
+   - Die Version wird zur Laufzeit aus `package.json` gelesen, nicht zur Build-Zeit
+
+5. **Banner Format**: 
+   - Das Banner in `src/index.ts` zeigt die Version korrekt formatiert an
+   - Format: `Version ${version}` mit korrekter Padding für ASCII-Art Alignment
+
+### Implementation Check:
+- ✅ `src/version.ts` liest dynamisch aus `package.json`
+- ✅ `src/index.ts` importiert und verwendet `version` aus `src/version.ts`
+- ✅ `src/cli.ts` importiert und verwendet `version` aus `package.json` direkt (akzeptabel, da Commander es erwartet)
+
+**WICHTIG**: Bei jeder Änderung der Version in `package.json` muss sichergestellt werden, dass:
+1. Keine hardcodierte Version in anderen Dateien existiert
+2. Der Build nach Version-Änderung ausgeführt wird (`npm run build`)
+3. Die Version-Anzeige zur Laufzeit korrekt ist
+

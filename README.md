@@ -997,6 +997,12 @@ All Rights Reserved © 2025 Join GmbH
 
 ---
 
+## ℹ️ Version Information
+
+The version is automatically read from `package.json` at runtime. The displayed version in the banner and CLI is always synchronized with the package version - no manual updates required.
+
+---
+
 <p align="center">
   <strong>Built with ❤️ by Join GmbH</strong>
 </p>
