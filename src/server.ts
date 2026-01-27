@@ -1793,6 +1793,16 @@ class MicrosoftGraphServer {
         logger.info(
           'Query Dashboard disabled - set DASHBOARD_PASSWORD environment variable to enable'
         );
+        // Explicitly handle /dashboard routes when disabled
+        // Returns 503 Service Unavailable to indicate the feature is not configured
+        app.use('/dashboard', (_req, res) => {
+          res.status(503).json({
+            error: 'Dashboard not available',
+            message:
+              'The Query Dashboard is disabled. Set DASHBOARD_PASSWORD environment variable to enable it.',
+            hint: 'Contact your administrator to configure the dashboard.',
+          });
+        });
       }
 
       // Health check endpoint
