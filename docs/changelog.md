@@ -7,6 +7,13 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.5.1...v1.6.0) (2026-01-27)
+
+### Features
+
+* add search super-tool and read-only mode support ([4a3216d](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/4a3216d6e0d60056f6b7a741868e7e66e9db2739))
+* add Super-Tools mode - consolidates 126+ tools into 10 unified tools ([d230300](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d23030088970a6db6586ca0838ec07f0dd969dce))
+
 ## [1.5.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.5.0...v1.5.1) (2026-01-27)
 
 ### Bug Fixes
