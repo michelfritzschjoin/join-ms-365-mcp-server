@@ -2771,7 +2771,7 @@ async function handleSearch(
   // Intelligent entity type detection based on query and NLP
   let entityTypes = input.entityTypes;
 
-  if (!entityTypes) {
+  if (!entityTypes || entityTypes.length === 0) {
     // Default: include all common types including chatMessage
     entityTypes = ['message', 'event', 'driveItem', 'site', 'chatMessage'];
 
@@ -2786,10 +2786,31 @@ async function handleSearch(
       entityTypes = ['chatMessage', 'message'];
       thinking.push('💡 NLP detected Teams query - searching chats and messages');
     } else if (hasPersonQuery || hasTeamsKeywords) {
-      // Prioritize chatMessage and person for person/Teams queries
-      entityTypes = ['chatMessage', 'message', 'person', 'event'];
-      thinking.push('💡 Detected person/Teams query - prioritizing chatMessage and person');
+      // For person queries, use chatMessage and message (person cannot be combined with others)
+      entityTypes = ['chatMessage', 'message'];
+      thinking.push('💡 Detected person/Teams query - searching chats and messages');
     }
+  }
+
+  // Validate entity types - Microsoft Graph API has restrictions on combinations
+  // Rule: 'person' cannot be combined with other entity types
+  if (entityTypes.includes('person') && entityTypes.length > 1) {
+    thinking.push('⚠️ Person entity type cannot be combined with others - using only person');
+    entityTypes = ['person'];
+  }
+
+  // Rule: Ensure at least one valid entity type
+  if (entityTypes.length === 0) {
+    entityTypes = ['message', 'event', 'driveItem', 'site'];
+    thinking.push('⚠️ No valid entity types - using default set');
+  }
+
+  // Additional validation: Remove any invalid combinations
+  // According to Microsoft Graph API, certain combinations are not allowed
+  // If person is present, remove all others
+  const hasPerson = entityTypes.includes('person');
+  if (hasPerson) {
+    entityTypes = ['person'];
   }
 
   thinking.push(`Searching in: ${entityTypes.join(', ')}`);

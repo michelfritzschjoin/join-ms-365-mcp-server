@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **super-tools:** extend nlp integration and improve pagination ([5b8ff33](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/5b8ff333b95e26be89516c7c568516f1210316a3))
+- **super-tools:** extend nlp integration and improve pagination ([5b8ff33](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/5b8ff333b95e26be89516c7c568516f1210316a3))
 
 ## [1.12.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.11.0...v1.12.0) (2026-01-28)
 
