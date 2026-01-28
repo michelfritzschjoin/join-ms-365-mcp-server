@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.13.0...v1.14.0) (2026-01-28)
+
+### Features
+
+* **super-tools:** add cache invalidation and batch optimization ([b6d43ce](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/b6d43ce51bc41e2596cd8cf414a8f7f792c6b6a3))
+
 ## [1.13.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.12.0...v1.13.0) (2026-01-28)
 
 ### Features
