@@ -25,6 +25,10 @@ import {
   isCalendarResponse,
   isMailResponse,
 } from './response-formatter.js';
+import NLPEnhancer, { type DecomposedQuery, type ExtractedEntity } from './nlp-enhancer.js';
+
+// Initialize NLP Enhancer for intelligent query processing
+const nlpEnhancer = new NLPEnhancer();
 
 /**
  * Format search query for Microsoft Graph API endpoints that require property:value format
@@ -647,12 +651,17 @@ const teamsActions = z.enum([
 const teamsSchema = z.object({
   action: teamsActions.describe('The Teams operation to perform'),
   // Identifiers
-  teamId: z.string().optional().describe('Team ID (required for get-team, channels, channel-messages)'),
+  teamId: z
+    .string()
+    .optional()
+    .describe('Team ID (required for get-team, channels, channel-messages)'),
   channelId: z.string().optional().describe('Channel ID (required for channel-messages)'),
   chatId: z
     .string()
     .optional()
-    .describe('Chat ID (REQUIRED for chat-messages action - use "chats" action first to get chat IDs)'),
+    .describe(
+      'Chat ID (REQUIRED for chat-messages action - use "chats" action first to get chat IDs)'
+    ),
   messageId: z.string().optional().describe('Message ID'),
   // Options
   includeMessages: z
@@ -1822,20 +1831,72 @@ const assistantActions = z.enum([
   'project-overview', // Get project overview
   'follow-ups', // Get pending follow-up items
   'meeting-prep', // Prepare for upcoming meeting
+  // NEW: Discovery Actions with NLP
+  'discover', // Automatic discovery - NLP analyzes query and chooses best strategy
+  'discover-person', // Comprehensive person discovery (emails, meetings, chats, files)
+  'discover-project', // Comprehensive project discovery (files, sites, tasks, meetings)
+  'discover-topic', // Comprehensive topic search across all M365 products
+  'discover-company', // Customer 360 - comprehensive company/organization view
 ]);
 
+/**
+ * Discovery Response Interface for structured output
+ */
+interface DiscoveryResponse {
+  target: string;
+  targetType: 'person' | 'project' | 'topic' | 'company';
+  nlpAnalysis: {
+    detectedIntent: string;
+    detectedEntities: Array<{ value: string; type: string; confidence: number }>;
+    confidence: number;
+    suggestedFollowUps: string[];
+  };
+  summary: {
+    totalItems: number;
+    sources: string[];
+    timeRange: string;
+  };
+  results: {
+    emails?: unknown[];
+    files?: unknown[];
+    meetings?: unknown[];
+    chats?: unknown[];
+    tasks?: unknown[];
+    contacts?: unknown[];
+    sites?: unknown[];
+  };
+  insights?: {
+    relationshipScore?: number;
+    recommendations?: string[];
+    recentActivity?: string;
+    lastInteraction?: string;
+  };
+}
+
 const assistantSchema = z.object({
-  action: assistantActions.describe('The assistant operation to perform'),
+  action: assistantActions.describe(
+    'The assistant operation to perform. Use "discover" for automatic NLP-based discovery, or specific discover-* actions for targeted searches.'
+  ),
   // Query
   query: z.string().optional().describe('Natural language query or search term'),
+  // Target for discovery actions
+  target: z
+    .string()
+    .optional()
+    .describe('Target for discovery actions (person name, project name, topic, or company name)'),
   // Person context
   person: z.string().optional().describe('Person name or email'),
   // Project/topic context
   topic: z.string().optional().describe('Topic or project name'),
   // Time context
-  days: z.number().optional().describe('Number of days to look back (default: 7)'),
+  days: z.number().optional().describe('Number of days to look back (default: 7, max: 365)'),
   // Limits
-  limit: z.number().optional().describe('Maximum results to return (default: 25)'),
+  limit: z.number().optional().describe('Maximum results per category (default: 25, max: 100)'),
+  // Include download links for files
+  includeDownloadLinks: z
+    .boolean()
+    .optional()
+    .describe('Include download links for discovered files (default: false)'),
 });
 
 type AssistantInput = z.infer<typeof assistantSchema>;
@@ -1997,9 +2058,745 @@ async function handleAssistant(
       return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
     }
 
+    // =========================================================================
+    // DISCOVERY ACTIONS - NLP-powered comprehensive search
+    // =========================================================================
+
+    case 'discover': {
+      // Automatic discovery - NLP analyzes and routes to best strategy
+      const queryText = input.query || input.target || input.topic || input.person;
+      if (!queryText) {
+        throw new Error(
+          'Query, target, topic, or person is required for discover action. ' +
+            'Example: { "action": "discover", "query": "Alle Infos zu Max Müller" }'
+        );
+      }
+
+      thinking.push(`🔍 Analyzing query with NLP: "${queryText}"`);
+      const decomposed = nlpEnhancer.decomposeQuery(queryText);
+
+      thinking.push(`📊 NLP Analysis:`);
+      thinking.push(
+        `   Intent: ${decomposed.intent.type} (confidence: ${Math.round(decomposed.intent.confidence * 100)}%)`
+      );
+      thinking.push(
+        `   Entities: ${decomposed.entities.map((e) => `${e.value} (${e.type})`).join(', ') || 'none detected'}`
+      );
+      if (decomposed.temporal) {
+        thinking.push(
+          `   Temporal: ${decomposed.temporal.expression} (${decomposed.temporal.type})`
+        );
+      }
+      if (decomposed.ms365Context) {
+        thinking.push(`   MS365 Context: ${decomposed.ms365Context.service}`);
+      }
+
+      // Route to best discovery action based on NLP analysis
+      const primaryEntity = decomposed.entities[0];
+
+      if (primaryEntity?.type === 'person' || decomposed.intent.type === 'who') {
+        thinking.push(`🎯 Routing to: discover-person (detected person entity)`);
+        return handleDiscoverPerson(
+          { ...input, target: primaryEntity?.value || queryText },
+          graphClient,
+          decomposed,
+          thinking
+        );
+      } else if (primaryEntity?.type === 'organization') {
+        thinking.push(`🎯 Routing to: discover-company (detected organization entity)`);
+        return handleDiscoverCompany(
+          { ...input, target: primaryEntity?.value || queryText },
+          graphClient,
+          decomposed,
+          thinking
+        );
+      } else if (primaryEntity?.type === 'project') {
+        thinking.push(`🎯 Routing to: discover-project (detected project entity)`);
+        return handleDiscoverProject(
+          { ...input, target: primaryEntity?.value || queryText },
+          graphClient,
+          decomposed,
+          thinking
+        );
+      } else {
+        thinking.push(`🎯 Routing to: discover-topic (general topic search)`);
+        return handleDiscoverTopic(
+          { ...input, target: queryText },
+          graphClient,
+          decomposed,
+          thinking
+        );
+      }
+    }
+
+    case 'discover-person': {
+      const personName = input.target || input.person || input.query;
+      if (!personName) {
+        throw new Error(
+          'Target, person, or query is required for discover-person action. ' +
+            'Example: { "action": "discover-person", "target": "Max Müller" }'
+        );
+      }
+
+      thinking.push(`👤 Discovering person: "${personName}"`);
+      const decomposed = nlpEnhancer.decomposeQuery(personName);
+      return handleDiscoverPerson(
+        { ...input, target: personName },
+        graphClient,
+        decomposed,
+        thinking
+      );
+    }
+
+    case 'discover-project': {
+      const projectName = input.target || input.topic || input.query;
+      if (!projectName) {
+        throw new Error(
+          'Target, topic, or query is required for discover-project action. ' +
+            'Example: { "action": "discover-project", "target": "Project Alpha" }'
+        );
+      }
+
+      thinking.push(`📁 Discovering project: "${projectName}"`);
+      const decomposed = nlpEnhancer.decomposeQuery(projectName);
+      return handleDiscoverProject(
+        { ...input, target: projectName },
+        graphClient,
+        decomposed,
+        thinking
+      );
+    }
+
+    case 'discover-topic': {
+      const topicName = input.target || input.topic || input.query;
+      if (!topicName) {
+        throw new Error(
+          'Target, topic, or query is required for discover-topic action. ' +
+            'Example: { "action": "discover-topic", "target": "Budget 2024" }'
+        );
+      }
+
+      thinking.push(`🔎 Discovering topic: "${topicName}"`);
+      const decomposed = nlpEnhancer.decomposeQuery(topicName);
+      return handleDiscoverTopic(
+        { ...input, target: topicName },
+        graphClient,
+        decomposed,
+        thinking
+      );
+    }
+
+    case 'discover-company': {
+      const companyName = input.target || input.query;
+      if (!companyName) {
+        throw new Error(
+          'Target or query is required for discover-company action. ' +
+            'Example: { "action": "discover-company", "target": "Acme Corp" }'
+        );
+      }
+
+      thinking.push(`🏢 Discovering company: "${companyName}"`);
+      const decomposed = nlpEnhancer.decomposeQuery(companyName);
+      return handleDiscoverCompany(
+        { ...input, target: companyName },
+        graphClient,
+        decomposed,
+        thinking
+      );
+    }
+
     default:
       throw new Error(`Unknown assistant action: ${input.action}`);
   }
+}
+
+// ============================================================================
+// DISCOVERY HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Discover comprehensive information about a person
+ */
+async function handleDiscoverPerson(
+  input: AssistantInput & { target?: string },
+  graphClient: GraphClient,
+  decomposed: DecomposedQuery,
+  thinking: string[]
+): Promise<string> {
+  const personName = input.target || '';
+  const limit = Math.min(input.limit || 25, 100);
+  const days = Math.min(input.days || 90, 365);
+
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - days);
+  const endDate = new Date();
+  endDate.setDate(endDate.getDate() + 30); // Include future meetings
+
+  thinking.push(`📊 Searching across multiple sources for: ${personName}`);
+  thinking.push(`   Time range: last ${days} days`);
+
+  // Parallel API calls for comprehensive person discovery
+  const [emailsResult, eventsResult, filesResult, contactsResult, chatsResult] =
+    await Promise.allSettled([
+      // Emails from/to this person
+      callGraph(graphClient, 'GET', '/me/messages', {
+        $search: `"from:${personName}" OR "to:${personName}"`,
+        $top: String(limit),
+        $orderby: 'receivedDateTime desc',
+      }),
+      // Calendar events with this person
+      callGraph(graphClient, 'GET', '/me/calendarView', {
+        startDateTime: startDate.toISOString(),
+        endDateTime: endDate.toISOString(),
+        $top: String(limit),
+      }),
+      // Files shared/created by this person
+      callGraph(graphClient, 'GET', `/me/drive/root/search(q='${encodeURIComponent(personName)}')`),
+      // Contact information
+      callGraph(graphClient, 'GET', '/me/contacts', {
+        $search: `"${personName}"`,
+        $top: '10',
+      }),
+      // Teams chats (if available)
+      callGraph(graphClient, 'GET', '/me/chats', {
+        $top: '25',
+      }),
+    ]);
+
+  // Process results
+  const emails =
+    emailsResult.status === 'fulfilled' ? JSON.parse(emailsResult.value) : { value: [] };
+  const events =
+    eventsResult.status === 'fulfilled' ? JSON.parse(eventsResult.value) : { value: [] };
+  const files = filesResult.status === 'fulfilled' ? JSON.parse(filesResult.value) : { value: [] };
+  const contacts =
+    contactsResult.status === 'fulfilled' ? JSON.parse(contactsResult.value) : { value: [] };
+  const chats = chatsResult.status === 'fulfilled' ? JSON.parse(chatsResult.value) : { value: [] };
+
+  // Filter events that include this person
+  const relevantEvents = (events.value || []).filter((event: Record<string, unknown>) => {
+    const attendees = event.attendees as Array<{ emailAddress?: { name?: string } }> | undefined;
+    const organizer = event.organizer as { emailAddress?: { name?: string } } | undefined;
+    const personLower = personName.toLowerCase();
+
+    return (
+      attendees?.some((a) => a.emailAddress?.name?.toLowerCase().includes(personLower)) ||
+      organizer?.emailAddress?.name?.toLowerCase().includes(personLower)
+    );
+  });
+
+  // Build discovery response
+  const response: DiscoveryResponse = {
+    target: personName,
+    targetType: 'person',
+    nlpAnalysis: {
+      detectedIntent: decomposed.intent.type,
+      detectedEntities: decomposed.entities.map((e) => ({
+        value: e.value,
+        type: e.type,
+        confidence: e.confidence,
+      })),
+      confidence: decomposed.confidence,
+      suggestedFollowUps: [
+        `Show me recent emails from ${personName}`,
+        `What meetings do I have with ${personName}?`,
+        `Find files shared by ${personName}`,
+      ],
+    },
+    summary: {
+      totalItems:
+        (emails.value?.length || 0) +
+        relevantEvents.length +
+        (files.value?.length || 0) +
+        (contacts.value?.length || 0),
+      sources: ['emails', 'calendar', 'files', 'contacts', 'chats'].filter((s) => {
+        if (s === 'emails') return emails.value?.length > 0;
+        if (s === 'calendar') return relevantEvents.length > 0;
+        if (s === 'files') return files.value?.length > 0;
+        if (s === 'contacts') return contacts.value?.length > 0;
+        if (s === 'chats') return chats.value?.length > 0;
+        return false;
+      }),
+      timeRange: `Last ${days} days`,
+    },
+    results: {
+      emails: emails.value?.slice(0, limit),
+      meetings: relevantEvents.slice(0, limit),
+      files: files.value?.slice(0, limit),
+      contacts: contacts.value,
+    },
+    insights: {
+      lastInteraction: emails.value?.[0]?.receivedDateTime || 'Unknown',
+      recentActivity: `${emails.value?.length || 0} emails, ${relevantEvents.length} meetings`,
+      recommendations: generatePersonRecommendations(emails.value, relevantEvents, personName),
+    },
+  };
+
+  thinking.push(`✅ Discovery complete:`);
+  thinking.push(`   📧 Emails: ${emails.value?.length || 0}`);
+  thinking.push(`   📅 Meetings: ${relevantEvents.length}`);
+  thinking.push(`   📁 Files: ${files.value?.length || 0}`);
+  thinking.push(`   👤 Contacts: ${contacts.value?.length || 0}`);
+
+  return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
+}
+
+/**
+ * Discover comprehensive information about a project
+ */
+async function handleDiscoverProject(
+  input: AssistantInput & { target?: string },
+  graphClient: GraphClient,
+  decomposed: DecomposedQuery,
+  thinking: string[]
+): Promise<string> {
+  const projectName = input.target || '';
+  const limit = Math.min(input.limit || 25, 100);
+  const days = Math.min(input.days || 90, 365);
+
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - days);
+
+  thinking.push(`📊 Searching project resources for: ${projectName}`);
+
+  // Parallel API calls for comprehensive project discovery
+  const [emailsResult, filesResult, sitesResult, eventsResult, tasksResult] =
+    await Promise.allSettled([
+      // Emails mentioning this project
+      callGraph(graphClient, 'GET', '/me/messages', {
+        $search: `"${projectName}"`,
+        $top: String(limit),
+        $orderby: 'receivedDateTime desc',
+      }),
+      // Files related to this project
+      callGraph(
+        graphClient,
+        'GET',
+        `/me/drive/root/search(q='${encodeURIComponent(projectName)}')`
+      ),
+      // SharePoint sites
+      callGraph(graphClient, 'GET', '/sites', {
+        search: projectName,
+        $top: '10',
+      }),
+      // Related meetings
+      callGraph(graphClient, 'GET', '/me/events', {
+        $search: `"${projectName}"`,
+        $top: String(limit),
+      }),
+      // To-Do tasks
+      callGraph(graphClient, 'GET', '/me/todo/lists'),
+    ]);
+
+  // Process results
+  const emails =
+    emailsResult.status === 'fulfilled' ? JSON.parse(emailsResult.value) : { value: [] };
+  const files = filesResult.status === 'fulfilled' ? JSON.parse(filesResult.value) : { value: [] };
+  const sites = sitesResult.status === 'fulfilled' ? JSON.parse(sitesResult.value) : { value: [] };
+  const events =
+    eventsResult.status === 'fulfilled' ? JSON.parse(eventsResult.value) : { value: [] };
+  const tasks = tasksResult.status === 'fulfilled' ? JSON.parse(tasksResult.value) : { value: [] };
+
+  // Build discovery response
+  const response: DiscoveryResponse = {
+    target: projectName,
+    targetType: 'project',
+    nlpAnalysis: {
+      detectedIntent: decomposed.intent.type,
+      detectedEntities: decomposed.entities.map((e) => ({
+        value: e.value,
+        type: e.type,
+        confidence: e.confidence,
+      })),
+      confidence: decomposed.confidence,
+      suggestedFollowUps: [
+        `Show me all files for ${projectName}`,
+        `What are the upcoming meetings for ${projectName}?`,
+        `List open tasks for ${projectName}`,
+      ],
+    },
+    summary: {
+      totalItems:
+        (emails.value?.length || 0) +
+        (files.value?.length || 0) +
+        (sites.value?.length || 0) +
+        (events.value?.length || 0),
+      sources: ['emails', 'files', 'sites', 'calendar', 'tasks'].filter((s) => {
+        if (s === 'emails') return emails.value?.length > 0;
+        if (s === 'files') return files.value?.length > 0;
+        if (s === 'sites') return sites.value?.length > 0;
+        if (s === 'calendar') return events.value?.length > 0;
+        if (s === 'tasks') return tasks.value?.length > 0;
+        return false;
+      }),
+      timeRange: `Last ${days} days`,
+    },
+    results: {
+      emails: emails.value?.slice(0, limit),
+      files: files.value?.slice(0, limit),
+      sites: sites.value,
+      meetings: events.value?.slice(0, limit),
+      tasks: tasks.value,
+    },
+    insights: {
+      recentActivity: `${emails.value?.length || 0} emails, ${files.value?.length || 0} files, ${events.value?.length || 0} meetings`,
+      recommendations: [
+        files.value?.length > 0 ? `📁 ${files.value.length} project files found` : null,
+        sites.value?.length > 0 ? `🌐 ${sites.value.length} SharePoint sites related` : null,
+        events.value?.length > 0 ? `📅 ${events.value.length} meetings scheduled` : null,
+      ].filter(Boolean) as string[],
+    },
+  };
+
+  thinking.push(`✅ Project discovery complete:`);
+  thinking.push(`   📧 Emails: ${emails.value?.length || 0}`);
+  thinking.push(`   📁 Files: ${files.value?.length || 0}`);
+  thinking.push(`   🌐 Sites: ${sites.value?.length || 0}`);
+  thinking.push(`   📅 Meetings: ${events.value?.length || 0}`);
+
+  return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
+}
+
+/**
+ * Discover comprehensive information about a topic
+ */
+async function handleDiscoverTopic(
+  input: AssistantInput & { target?: string },
+  graphClient: GraphClient,
+  decomposed: DecomposedQuery,
+  thinking: string[]
+): Promise<string> {
+  const topicName = input.target || '';
+  const limit = Math.min(input.limit || 25, 100);
+  const days = Math.min(input.days || 90, 365);
+
+  thinking.push(`📊 Comprehensive topic search for: ${topicName}`);
+
+  // Use Microsoft Search API for unified search
+  const searchRequest = {
+    requests: [
+      {
+        entityTypes: ['message', 'event', 'driveItem', 'site', 'listItem', 'chatMessage'],
+        query: {
+          queryString: topicName,
+        },
+        from: 0,
+        size: limit,
+      },
+    ],
+  };
+
+  // Parallel API calls
+  const [searchResult, filesResult, eventsResult] = await Promise.allSettled([
+    // Microsoft Search API
+    callGraph(graphClient, 'POST', '/search/query', undefined, searchRequest),
+    // Direct file search
+    callGraph(graphClient, 'GET', `/me/drive/root/search(q='${encodeURIComponent(topicName)}')`),
+    // Calendar events
+    callGraph(graphClient, 'GET', '/me/events', {
+      $search: `"${topicName}"`,
+      $top: String(limit),
+    }),
+  ]);
+
+  // Process search results
+  let searchItems: unknown[] = [];
+  let totalHits = 0;
+
+  if (searchResult.status === 'fulfilled') {
+    const parsed = JSON.parse(searchResult.value);
+    if (parsed.value && Array.isArray(parsed.value)) {
+      for (const response of parsed.value) {
+        if (response.hitsContainers && Array.isArray(response.hitsContainers)) {
+          for (const container of response.hitsContainers) {
+            totalHits += container.total || 0;
+            if (container.hits) {
+              searchItems.push(...container.hits);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  const files = filesResult.status === 'fulfilled' ? JSON.parse(filesResult.value) : { value: [] };
+  const events =
+    eventsResult.status === 'fulfilled' ? JSON.parse(eventsResult.value) : { value: [] };
+
+  // Categorize search results
+  const categorizedResults: Record<string, unknown[]> = {
+    emails: [],
+    files: [],
+    meetings: [],
+    chats: [],
+    sites: [],
+  };
+
+  for (const hit of searchItems as Array<{ resource?: Record<string, unknown> }>) {
+    const resource = hit.resource;
+    if (!resource) continue;
+
+    const odataType = (resource['@odata.type'] as string) || '';
+    if (odataType.includes('message')) {
+      categorizedResults.emails.push(resource);
+    } else if (odataType.includes('driveItem')) {
+      categorizedResults.files.push(resource);
+    } else if (odataType.includes('event')) {
+      categorizedResults.meetings.push(resource);
+    } else if (odataType.includes('chatMessage')) {
+      categorizedResults.chats.push(resource);
+    } else if (odataType.includes('site')) {
+      categorizedResults.sites.push(resource);
+    }
+  }
+
+  // Build discovery response
+  const response: DiscoveryResponse = {
+    target: topicName,
+    targetType: 'topic',
+    nlpAnalysis: {
+      detectedIntent: decomposed.intent.type,
+      detectedEntities: decomposed.entities.map((e) => ({
+        value: e.value,
+        type: e.type,
+        confidence: e.confidence,
+      })),
+      confidence: decomposed.confidence,
+      suggestedFollowUps: [
+        `Show me recent emails about ${topicName}`,
+        `Find all files related to ${topicName}`,
+        `What meetings discussed ${topicName}?`,
+      ],
+    },
+    summary: {
+      totalItems: totalHits,
+      sources: Object.keys(categorizedResults).filter((key) => categorizedResults[key].length > 0),
+      timeRange: `Last ${days} days`,
+    },
+    results: {
+      emails: categorizedResults.emails.slice(0, limit),
+      files: [...categorizedResults.files, ...(files.value || [])].slice(0, limit),
+      meetings: [...categorizedResults.meetings, ...(events.value || [])].slice(0, limit),
+      chats: categorizedResults.chats.slice(0, limit),
+      sites: categorizedResults.sites.slice(0, limit),
+    },
+    insights: {
+      recentActivity: `Found ${totalHits} items across Microsoft 365`,
+      recommendations: [
+        `📧 ${categorizedResults.emails.length} emails found`,
+        `📁 ${categorizedResults.files.length + (files.value?.length || 0)} files found`,
+        `📅 ${categorizedResults.meetings.length + (events.value?.length || 0)} calendar items found`,
+        `💬 ${categorizedResults.chats.length} chat messages found`,
+      ],
+    },
+  };
+
+  thinking.push(`✅ Topic discovery complete:`);
+  thinking.push(`   📊 Total hits: ${totalHits}`);
+  thinking.push(`   📧 Emails: ${categorizedResults.emails.length}`);
+  thinking.push(`   📁 Files: ${categorizedResults.files.length + (files.value?.length || 0)}`);
+  thinking.push(
+    `   📅 Meetings: ${categorizedResults.meetings.length + (events.value?.length || 0)}`
+  );
+  thinking.push(`   💬 Chats: ${categorizedResults.chats.length}`);
+
+  return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
+}
+
+/**
+ * Discover comprehensive information about a company (Customer 360)
+ */
+async function handleDiscoverCompany(
+  input: AssistantInput & { target?: string },
+  graphClient: GraphClient,
+  decomposed: DecomposedQuery,
+  thinking: string[]
+): Promise<string> {
+  const companyName = input.target || '';
+  const limit = Math.min(input.limit || 25, 100);
+  const days = Math.min(input.days || 90, 365);
+
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - days);
+
+  thinking.push(`📊 Customer 360 discovery for: ${companyName}`);
+
+  // Parallel API calls for comprehensive company discovery
+  const [emailsResult, eventsResult, filesResult, contactsResult, sitesResult] =
+    await Promise.allSettled([
+      // Emails with this company
+      callGraph(graphClient, 'GET', '/me/messages', {
+        $search: `"${companyName}"`,
+        $top: String(limit),
+        $orderby: 'receivedDateTime desc',
+      }),
+      // Meetings with company contacts
+      callGraph(graphClient, 'GET', '/me/events', {
+        $search: `"${companyName}"`,
+        $top: String(limit),
+      }),
+      // Files related to this company
+      callGraph(
+        graphClient,
+        'GET',
+        `/me/drive/root/search(q='${encodeURIComponent(companyName)}')`
+      ),
+      // Contacts from this company
+      callGraph(graphClient, 'GET', '/me/contacts', {
+        $search: `"${companyName}"`,
+        $top: '50',
+      }),
+      // SharePoint sites
+      callGraph(graphClient, 'GET', '/sites', {
+        search: companyName,
+        $top: '10',
+      }),
+    ]);
+
+  // Process results
+  const emails =
+    emailsResult.status === 'fulfilled' ? JSON.parse(emailsResult.value) : { value: [] };
+  const events =
+    eventsResult.status === 'fulfilled' ? JSON.parse(eventsResult.value) : { value: [] };
+  const files = filesResult.status === 'fulfilled' ? JSON.parse(filesResult.value) : { value: [] };
+  const contacts =
+    contactsResult.status === 'fulfilled' ? JSON.parse(contactsResult.value) : { value: [] };
+  const sites = sitesResult.status === 'fulfilled' ? JSON.parse(sitesResult.value) : { value: [] };
+
+  // Calculate relationship score based on interaction frequency
+  const emailCount = emails.value?.length || 0;
+  const meetingCount = events.value?.length || 0;
+  const contactCount = contacts.value?.length || 0;
+  const fileCount = files.value?.length || 0;
+
+  const relationshipScore = Math.min(
+    100,
+    Math.round(((emailCount * 2 + meetingCount * 5 + contactCount * 3 + fileCount * 1) / days) * 10)
+  );
+
+  // Build discovery response
+  const response: DiscoveryResponse = {
+    target: companyName,
+    targetType: 'company',
+    nlpAnalysis: {
+      detectedIntent: decomposed.intent.type,
+      detectedEntities: decomposed.entities.map((e) => ({
+        value: e.value,
+        type: e.type,
+        confidence: e.confidence,
+      })),
+      confidence: decomposed.confidence,
+      suggestedFollowUps: [
+        `Show me all contacts at ${companyName}`,
+        `What meetings do I have with ${companyName}?`,
+        `Find recent emails from ${companyName}`,
+        `Show me contracts or documents for ${companyName}`,
+      ],
+    },
+    summary: {
+      totalItems: emailCount + meetingCount + fileCount + contactCount + (sites.value?.length || 0),
+      sources: ['emails', 'calendar', 'files', 'contacts', 'sites'].filter((s) => {
+        if (s === 'emails') return emailCount > 0;
+        if (s === 'calendar') return meetingCount > 0;
+        if (s === 'files') return fileCount > 0;
+        if (s === 'contacts') return contactCount > 0;
+        if (s === 'sites') return sites.value?.length > 0;
+        return false;
+      }),
+      timeRange: `Last ${days} days`,
+    },
+    results: {
+      emails: emails.value?.slice(0, limit),
+      meetings: events.value?.slice(0, limit),
+      files: files.value?.slice(0, limit),
+      contacts: contacts.value,
+      sites: sites.value,
+    },
+    insights: {
+      relationshipScore,
+      lastInteraction: emails.value?.[0]?.receivedDateTime || 'Unknown',
+      recentActivity: `${emailCount} emails, ${meetingCount} meetings, ${contactCount} contacts`,
+      recommendations: generateCompanyRecommendations(
+        relationshipScore,
+        emailCount,
+        meetingCount,
+        companyName
+      ),
+    },
+  };
+
+  thinking.push(`✅ Customer 360 discovery complete:`);
+  thinking.push(`   📧 Emails: ${emailCount}`);
+  thinking.push(`   📅 Meetings: ${meetingCount}`);
+  thinking.push(`   📁 Files: ${fileCount}`);
+  thinking.push(`   👥 Contacts: ${contactCount}`);
+  thinking.push(`   🌐 Sites: ${sites.value?.length || 0}`);
+  thinking.push(`   💯 Relationship Score: ${relationshipScore}/100`);
+
+  return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
+}
+
+/**
+ * Generate recommendations for person discovery
+ */
+function generatePersonRecommendations(
+  emails: unknown[] | undefined,
+  meetings: unknown[],
+  personName: string
+): string[] {
+  const recommendations: string[] = [];
+
+  if (!emails || emails.length === 0) {
+    recommendations.push(`💡 No recent emails found with ${personName}`);
+  } else if (emails.length > 20) {
+    recommendations.push(`📧 High email volume with ${personName} - consider scheduling a call`);
+  }
+
+  if (meetings.length === 0) {
+    recommendations.push(`📅 No meetings scheduled with ${personName}`);
+  } else if (meetings.length > 5) {
+    recommendations.push(`📅 Frequent meetings with ${personName}`);
+  }
+
+  return recommendations;
+}
+
+/**
+ * Generate recommendations for company discovery
+ */
+function generateCompanyRecommendations(
+  relationshipScore: number,
+  emailCount: number,
+  meetingCount: number,
+  companyName: string
+): string[] {
+  const recommendations: string[] = [];
+
+  if (relationshipScore >= 80) {
+    recommendations.push(
+      `🌟 Strong relationship with ${companyName} (Score: ${relationshipScore})`
+    );
+  } else if (relationshipScore >= 50) {
+    recommendations.push(`👍 Good relationship with ${companyName} (Score: ${relationshipScore})`);
+  } else if (relationshipScore >= 20) {
+    recommendations.push(
+      `📈 Growing relationship with ${companyName} (Score: ${relationshipScore})`
+    );
+  } else {
+    recommendations.push(
+      `💡 Consider strengthening relationship with ${companyName} (Score: ${relationshipScore})`
+    );
+  }
+
+  if (emailCount > 0 && meetingCount === 0) {
+    recommendations.push(`📅 Consider scheduling a meeting with ${companyName}`);
+  }
+
+  if (emailCount === 0 && meetingCount === 0) {
+    recommendations.push(`📧 No recent interactions - consider reaching out to ${companyName}`);
+  }
+
+  return recommendations;
 }
 
 // ============================================================================

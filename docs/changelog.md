@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* include full chat message content in Teams responses ([ac313c6](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/ac313c6d338ef95b545dc19004196a9e3b3aec55))
+- include full chat message content in Teams responses ([ac313c6](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/ac313c6d338ef95b545dc19004196a9e3b3aec55))
 
 ## [1.8.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.7.1...v1.8.0) (2026-01-27)
 
