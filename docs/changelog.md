@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* improve search query formatting for microsoft graph api ([56e7cdb](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/56e7cdbd453b721371dd8c7b28b649eed3870723))
+- improve search query formatting for microsoft graph api ([56e7cdb](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/56e7cdbd453b721371dd8c7b28b649eed3870723))
 
 ## [1.9.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.8.0...v1.9.0) (2026-01-27)
 

@@ -1544,6 +1544,69 @@ const searchSchema = z.object({
 
 type SearchInput = z.infer<typeof searchSchema>;
 
+// Common German/English words that should NOT be detected as person names
+const NON_PERSON_WORDS = new Set([
+  // German temporal words
+  'letzte',
+  'letzten',
+  'letzter',
+  'nächste',
+  'nächsten',
+  'nächster',
+  'heute',
+  'morgen',
+  'gestern',
+  'woche',
+  'monat',
+  'jahr',
+  'montag',
+  'dienstag',
+  'mittwoch',
+  'donnerstag',
+  'freitag',
+  'samstag',
+  'sonntag',
+  // German common words
+  'alle',
+  'meine',
+  'zeige',
+  'finde',
+  'suche',
+  'liste',
+  'wichtige',
+  'dringende',
+  'neue',
+  'aktuelle',
+  // English temporal words
+  'last',
+  'next',
+  'today',
+  'tomorrow',
+  'yesterday',
+  'week',
+  'month',
+  'year',
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+  'sunday',
+  // English common words
+  'all',
+  'my',
+  'show',
+  'find',
+  'search',
+  'list',
+  'important',
+  'urgent',
+  'new',
+  'current',
+  'recent',
+]);
+
 async function handleSearch(
   input: SearchInput,
   graphClient: GraphClient,
@@ -1553,25 +1616,167 @@ async function handleSearch(
 
   thinking.push(`🔍 Microsoft 365 Search: "${input.query}"`);
 
-  // Detect person-related queries and Teams keywords (needed for both entity type selection and query improvement)
-  const personPatterns = [
-    /\b(mit|von|to|from|with)\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b/i, // "mit Ricardo", "von Max Müller"
-    /\b([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b/, // Standalone names like "Ricardo"
-    /\b(chat|nachricht|message|teams)\s+(mit|von|to|from|with)\s+([A-ZÄÖÜ][a-zäöüß]+)/i, // "Chat mit Ricardo"
-  ];
-  const hasPersonQuery = personPatterns.some((pattern) => pattern.test(input.query));
-  const hasTeamsKeywords = /\b(teams|chat|nachricht|message)\b/i.test(input.query);
-  const personMatch = input.query.match(personPatterns[0]) || input.query.match(personPatterns[1]);
-  const personName = personMatch ? personMatch[2] || personMatch[1] : null;
+  // =========================================================================
+  // NLP ANALYSIS - Use NLP to understand query intent
+  // =========================================================================
+  const decomposed = nlpEnhancer.decomposeQuery(input.query);
+  const nlpIntent = decomposed.intent.type;
+  const nlpService = decomposed.ms365Context?.service;
+  const nlpEntities = decomposed.entities;
 
-  // Intelligent entity type detection based on query
+  thinking.push(
+    `📊 NLP: Intent=${nlpIntent}, Service=${nlpService || 'general'}, Confidence=${Math.round(decomposed.confidence * 100)}%`
+  );
+
+  // =========================================================================
+  // CALENDAR QUERY DETECTION - Direct Calendar API for calendar queries
+  // =========================================================================
+  const isCalendarQuery =
+    nlpService === 'calendar' ||
+    (input.entityTypes?.length === 1 && input.entityTypes[0] === 'event') ||
+    /\b(kalender|termine?|meetings?|besprechung|events?|calendar|appointments?)\b/i.test(
+      input.query
+    );
+
+  if (isCalendarQuery && !input.entityTypes?.includes('message')) {
+    thinking.push('📅 Detected calendar query - using Calendar API directly');
+
+    // Parse temporal info from NLP or query
+    const days = decomposed.temporal?.relativeDays || 30;
+    const requestedSize = input.size || 15;
+
+    // Determine date range
+    const now = new Date();
+    let startDate: Date;
+    let endDate: Date;
+
+    // Check if looking for past or future events
+    const isPastQuery =
+      /\b(letzte[rn]?|vergangen|last|past|previous|recent)\b/i.test(input.query) ||
+      (decomposed.temporal?.relativeDays && decomposed.temporal.relativeDays < 0);
+
+    if (isPastQuery) {
+      // Past events
+      startDate = new Date(now);
+      startDate.setDate(startDate.getDate() - Math.abs(days));
+      endDate = now;
+      thinking.push(`📅 Looking for past ${Math.abs(days)} days of events`);
+    } else {
+      // Future events (default)
+      startDate = now;
+      endDate = new Date(now);
+      endDate.setDate(endDate.getDate() + days);
+      thinking.push(`📅 Looking for next ${days} days of events`);
+    }
+
+    try {
+      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
+        startDateTime: startDate.toISOString(),
+        endDateTime: endDate.toISOString(),
+        $top: String(requestedSize),
+        $orderby: isPastQuery ? 'start/dateTime desc' : 'start/dateTime asc',
+        $select: 'id,subject,start,end,location,organizer,attendees,isOnlineMeeting,onlineMeeting',
+      });
+
+      const events = JSON.parse(eventsResult);
+      const eventCount = events.value?.length || 0;
+
+      thinking.push(`✅ Found ${eventCount} calendar events`);
+
+      const toolSuggestions = [
+        '💡 Use "calendar" tool with action "list" for more calendar options',
+        '💡 Use "calendar" tool with action "get" to get event details by ID',
+      ];
+
+      if (eventCount > 0) {
+        toolSuggestions.push('💡 Use "assistant" tool with action "my-day" for today\'s summary');
+      }
+
+      const output = {
+        query: input.query,
+        nlpAnalysis: {
+          intent: nlpIntent,
+          service: nlpService,
+          temporal: decomposed.temporal,
+          confidence: decomposed.confidence,
+        },
+        totalHits: eventCount,
+        entityTypes: ['event'],
+        dateRange: {
+          start: startDate.toISOString(),
+          end: endDate.toISOString(),
+          direction: isPastQuery ? 'past' : 'future',
+        },
+        results: {
+          '#microsoft.graph.event': events.value || [],
+        },
+        suggestions: toolSuggestions,
+      };
+
+      return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
+    } catch (error) {
+      thinking.push(
+        `Calendar API error: ${error instanceof Error ? error.message : String(error)}`
+      );
+      thinking.push('Falling back to Search API...');
+      // Fall through to regular search
+    }
+  }
+
+  // =========================================================================
+  // PERSON DETECTION - Improved with NLP and word filtering
+  // =========================================================================
+
+  // Check if NLP detected a person entity
+  const nlpPersonEntity = nlpEntities.find((e) => e.type === 'person');
+  let personName: string | null = nlpPersonEntity?.value || null;
+
+  // Fallback to regex patterns if NLP didn't find a person
+  if (!personName) {
+    const personPatterns = [
+      /\b(mit|von|to|from|with)\s+([A-ZÄÖÜ][a-zäöüß]+(?:\s+[A-ZÄÖÜ][a-zäöüß]+)?)\b/i,
+      /\b(chat|nachricht|message|teams)\s+(mit|von|to|from|with)\s+([A-ZÄÖÜ][a-zäöüß]+)/i,
+    ];
+
+    for (const pattern of personPatterns) {
+      const match = input.query.match(pattern);
+      if (match) {
+        const candidateName = match[3] || match[2];
+        // Verify it's not a common word
+        if (candidateName && !NON_PERSON_WORDS.has(candidateName.toLowerCase())) {
+          personName = candidateName;
+          break;
+        }
+      }
+    }
+  }
+
+  // Validate personName - exclude common words
+  if (personName && NON_PERSON_WORDS.has(personName.toLowerCase())) {
+    personName = null;
+  }
+
+  const hasTeamsKeywords = /\b(teams|chat|nachricht|message)\b/i.test(input.query);
+  const hasPersonQuery = personName !== null;
+
+  // Intelligent entity type detection based on query and NLP
   let entityTypes = input.entityTypes;
 
   if (!entityTypes) {
     // Default: include all common types including chatMessage
     entityTypes = ['message', 'event', 'driveItem', 'site', 'chatMessage'];
 
-    if (hasPersonQuery || hasTeamsKeywords) {
+    // Use NLP service hint
+    if (nlpService === 'mail') {
+      entityTypes = ['message'];
+      thinking.push('💡 NLP detected mail query - searching messages');
+    } else if (nlpService === 'files') {
+      entityTypes = ['driveItem', 'site', 'listItem'];
+      thinking.push('💡 NLP detected files query - searching files and sites');
+    } else if (nlpService === 'teams') {
+      entityTypes = ['chatMessage', 'message'];
+      thinking.push('💡 NLP detected Teams query - searching chats and messages');
+    } else if (hasPersonQuery || hasTeamsKeywords) {
       // Prioritize chatMessage and person for person/Teams queries
       entityTypes = ['chatMessage', 'message', 'person', 'event'];
       thinking.push('💡 Detected person/Teams query - prioritizing chatMessage and person');
@@ -1733,21 +1938,34 @@ async function handleSearch(
       }
     }
 
-    // Use personName and hasTeamsKeywords from earlier detection
-
-    // Provide guidance on which tools to use based on results
+    // Provide NLP-informed guidance on which tools to use based on results
     const toolSuggestions: string[] = [];
 
-    // If no results found and searching for person/Teams, suggest compound tools
-    if (totalHits === 0 && (personName || hasTeamsKeywords)) {
-      if (hasTeamsKeywords || entityTypes.includes('chatMessage')) {
+    // NLP-based suggestions when no results found
+    if (totalHits === 0) {
+      // Use NLP service context for better suggestions
+      if (nlpService === 'calendar') {
+        toolSuggestions.push('💡 Use "calendar" tool with action "list" to list calendar events');
+        toolSuggestions.push('💡 Use "assistant" tool with action "my-day" for today\'s schedule');
+        toolSuggestions.push('💡 Use "assistant" tool with action "my-week" for week overview');
+      } else if (nlpService === 'mail') {
+        toolSuggestions.push('💡 Use "email" tool with action "list" to list emails');
+        toolSuggestions.push('💡 Use "email" tool with action "search" for email search');
+      } else if (nlpService === 'files') {
+        toolSuggestions.push('💡 Use "files" tool with action "search" to search files');
+        toolSuggestions.push('💡 Use "files" tool with action "list" to list files');
+      } else if (nlpService === 'teams') {
+        toolSuggestions.push('💡 Use "teams" tool with action "chats" to list Teams chats');
         toolSuggestions.push(
           '💡 Try compound tool "find-messages-with-person" for Teams chats with a specific person'
         );
-        toolSuggestions.push(
-          '💡 Try "teams" tool with action "chats" (includes last messages) to list all chats'
-        );
+      } else if (nlpService === 'tasks') {
+        toolSuggestions.push('💡 Use "tasks" tool with action "lists" to list task lists');
+      } else if (nlpService === 'contacts') {
+        toolSuggestions.push('💡 Use "contacts" tool with action "list" to list contacts');
       }
+
+      // Person-specific suggestions (only if we have a valid person name)
       if (personName) {
         toolSuggestions.push(
           `💡 Try compound tool "find-emails-with-person" to find emails with ${personName}`
@@ -1756,11 +1974,28 @@ async function handleSearch(
           `💡 Try compound tool "discover-person" for comprehensive info about ${personName}`
         );
       }
+
+      // Teams-specific suggestions
+      if (hasTeamsKeywords) {
+        toolSuggestions.push(
+          '💡 Try "teams" tool with action "chats" (includes last messages) to list all chats'
+        );
+      }
+
+      // General fallback if no specific suggestions
+      if (toolSuggestions.length === 0) {
+        toolSuggestions.push(
+          '💡 Try using specific tools: "calendar" for events, "email" for messages, "files" for documents'
+        );
+        toolSuggestions.push(
+          '💡 Use "assistant" tool with action "discover" for comprehensive search'
+        );
+      }
     }
 
     // Suggest tools based on found entity types
     for (const entityType of Object.keys(formattedResults)) {
-      if (entityType.includes('message')) {
+      if (entityType.includes('message') && !entityType.includes('chat')) {
         toolSuggestions.push('Use "email" tool for detailed email operations');
       }
       if (entityType.includes('event')) {
@@ -1791,14 +2026,17 @@ async function handleSearch(
 
     if (toolSuggestions.length > 0) {
       thinking.push('💡 Suggested next tools: ' + [...new Set(toolSuggestions)].join(', '));
-    } else if (totalHits === 0) {
-      thinking.push(
-        '💡 No results found. Try refining your search query or use specific tools like "teams", "email", or "calendar"'
-      );
     }
 
     const output: Record<string, unknown> = {
       query: input.query,
+      nlpAnalysis: {
+        intent: nlpIntent,
+        service: nlpService || 'general',
+        entities: nlpEntities.map((e) => ({ value: e.value, type: e.type })),
+        temporal: decomposed.temporal,
+        confidence: decomposed.confidence,
+      },
       totalHits,
       entityTypes: Object.keys(formattedResults),
       results: formattedResults,
