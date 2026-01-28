@@ -26,9 +26,20 @@ import {
   isMailResponse,
 } from './response-formatter.js';
 import NLPEnhancer, { type DecomposedQuery, type ExtractedEntity } from './nlp-enhancer.js';
+import DataAggregator from './data-aggregator.js';
+import {
+  GraphApiError,
+  RateLimitError,
+  ServiceUnavailableError,
+  isRetryableError,
+  getRetryAfter,
+} from './errors.js';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
+
+// Initialize Data Aggregator for consistent data processing
+const dataAggregator = new DataAggregator();
 
 /**
  * Format search query for Microsoft Graph API endpoints that require property:value format
@@ -119,21 +130,306 @@ function formatKQLQuery(query: string): string {
   return formattedQuery.trim();
 }
 
+// ============================================================================
+// API CACHE - LRU Cache for API Responses
+// ============================================================================
+
+interface CacheEntry {
+  data: unknown;
+  timestamp: number;
+  ttl: number;
+}
+
+interface CacheNode {
+  key: string;
+  value: CacheEntry;
+  prev: CacheNode | null;
+  next: CacheNode | null;
+}
+
 /**
- * Helper function to call Graph API endpoints
- * Wraps graphClient.makeRequest with a simpler interface
+ * Simple LRU Cache implementation for API responses
  */
-async function callGraph(
+class APICache {
+  private cache = new Map<string, CacheNode>();
+  private head: CacheNode | null = null;
+  private tail: CacheNode | null = null;
+  private maxSize: number;
+
+  constructor(maxSize = 1000) {
+    this.maxSize = maxSize;
+  }
+
+  /**
+   * Get cached value if not expired
+   */
+  get(key: string): unknown | null {
+    const node = this.cache.get(key);
+    if (!node) {
+      return null;
+    }
+
+    const entry = node.value;
+    const now = Date.now();
+
+    // Check if expired
+    if (now - entry.timestamp > entry.ttl) {
+      this.delete(key);
+      return null;
+    }
+
+    // Move to front (most recently used)
+    this.moveToFront(node);
+    return entry.data;
+  }
+
+  /**
+   * Set cache value with TTL
+   */
+  set(key: string, data: unknown, ttl: number): void {
+    const now = Date.now();
+    const entry: CacheEntry = { data, timestamp: now, ttl };
+
+    let node = this.cache.get(key);
+
+    if (node) {
+      // Update existing node
+      node.value = entry;
+      this.moveToFront(node);
+    } else {
+      // Create new node
+      node = { key, value: entry, prev: null, next: null };
+
+      if (this.cache.size >= this.maxSize) {
+        // Remove least recently used
+        if (this.tail) {
+          this.delete(this.tail.key);
+        }
+      }
+
+      this.cache.set(key, node);
+      this.moveToFront(node);
+    }
+  }
+
+  /**
+   * Delete cache entry
+   */
+  delete(key: string): void {
+    const node = this.cache.get(key);
+    if (!node) {
+      return;
+    }
+
+    // Remove from linked list
+    if (node.prev) {
+      node.prev.next = node.next;
+    } else {
+      this.head = node.next;
+    }
+
+    if (node.next) {
+      node.next.prev = node.prev;
+    } else {
+      this.tail = node.prev;
+    }
+
+    this.cache.delete(key);
+  }
+
+  /**
+   * Invalidate cache entries matching pattern
+   */
+  invalidate(pattern: string): void {
+    const regex = new RegExp(pattern);
+    const keysToDelete: string[] = [];
+
+    for (const key of this.cache.keys()) {
+      if (regex.test(key)) {
+        keysToDelete.push(key);
+      }
+    }
+
+    for (const key of keysToDelete) {
+      this.delete(key);
+    }
+  }
+
+  /**
+   * Clear all cache
+   */
+  clear(): void {
+    this.cache.clear();
+    this.head = null;
+    this.tail = null;
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getStats(): { size: number; maxSize: number; hitRate: number } {
+    return {
+      size: this.cache.size,
+      maxSize: this.maxSize,
+      hitRate: 0, // Would need to track hits/misses for accurate rate
+    };
+  }
+
+  private moveToFront(node: CacheNode): void {
+    // Remove from current position
+    if (node.prev) {
+      node.prev.next = node.next;
+    } else if (this.head === node) {
+      return; // Already at front
+    }
+
+    if (node.next) {
+      node.next.prev = node.prev;
+    } else if (this.tail === node) {
+      this.tail = node.prev;
+    }
+
+    // Add to front
+    node.prev = null;
+    node.next = this.head;
+
+    if (this.head) {
+      this.head.prev = node;
+    } else {
+      this.tail = node;
+    }
+
+    this.head = node;
+  }
+}
+
+// Global API cache instance
+const apiCache = new APICache(1000);
+
+/**
+ * Generate cache key from request parameters
+ */
+function generateCacheKey(
+  method: string,
+  endpoint: string,
+  queryParams?: Record<string, string>,
+  body?: unknown
+): string {
+  const parts = [method, endpoint];
+
+  if (queryParams && Object.keys(queryParams).length > 0) {
+    const sortedParams = Object.keys(queryParams)
+      .sort()
+      .map((key) => `${key}=${queryParams[key]}`)
+      .join('&');
+    parts.push(sortedParams);
+  }
+
+  if (body) {
+    parts.push(JSON.stringify(body));
+  }
+
+  return parts.join('|');
+}
+
+/**
+ * Determine if request should be cached
+ */
+function shouldCache(method: string, endpoint: string, body?: unknown): boolean {
+  // Only cache GET requests (read-only)
+  if (method !== 'GET') {
+    return false;
+  }
+
+  // Don't cache search queries (too dynamic)
+  if (endpoint.includes('/search/query')) {
+    return false;
+  }
+
+  // Don't cache if body is present (POST with body)
+  if (body) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Determine TTL for cached response
+ */
+function getCacheTTL(endpoint: string): number {
+  // Search queries: 30 seconds
+  if (endpoint.includes('/search')) {
+    return 30 * 1000;
+  }
+
+  // Calendar events: 2 minutes (can change frequently)
+  if (endpoint.includes('/calendar') || endpoint.includes('/events')) {
+    return 2 * 60 * 1000;
+  }
+
+  // Messages: 1 minute
+  if (endpoint.includes('/messages')) {
+    return 60 * 1000;
+  }
+
+  // Default: 5 minutes for read-only queries
+  return 5 * 60 * 1000;
+}
+
+// ============================================================================
+// RETRY LOGIC
+// ============================================================================
+
+interface RetryConfig {
+  maxRetries: number;
+  baseDelay: number;
+  maxDelay: number;
+  retryableStatusCodes: number[];
+}
+
+const defaultRetryConfig: RetryConfig = {
+  maxRetries: 3,
+  baseDelay: 1000, // 1 second
+  maxDelay: 30000, // 30 seconds
+  retryableStatusCodes: [429, 500, 502, 503, 504],
+};
+
+/**
+ * Calculate delay with exponential backoff and jitter
+ */
+function calculateRetryDelay(attempt: number, baseDelay: number, maxDelay: number): number {
+  const exponentialDelay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+  const jitter = Math.random() * 0.3 * exponentialDelay; // 0-30% jitter
+  return Math.floor(exponentialDelay + jitter);
+}
+
+/**
+ * Call Graph API with retry logic and caching
+ */
+async function callGraphWithRetry(
   graphClient: GraphClient,
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE' | '',
   endpoint: string,
   queryParams?: Record<string, string>,
   body?: unknown,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  retryConfig: RetryConfig = defaultRetryConfig,
+  useCache = true
 ): Promise<string> {
   // Handle empty method (shouldn't happen but fail gracefully)
   if (!method || !endpoint) {
     throw new Error('Invalid callGraph: method and endpoint are required');
+  }
+
+  // Check cache for GET requests
+  if (useCache && shouldCache(method, endpoint, body)) {
+    const cacheKey = generateCacheKey(method, endpoint, queryParams, body);
+    const cached = apiCache.get(cacheKey);
+    if (cached !== null) {
+      logger.debug(`Cache hit for ${method} ${endpoint}`);
+      return typeof cached === 'string' ? cached : JSON.stringify(cached, null, 2);
+    }
   }
 
   const options: {
@@ -155,8 +451,409 @@ async function callGraph(
     options.headers = headers;
   }
 
-  const result = await graphClient.makeRequest(endpoint, options);
-  return typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+  let lastError: Error | null = null;
+
+  // Retry loop
+  for (let attempt = 0; attempt <= retryConfig.maxRetries; attempt++) {
+    try {
+      const result = await graphClient.makeRequest(endpoint, options);
+      const resultString = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+
+      // Cache successful GET responses
+      if (useCache && shouldCache(method, endpoint, body)) {
+        const cacheKey = generateCacheKey(method, endpoint, queryParams, body);
+        const ttl = getCacheTTL(endpoint);
+        apiCache.set(cacheKey, result, ttl);
+      }
+
+      return resultString;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Check if error is retryable
+      const statusCode = (error as GraphApiError).statusCode;
+      const isRetryable = statusCode && retryConfig.retryableStatusCodes.includes(statusCode);
+
+      // Don't retry on last attempt or if error is not retryable
+      if (attempt >= retryConfig.maxRetries || !isRetryable) {
+        break;
+      }
+
+      // Get retry-after header if available (for 429 errors)
+      let delay = calculateRetryDelay(attempt, retryConfig.baseDelay, retryConfig.maxDelay);
+
+      if (error instanceof RateLimitError) {
+        const retryAfter = getRetryAfter(error);
+        if (retryAfter) {
+          delay = retryAfter * 1000; // Convert to milliseconds
+        }
+      }
+
+      logger.warn(
+        `Graph API request failed (attempt ${attempt + 1}/${retryConfig.maxRetries + 1}), retrying in ${delay}ms: ${lastError.message}`
+      );
+
+      // Wait before retry
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  // All retries exhausted
+  if (lastError) {
+    throw lastError;
+  }
+
+  throw new Error('Unknown error in callGraphWithRetry');
+}
+
+/**
+ * Helper function to call Graph API endpoints (backward compatible)
+ * Wraps callGraphWithRetry with default settings
+ */
+async function callGraph(
+  graphClient: GraphClient,
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE' | '',
+  endpoint: string,
+  queryParams?: Record<string, string>,
+  body?: unknown,
+  headers?: Record<string, string>
+): Promise<string> {
+  return callGraphWithRetry(graphClient, method, endpoint, queryParams, body, headers);
+}
+
+// ============================================================================
+// STANDARDIZED RESPONSE FORMAT
+// ============================================================================
+
+interface PaginationInfo {
+  currentPage?: number;
+  pageSize?: number;
+  totalItems?: number;
+  totalPages?: number;
+  hasNext?: boolean;
+  hasPrevious?: boolean;
+  nextCursor?: string;
+  previousCursor?: string;
+  skip?: number;
+  top?: number;
+}
+
+interface ErrorInfo {
+  code?: string;
+  message: string;
+  details?: unknown;
+  retryable?: boolean;
+}
+
+interface NLPAnalysis {
+  intent?: string;
+  service?: string;
+  entities?: Array<{ value: string; type: string; confidence?: number }>;
+  temporal?: {
+    expression: string;
+    type: string;
+    relativeDays?: number;
+  } | null;
+  confidence?: number;
+}
+
+interface StandardResponseMetadata {
+  timestamp: string;
+  executionTime: number;
+  sources: string[];
+  cacheHit: boolean;
+  pagination?: PaginationInfo;
+  requestId?: string;
+}
+
+interface StandardResponse<T> {
+  success: boolean;
+  data?: T;
+  metadata: StandardResponseMetadata;
+  errors?: ErrorInfo[];
+  suggestions?: string[];
+  nlpAnalysis?: NLPAnalysis;
+  thinking?: string[];
+}
+
+/**
+ * Format standard response with metadata
+ */
+function formatStandardResponse<T>(
+  data: T | undefined,
+  options: {
+    success?: boolean;
+    executionTime?: number;
+    sources?: string[];
+    cacheHit?: boolean;
+    pagination?: PaginationInfo;
+    errors?: ErrorInfo[];
+    suggestions?: string[];
+    nlpAnalysis?: NLPAnalysis;
+    thinking?: string[];
+    requestId?: string;
+  } = {}
+): StandardResponse<T> {
+  const {
+    success = true,
+    executionTime = 0,
+    sources = [],
+    cacheHit = false,
+    pagination,
+    errors,
+    suggestions,
+    nlpAnalysis,
+    thinking,
+    requestId,
+  } = options;
+
+  const metadata: StandardResponseMetadata = {
+    timestamp: new Date().toISOString(),
+    executionTime,
+    sources,
+    cacheHit,
+    ...(pagination && { pagination }),
+    ...(requestId && { requestId }),
+  };
+
+  const response: StandardResponse<T> = {
+    success,
+    ...(data !== undefined && { data }),
+    metadata,
+    ...(errors && errors.length > 0 && { errors }),
+    ...(suggestions && suggestions.length > 0 && { suggestions }),
+    ...(nlpAnalysis && { nlpAnalysis }),
+    ...(thinking && thinking.length > 0 && { thinking }),
+  };
+
+  return response;
+}
+
+/**
+ * Extract pagination info from Graph API response
+ */
+function extractPaginationInfo(
+  response: unknown,
+  skip?: number,
+  top?: number
+): PaginationInfo | undefined {
+  if (typeof response !== 'object' || response === null) {
+    return undefined;
+  }
+
+  const obj = response as Record<string, unknown>;
+  const value = obj.value;
+
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const totalItems = value.length;
+  const pageSize = top || 25;
+  const currentPage = skip ? Math.floor(skip / pageSize) + 1 : 1;
+  const totalPages = Math.ceil(totalItems / pageSize);
+
+  // Check for @odata.nextLink for cursor-based pagination
+  const nextLink = obj['@odata.nextLink'] as string | undefined;
+  const hasNext = !!nextLink || totalItems >= pageSize;
+
+  return {
+    currentPage,
+    pageSize,
+    totalItems,
+    totalPages,
+    hasNext,
+    hasPrevious: currentPage > 1,
+    ...(skip !== undefined && { skip }),
+    ...(top !== undefined && { top }),
+  };
+}
+
+// ============================================================================
+// RATE LIMITING
+// ============================================================================
+
+interface RequestQueue {
+  queue: Array<{
+    operation: () => Promise<unknown>;
+    resolve: (value: unknown) => void;
+    reject: (error: Error) => void;
+    priority: 'high' | 'medium' | 'low';
+    timestamp: number;
+  }>;
+  processing: boolean;
+  lastRequestTime: number;
+  minDelay: number; // Minimum delay between requests (ms)
+}
+
+class RateLimiter {
+  private queues = new Map<string, RequestQueue>();
+  private defaultMinDelay = 100; // 100ms default delay
+
+  /**
+   * Execute operation with rate limiting
+   */
+  async execute<T>(
+    key: string,
+    operation: () => Promise<T>,
+    priority: 'high' | 'medium' | 'low' = 'medium'
+  ): Promise<T> {
+    let queue = this.queues.get(key);
+
+    if (!queue) {
+      queue = {
+        queue: [],
+        processing: false,
+        lastRequestTime: 0,
+        minDelay: this.defaultMinDelay,
+      };
+      this.queues.set(key, queue);
+    }
+
+    return new Promise<T>((resolve, reject) => {
+      // Add to queue with priority
+      queue!.queue.push({
+        operation: operation as () => Promise<unknown>,
+        resolve: resolve as (value: unknown) => void,
+        reject: reject,
+        priority,
+        timestamp: Date.now(),
+      });
+
+      // Sort queue by priority (high first, then by timestamp)
+      queue!.queue.sort((a, b) => {
+        const priorityOrder = { high: 0, medium: 1, low: 2 };
+        const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
+        if (priorityDiff !== 0) return priorityDiff;
+        return a.timestamp - b.timestamp;
+      });
+
+      // Process queue
+      this.processQueue(key);
+    });
+  }
+
+  /**
+   * Process queue for a given key
+   */
+  private async processQueue(key: string): Promise<void> {
+    const queue = this.queues.get(key);
+    if (!queue || queue.processing || queue.queue.length === 0) {
+      return;
+    }
+
+    queue.processing = true;
+
+    while (queue.queue.length > 0) {
+      const item = queue.queue.shift()!;
+
+      // Calculate delay based on last request time
+      const now = Date.now();
+      const timeSinceLastRequest = now - queue.lastRequestTime;
+      const delay = Math.max(0, queue.minDelay - timeSinceLastRequest);
+
+      if (delay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+
+      try {
+        queue.lastRequestTime = Date.now();
+        const result = await item.operation();
+        item.resolve(result);
+      } catch (error) {
+        item.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    queue.processing = false;
+  }
+
+  /**
+   * Update rate limit for a key (e.g., after receiving 429)
+   */
+  updateRateLimit(key: string, minDelay: number): void {
+    const queue = this.queues.get(key);
+    if (queue) {
+      queue.minDelay = minDelay;
+      logger.warn(`Updated rate limit for ${key}: ${minDelay}ms delay`);
+    }
+  }
+
+  /**
+   * Clear rate limit for a key
+   */
+  clear(key: string): void {
+    this.queues.delete(key);
+  }
+
+  /**
+   * Clear all rate limits
+   */
+  clearAll(): void {
+    this.queues.clear();
+  }
+}
+
+// Global rate limiter instance
+const rateLimiter = new RateLimiter();
+
+// ============================================================================
+// NLP QUERY OPTIMIZATION
+// ============================================================================
+
+/**
+ * Optimize query using NLP analysis
+ */
+function optimizeQueryWithNLP(query: string): {
+  optimizedQuery: string;
+  filters?: Record<string, unknown>;
+  nlpAnalysis: NLPAnalysis;
+} {
+  const decomposed = nlpEnhancer.decomposeQuery(query);
+
+  let optimizedQuery = query;
+
+  // Extract temporal filters
+  const filters: Record<string, unknown> = {};
+  if (decomposed.temporal) {
+    const now = new Date();
+    if (decomposed.temporal.relativeDays) {
+      const days = decomposed.temporal.relativeDays;
+      const date = new Date(now);
+      date.setDate(date.getDate() + days);
+      filters.dateFilter = date.toISOString();
+    }
+  }
+
+  // Optimize query string (remove stopwords, expand synonyms)
+  const normalized = nlpEnhancer.normalizeQuery(query);
+  if (normalized !== query) {
+    optimizedQuery = normalized;
+  }
+
+  const nlpAnalysis: NLPAnalysis = {
+    intent: decomposed.intent.type,
+    service: decomposed.ms365Context?.service,
+    entities: decomposed.entities.map((e) => ({
+      value: e.value,
+      type: e.type,
+      confidence: e.confidence,
+    })),
+    temporal: decomposed.temporal
+      ? {
+          expression: decomposed.temporal.expression,
+          type: decomposed.temporal.type,
+          relativeDays: decomposed.temporal.relativeDays,
+        }
+      : null,
+    confidence: decomposed.confidence,
+  };
+
+  return {
+    optimizedQuery,
+    ...(Object.keys(filters).length > 0 && { filters }),
+    nlpAnalysis,
+  };
 }
 
 // Common schemas
@@ -2523,6 +3220,47 @@ async function handleDiscoverPerson(
     );
   });
 
+  // Use DataAggregator for consistent deduplication and sorting
+  const aggregated = dataAggregator.aggregate(
+    [
+      { source: 'emails', items: emails.value || [] },
+      { source: 'calendar', items: relevantEvents },
+      { source: 'files', items: files.value || [] },
+      { source: 'contacts', items: contacts.value || [] },
+      { source: 'chats', items: chats.value || [] },
+    ],
+    {
+      sortBy: 'timestamp',
+      sortOrder: 'desc',
+      maxItems: limit * 2, // Get more items for better aggregation
+      deduplicate: true,
+    }
+  );
+
+  // Categorize aggregated items by source
+  const categorizedResults: Record<string, unknown[]> = {
+    emails: [],
+    meetings: [],
+    files: [],
+    contacts: [],
+    chats: [],
+  };
+
+  for (const item of aggregated.items) {
+    const data = item.data as Record<string, unknown>;
+    if (item.source === 'emails') {
+      categorizedResults.emails.push(data);
+    } else if (item.source === 'calendar') {
+      categorizedResults.meetings.push(data);
+    } else if (item.source === 'files') {
+      categorizedResults.files.push(data);
+    } else if (item.source === 'contacts') {
+      categorizedResults.contacts.push(data);
+    } else if (item.source === 'chats') {
+      categorizedResults.chats.push(data);
+    }
+  }
+
   // Build discovery response
   const response: DiscoveryResponse = {
     target: personName,
@@ -2542,31 +3280,28 @@ async function handleDiscoverPerson(
       ],
     },
     summary: {
-      totalItems:
-        (emails.value?.length || 0) +
-        relevantEvents.length +
-        (files.value?.length || 0) +
-        (contacts.value?.length || 0),
-      sources: ['emails', 'calendar', 'files', 'contacts', 'chats'].filter((s) => {
-        if (s === 'emails') return emails.value?.length > 0;
-        if (s === 'calendar') return relevantEvents.length > 0;
-        if (s === 'files') return files.value?.length > 0;
-        if (s === 'contacts') return contacts.value?.length > 0;
-        if (s === 'chats') return chats.value?.length > 0;
-        return false;
-      }),
+      totalItems: aggregated.uniqueItems,
+      sources: aggregated.sources || [],
       timeRange: `Last ${days} days`,
     },
     results: {
-      emails: emails.value?.slice(0, limit),
-      meetings: relevantEvents.slice(0, limit),
-      files: files.value?.slice(0, limit),
-      contacts: contacts.value,
+      emails: categorizedResults.emails.slice(0, limit),
+      meetings: categorizedResults.meetings.slice(0, limit),
+      files: categorizedResults.files.slice(0, limit),
+      contacts: categorizedResults.contacts,
+      chats: categorizedResults.chats.slice(0, limit),
     },
     insights: {
-      lastInteraction: emails.value?.[0]?.receivedDateTime || 'Unknown',
-      recentActivity: `${emails.value?.length || 0} emails, ${relevantEvents.length} meetings`,
-      recommendations: generatePersonRecommendations(emails.value, relevantEvents, personName),
+      lastInteraction:
+        categorizedResults.emails[0]?.['receivedDateTime'] ||
+        categorizedResults.meetings[0]?.['start']?.['dateTime'] ||
+        'Unknown',
+      recentActivity: `${categorizedResults.emails.length} emails, ${categorizedResults.meetings.length} meetings`,
+      recommendations: generatePersonRecommendations(
+        categorizedResults.emails,
+        categorizedResults.meetings,
+        personName
+      ),
     },
   };
 

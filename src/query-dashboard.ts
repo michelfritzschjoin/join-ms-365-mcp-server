@@ -21,6 +21,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { randomBytes, timingSafeEqual } from 'crypto';
 import rateLimit from 'express-rate-limit';
 import { getQueryStore, type QueryFilter } from './query-store.js';
+import { getDashboardSessionStore } from './dashboard-session-store.js';
 import logger from './logger.js';
 import { rateLimitMiddleware } from './middleware/rate-limit.js';
 
@@ -41,23 +42,12 @@ const loginRateLimiter = rateLimit({
   },
 });
 
-/**
- * Session store for dashboard authentication
- */
-interface DashboardSession {
-  token: string;
-  createdAt: Date;
-  expiresAt: Date;
-  ipAddress: string;
-}
-
-const sessions: Map<string, DashboardSession> = new Map();
 const SESSION_DURATION_MS = 8 * 60 * 60 * 1000; // 8 hours
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 15 * 60 * 1000; // 15 minutes
 
-// Track login attempts for rate limiting
-const loginAttempts: Map<string, { count: number; lastAttempt: Date }> = new Map();
+// Get persistent session store instance
+const sessionStore = getDashboardSessionStore();
 
 // Cache for hashed password (hashed once on first access)
 let cachedPasswordHash: string | null = null;
@@ -124,17 +114,9 @@ function generateSessionToken(): string {
  */
 function createSession(ipAddress: string): string {
   const token = generateSessionToken();
-  const now = new Date();
+  const expiresAt = new Date(Date.now() + SESSION_DURATION_MS);
 
-  sessions.set(token, {
-    token,
-    createdAt: now,
-    expiresAt: new Date(now.getTime() + SESSION_DURATION_MS),
-    ipAddress,
-  });
-
-  // Clean up old sessions
-  cleanupSessions();
+  sessionStore.createSession(token, ipAddress, expiresAt);
 
   return token;
 }
@@ -143,71 +125,30 @@ function createSession(ipAddress: string): string {
  * Validate session token
  */
 function validateSession(token: string, _ipAddress: string): boolean {
-  const session = sessions.get(token);
-
-  if (!session) {
-    return false;
-  }
-
-  // Check if expired
-  if (new Date() > session.expiresAt) {
-    sessions.delete(token);
-    return false;
-  }
-
-  // Optional: Check IP address (can be disabled for mobile users)
-  // if (session.ipAddress !== ipAddress) {
-  //   return false;
-  // }
-
-  return true;
+  return sessionStore.hasValidSession(token);
 }
 
 /**
  * Clean up expired sessions
+ * Note: This is now handled automatically by the session store
  */
 function cleanupSessions(): void {
-  const now = new Date();
-  for (const [token, session] of sessions) {
-    if (now > session.expiresAt) {
-      sessions.delete(token);
-    }
-  }
+  // Cleanup is handled automatically by DashboardSessionStore
+  // This function is kept for compatibility but does nothing
 }
 
 /**
  * Check rate limiting for login attempts
  */
 function isLoginRateLimited(ipAddress: string): boolean {
-  const attempts = loginAttempts.get(ipAddress);
-
-  if (!attempts) {
-    return false;
-  }
-
-  // Reset if lockout period has passed
-  const timeSinceLastAttempt = Date.now() - attempts.lastAttempt.getTime();
-  if (timeSinceLastAttempt > LOGIN_LOCKOUT_MS) {
-    loginAttempts.delete(ipAddress);
-    return false;
-  }
-
-  return attempts.count >= MAX_LOGIN_ATTEMPTS;
+  return sessionStore.isRateLimited(ipAddress, MAX_LOGIN_ATTEMPTS);
 }
 
 /**
  * Record login attempt
  */
 function recordLoginAttempt(ipAddress: string, success: boolean): void {
-  if (success) {
-    loginAttempts.delete(ipAddress);
-    return;
-  }
-
-  const attempts = loginAttempts.get(ipAddress) || { count: 0, lastAttempt: new Date() };
-  attempts.count++;
-  attempts.lastAttempt = new Date();
-  loginAttempts.set(ipAddress, attempts);
+  sessionStore.recordLoginAttempt(ipAddress, success);
 }
 
 /**
@@ -356,7 +297,7 @@ export function createDashboardRouter(): Router {
     const token = getSessionToken(req);
 
     if (token) {
-      sessions.delete(token);
+      sessionStore.deleteSession(token);
     }
 
     const isSecure = req.secure || req.get('X-Forwarded-Proto') === 'https';
