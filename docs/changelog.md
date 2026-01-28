@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **super-tools:** comprehensive enhancement with caching, retry logic, and nlp integration ([00f37fc](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/00f37fc186a7b50257fb8414da03e7cf27e75914))
+- **super-tools:** comprehensive enhancement with caching, retry logic, and nlp integration ([00f37fc](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/00f37fc186a7b50257fb8414da03e7cf27e75914))
 
 ## [1.10.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.10.0...v1.10.1) (2026-01-28)
 

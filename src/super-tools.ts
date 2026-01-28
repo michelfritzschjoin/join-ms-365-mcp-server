@@ -976,6 +976,7 @@ async function handleEmail(
 
   switch (input.action) {
     case 'list': {
+      const startTime = Date.now();
       thinking.push(
         `Listing emails${input.folderId ? ` from folder ${input.folderId}` : ' from inbox'}`
       );
@@ -984,21 +985,49 @@ async function handleEmail(
         : '/me/messages';
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
-      if (input.search) params.$search = `"${input.search}"`;
+      if (input.search) params.$search = formatSearchQuery(input.search);
       if (input.orderby) params.$orderby = input.orderby;
       if (input.skip) params.$skip = String(input.skip);
 
       const result = await callGraph(graphClient, 'GET', endpoint, params);
       const parsedResult = JSON.parse(result);
+      const executionTime = Date.now() - startTime;
+
+      // Extract pagination info
+      const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
 
       // Format mail response with quick summary
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
         const formattedText = mailResponseToText(formatted);
-        return addThinkingToResponse(formattedText, thinking);
+
+        // Add metadata to response
+        const responseWithMetadata = formatStandardResponse(
+          { formatted: formattedText, raw: parsedResult },
+          {
+            executionTime,
+            sources: ['email'],
+            cacheHit: false,
+            pagination,
+            suggestions: [
+              '💡 Use "email" tool with action "get" to view email details',
+              '💡 Use "email" tool with action "search" for advanced search',
+            ],
+          }
+        );
+
+        return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
       }
 
-      return addThinkingToResponse(result, thinking);
+      // Fallback: return with metadata
+      const responseWithMetadata = formatStandardResponse(parsedResult, {
+        executionTime,
+        sources: ['email'],
+        cacheHit: false,
+        pagination,
+      });
+
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     case 'get': {
@@ -1210,21 +1239,51 @@ async function handleCalendar(
 
   switch (input.action) {
     case 'list': {
+      const startTime = Date.now();
       thinking.push('Listing calendar events');
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
       if (input.orderby) params.$orderby = input.orderby;
+      if (input.skip) params.$skip = String(input.skip);
       const result = await callGraph(graphClient, 'GET', '/me/events', params, undefined, headers);
       const parsedResult = JSON.parse(result);
+      const executionTime = Date.now() - startTime;
+
+      // Extract pagination info
+      const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
 
       // Format calendar response with quick summary
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult);
         const formattedText = calendarResponseToText(formatted);
-        return addThinkingToResponse(formattedText, thinking);
+
+        // Add metadata to response
+        const responseWithMetadata = formatStandardResponse(
+          { formatted: formattedText, raw: parsedResult },
+          {
+            executionTime,
+            sources: ['calendar'],
+            cacheHit: false,
+            pagination,
+            suggestions: [
+              '💡 Use "calendar" tool with action "get" to view event details',
+              '💡 Use "calendar" tool with action "view" for date range queries',
+            ],
+          }
+        );
+
+        return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
       }
 
-      return addThinkingToResponse(result, thinking);
+      // Fallback: return with metadata
+      const responseWithMetadata = formatStandardResponse(parsedResult, {
+        executionTime,
+        sources: ['calendar'],
+        cacheHit: false,
+        pagination,
+      });
+
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     case 'get': {
@@ -1707,13 +1766,44 @@ async function handleFiles(
 
     case 'search': {
       if (!input.search) throw new Error('search query is required');
-      thinking.push(`Searching files for: ${input.search}`);
+
+      // NLP optimization for file search
+      const startTime = Date.now();
+      const optimized = optimizeQueryWithNLP(input.search);
+      thinking.push(`🔍 Searching files for: "${input.search}"`);
+      if (optimized.optimizedQuery !== input.search) {
+        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
+      }
+      if (optimized.nlpAnalysis.intent) {
+        thinking.push(`📊 Detected intent: ${optimized.nlpAnalysis.intent}`);
+      }
+
       const result = await callGraph(
         graphClient,
         'GET',
-        `/me/drive/root/search(q='${input.search}')`
+        `/me/drive/root/search(q='${encodeURIComponent(optimized.optimizedQuery)}')`
       );
-      return addThinkingToResponse(result, thinking);
+      const parsedResult = JSON.parse(result);
+      const executionTime = Date.now() - startTime;
+
+      // Extract pagination info
+      const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
+
+      // Format response with metadata
+      const responseWithMetadata = formatStandardResponse(parsedResult, {
+        executionTime,
+        sources: ['files'],
+        cacheHit: false,
+        pagination,
+        nlpAnalysis: optimized.nlpAnalysis,
+        suggestions: [
+          '💡 Use "files" tool with action "get" to view file details',
+          '💡 Use "files" tool with action "download" to download file content',
+          '💡 Use "files" tool with action "list" to browse folders',
+        ],
+      });
+
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     default:
@@ -1955,17 +2045,46 @@ async function handleContacts(
 
     case 'search': {
       if (!input.search) throw new Error('search query is required');
-      thinking.push(`Searching for: ${input.search}`);
+
+      // NLP optimization for contact/user search
+      const startTime = Date.now();
+      const optimized = optimizeQueryWithNLP(input.search);
+      thinking.push(`🔍 Searching contacts/users for: "${input.search}"`);
+      if (optimized.optimizedQuery !== input.search) {
+        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
+      }
+      if (optimized.nlpAnalysis.intent) {
+        thinking.push(`📊 Detected intent: ${optimized.nlpAnalysis.intent}`);
+      }
 
       // Microsoft Graph API requires property:value format for $search on /users endpoint
       const params: Record<string, string> = {
-        $search: formatSearchQuery(input.search, 'displayName'),
+        $search: formatSearchQuery(optimized.optimizedQuery, 'displayName'),
         $top: String(input.top || 25),
       };
       const result = await callGraph(graphClient, 'GET', '/users', params, undefined, {
         ConsistencyLevel: 'eventual',
       });
-      return addThinkingToResponse(result, thinking);
+      const parsedResult = JSON.parse(result);
+      const executionTime = Date.now() - startTime;
+
+      // Extract pagination info
+      const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
+
+      // Format response with metadata
+      const responseWithMetadata = formatStandardResponse(parsedResult, {
+        executionTime,
+        sources: ['contacts', 'users'],
+        cacheHit: false,
+        pagination,
+        nlpAnalysis: optimized.nlpAnalysis,
+        suggestions: [
+          '💡 Use "contacts" tool with action "get" to view contact details',
+          '💡 Use "assistant" tool with action "discover-person" for comprehensive person info',
+        ],
+      });
+
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     default:
@@ -2886,45 +3005,136 @@ async function handleAssistant(
   switch (input.action) {
     case 'ask': {
       if (!input.query) throw new Error('query is required for ask action');
-      thinking.push(`Processing question: ${input.query}`);
+
+      // NLP optimization for question processing
+      const startTime = Date.now();
+      const optimized = optimizeQueryWithNLP(input.query);
+      thinking.push(`💭 Processing question: "${input.query}"`);
+      if (optimized.optimizedQuery !== input.query) {
+        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
+      }
+      if (optimized.nlpAnalysis.intent) {
+        thinking.push(
+          `📊 Detected intent: ${optimized.nlpAnalysis.intent}, service: ${optimized.nlpAnalysis.service || 'general'}`
+        );
+      }
       thinking.push('Searching across emails, calendar, files, and chats...');
 
-      // Search emails
-      const emailResult = await callGraph(graphClient, 'GET', '/me/messages', {
-        $search: `"${input.query}"`,
-        $top: String(Math.min(limit, 10)),
+      // Parallel API calls with optimized query
+      const [emailResult, filesResult] = await Promise.allSettled([
+        callGraph(graphClient, 'GET', '/me/messages', {
+          $search: formatSearchQuery(optimized.optimizedQuery),
+          $top: String(Math.min(limit, 10)),
+        }),
+        callGraph(
+          graphClient,
+          'GET',
+          `/me/drive/root/search(q='${encodeURIComponent(optimized.optimizedQuery)}')`
+        ),
+      ]);
+
+      if (emailResult.status === 'fulfilled') {
+        results.emails = JSON.parse(emailResult.value);
+      } else {
+        results.emailError = emailResult.reason?.message || 'Unknown error';
+      }
+
+      if (filesResult.status === 'fulfilled') {
+        results.files = JSON.parse(filesResult.value);
+      } else {
+        results.filesError = filesResult.reason?.message || 'Unknown error';
+      }
+
+      const executionTime = Date.now() - startTime;
+
+      // Format response with metadata
+      const responseWithMetadata = formatStandardResponse(results, {
+        executionTime,
+        sources: ['emails', 'files'].filter((s) => results[s]),
+        cacheHit: false,
+        nlpAnalysis: optimized.nlpAnalysis,
+        errors: [
+          ...(results.emailError
+            ? [{ message: `Email search failed: ${results.emailError}`, retryable: true }]
+            : []),
+          ...(results.filesError
+            ? [{ message: `File search failed: ${results.filesError}`, retryable: true }]
+            : []),
+        ],
+        suggestions: [
+          '💡 Use "search" tool for unified Microsoft 365 search',
+          '💡 Use "assistant" tool with action "discover" for comprehensive discovery',
+          '💡 Refine your query for better results',
+        ],
       });
-      results.emails = JSON.parse(emailResult);
 
-      // Search files
-      const filesResult = await callGraph(
-        graphClient,
-        'GET',
-        `/me/drive/root/search(q='${input.query}')`
-      );
-      results.files = JSON.parse(filesResult);
-
-      return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     case 'search': {
       if (!input.query) throw new Error('query is required for search action');
-      thinking.push(`Searching everything for: ${input.query}`);
 
-      const emailResult = await callGraph(graphClient, 'GET', '/me/messages', {
-        $search: `"${input.query}"`,
-        $top: String(limit),
+      // NLP optimization for comprehensive search
+      const startTime = Date.now();
+      const optimized = optimizeQueryWithNLP(input.query);
+      thinking.push(`🔍 Searching everything for: "${input.query}"`);
+      if (optimized.optimizedQuery !== input.query) {
+        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
+      }
+      if (optimized.nlpAnalysis.intent) {
+        thinking.push(
+          `📊 Detected intent: ${optimized.nlpAnalysis.intent}, service: ${optimized.nlpAnalysis.service || 'general'}`
+        );
+      }
+
+      // Parallel API calls with optimized query
+      const [emailResult, filesResult] = await Promise.allSettled([
+        callGraph(graphClient, 'GET', '/me/messages', {
+          $search: formatSearchQuery(optimized.optimizedQuery),
+          $top: String(limit),
+        }),
+        callGraph(
+          graphClient,
+          'GET',
+          `/me/drive/root/search(q='${encodeURIComponent(optimized.optimizedQuery)}')`
+        ),
+      ]);
+
+      if (emailResult.status === 'fulfilled') {
+        results.emails = JSON.parse(emailResult.value);
+      } else {
+        results.emailError = emailResult.reason?.message || 'Unknown error';
+      }
+
+      if (filesResult.status === 'fulfilled') {
+        results.files = JSON.parse(filesResult.value);
+      } else {
+        results.filesError = filesResult.reason?.message || 'Unknown error';
+      }
+
+      const executionTime = Date.now() - startTime;
+
+      // Format response with metadata
+      const responseWithMetadata = formatStandardResponse(results, {
+        executionTime,
+        sources: ['emails', 'files'].filter((s) => results[s]),
+        cacheHit: false,
+        nlpAnalysis: optimized.nlpAnalysis,
+        errors: [
+          ...(results.emailError
+            ? [{ message: `Email search failed: ${results.emailError}`, retryable: true }]
+            : []),
+          ...(results.filesError
+            ? [{ message: `File search failed: ${results.filesError}`, retryable: true }]
+            : []),
+        ],
+        suggestions: [
+          '💡 Use "search" tool for unified Microsoft 365 search',
+          '💡 Use "assistant" tool with action "discover" for comprehensive discovery',
+        ],
       });
-      results.emails = JSON.parse(emailResult);
 
-      const filesResult = await callGraph(
-        graphClient,
-        'GET',
-        `/me/drive/root/search(q='${input.query}')`
-      );
-      results.files = JSON.parse(filesResult);
-
-      return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     case 'my-day': {
@@ -3568,7 +3778,64 @@ async function handleDiscoverTopic(
   const events =
     eventsResult.status === 'fulfilled' ? JSON.parse(eventsResult.value) : { value: [] };
 
-  // Categorize search results
+  // Extract resources from search hits
+  const searchResources: unknown[] = [];
+  for (const hit of searchItems as Array<{ resource?: Record<string, unknown> }>) {
+    if (hit.resource) {
+      searchResources.push(hit.resource);
+    }
+  }
+
+  // Use DataAggregator for consistent deduplication and sorting
+  const aggregated = dataAggregator.aggregate(
+    [
+      {
+        source: 'search-emails',
+        items: searchResources.filter((r: unknown) => {
+          const res = r as Record<string, unknown>;
+          return (res['@odata.type'] as string)?.includes('message');
+        }),
+      },
+      {
+        source: 'search-files',
+        items: searchResources.filter((r: unknown) => {
+          const res = r as Record<string, unknown>;
+          return (res['@odata.type'] as string)?.includes('driveItem');
+        }),
+      },
+      {
+        source: 'search-meetings',
+        items: searchResources.filter((r: unknown) => {
+          const res = r as Record<string, unknown>;
+          return (res['@odata.type'] as string)?.includes('event');
+        }),
+      },
+      {
+        source: 'search-chats',
+        items: searchResources.filter((r: unknown) => {
+          const res = r as Record<string, unknown>;
+          return (res['@odata.type'] as string)?.includes('chatMessage');
+        }),
+      },
+      {
+        source: 'search-sites',
+        items: searchResources.filter((r: unknown) => {
+          const res = r as Record<string, unknown>;
+          return (res['@odata.type'] as string)?.includes('site');
+        }),
+      },
+      { source: 'files', items: files.value || [] },
+      { source: 'calendar', items: events.value || [] },
+    ],
+    {
+      sortBy: 'timestamp',
+      sortOrder: 'desc',
+      maxItems: limit * 3, // More items for better aggregation
+      deduplicate: true,
+    }
+  );
+
+  // Categorize aggregated results by source
   const categorizedResults: Record<string, unknown[]> = {
     emails: [],
     files: [],
@@ -3577,21 +3844,22 @@ async function handleDiscoverTopic(
     sites: [],
   };
 
-  for (const hit of searchItems as Array<{ resource?: Record<string, unknown> }>) {
-    const resource = hit.resource;
-    if (!resource) continue;
-
-    const odataType = (resource['@odata.type'] as string) || '';
-    if (odataType.includes('message')) {
-      categorizedResults.emails.push(resource);
-    } else if (odataType.includes('driveItem')) {
-      categorizedResults.files.push(resource);
-    } else if (odataType.includes('event')) {
-      categorizedResults.meetings.push(resource);
-    } else if (odataType.includes('chatMessage')) {
-      categorizedResults.chats.push(resource);
-    } else if (odataType.includes('site')) {
-      categorizedResults.sites.push(resource);
+  for (const item of aggregated.items) {
+    const data = item.data as Record<string, unknown>;
+    if (item.source.includes('email') || item.source.includes('message')) {
+      categorizedResults.emails.push(data);
+    } else if (item.source.includes('file') || item.source.includes('driveItem')) {
+      categorizedResults.files.push(data);
+    } else if (
+      item.source.includes('meeting') ||
+      item.source.includes('event') ||
+      item.source === 'calendar'
+    ) {
+      categorizedResults.meetings.push(data);
+    } else if (item.source.includes('chat')) {
+      categorizedResults.chats.push(data);
+    } else if (item.source.includes('site')) {
+      categorizedResults.sites.push(data);
     }
   }
 
@@ -3614,36 +3882,36 @@ async function handleDiscoverTopic(
       ],
     },
     summary: {
-      totalItems: totalHits,
-      sources: Object.keys(categorizedResults).filter((key) => categorizedResults[key].length > 0),
+      totalItems: aggregated.uniqueItems,
+      sources: aggregated.sources || [],
       timeRange: `Last ${days} days`,
     },
     results: {
       emails: categorizedResults.emails.slice(0, limit),
-      files: [...categorizedResults.files, ...(files.value || [])].slice(0, limit),
-      meetings: [...categorizedResults.meetings, ...(events.value || [])].slice(0, limit),
+      files: categorizedResults.files.slice(0, limit),
+      meetings: categorizedResults.meetings.slice(0, limit),
       chats: categorizedResults.chats.slice(0, limit),
       sites: categorizedResults.sites.slice(0, limit),
     },
     insights: {
-      recentActivity: `Found ${totalHits} items across Microsoft 365`,
+      recentActivity: `Found ${aggregated.uniqueItems} unique items across Microsoft 365 (${totalHits} total hits)`,
       recommendations: [
         `📧 ${categorizedResults.emails.length} emails found`,
-        `📁 ${categorizedResults.files.length + (files.value?.length || 0)} files found`,
-        `📅 ${categorizedResults.meetings.length + (events.value?.length || 0)} calendar items found`,
+        `📁 ${categorizedResults.files.length} files found`,
+        `📅 ${categorizedResults.meetings.length} calendar items found`,
         `💬 ${categorizedResults.chats.length} chat messages found`,
+        `🌐 ${categorizedResults.sites.length} sites found`,
       ],
     },
   };
 
   thinking.push(`✅ Topic discovery complete:`);
-  thinking.push(`   📊 Total hits: ${totalHits}`);
+  thinking.push(`   📊 Total hits: ${totalHits}, Unique items: ${aggregated.uniqueItems}`);
   thinking.push(`   📧 Emails: ${categorizedResults.emails.length}`);
-  thinking.push(`   📁 Files: ${categorizedResults.files.length + (files.value?.length || 0)}`);
-  thinking.push(
-    `   📅 Meetings: ${categorizedResults.meetings.length + (events.value?.length || 0)}`
-  );
+  thinking.push(`   📁 Files: ${categorizedResults.files.length}`);
+  thinking.push(`   📅 Meetings: ${categorizedResults.meetings.length}`);
   thinking.push(`   💬 Chats: ${categorizedResults.chats.length}`);
+  thinking.push(`   🌐 Sites: ${categorizedResults.sites.length}`);
 
   return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
 }
