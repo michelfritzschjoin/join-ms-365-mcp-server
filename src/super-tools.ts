@@ -1027,19 +1027,55 @@ async function handleEmail(
 
     case 'search': {
       if (!input.search) throw new Error('search query is required for action "search"');
-      thinking.push(`Searching emails for: ${input.search}`);
+
+      // NLP optimization for search query
+      const startTime = Date.now();
+      const optimized = optimizeQueryWithNLP(input.search);
+      thinking.push(`🔍 Searching emails for: "${input.search}"`);
+      if (optimized.optimizedQuery !== input.search) {
+        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
+      }
+      if (optimized.nlpAnalysis.intent) {
+        thinking.push(`📊 Detected intent: ${optimized.nlpAnalysis.intent}`);
+      }
+
       const params: Record<string, string> = {
-        $search: `"${input.search}"`,
+        $search: formatSearchQuery(optimized.optimizedQuery),
         $top: String(input.top || 25),
       };
+
+      // Apply temporal filters if NLP detected them
+      if (optimized.filters?.dateFilter) {
+        const dateFilter = optimized.filters.dateFilter as string;
+        params.$filter = `receivedDateTime ge ${dateFilter}`;
+        thinking.push(`📅 Applying date filter: after ${dateFilter}`);
+      }
+
       const result = await callGraph(graphClient, 'GET', '/me/messages', params);
       const parsedResult = JSON.parse(result);
+      const executionTime = Date.now() - startTime;
 
       // Format mail response with quick summary
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
         const formattedText = mailResponseToText(formatted);
-        return addThinkingToResponse(formattedText, thinking);
+
+        // Add NLP insights to response
+        const responseWithMetadata = formatStandardResponse(
+          { formatted: formattedText, raw: parsedResult },
+          {
+            executionTime,
+            sources: ['email'],
+            cacheHit: false,
+            nlpAnalysis: optimized.nlpAnalysis,
+            suggestions: [
+              '💡 Use "email" tool with action "get" to view full email details',
+              '💡 Use "email" tool with action "list" to browse more emails',
+            ],
+          }
+        );
+
+        return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
       }
 
       return addThinkingToResponse(result, thinking);
@@ -3370,6 +3406,47 @@ async function handleDiscoverProject(
     eventsResult.status === 'fulfilled' ? JSON.parse(eventsResult.value) : { value: [] };
   const tasks = tasksResult.status === 'fulfilled' ? JSON.parse(tasksResult.value) : { value: [] };
 
+  // Use DataAggregator for consistent deduplication and sorting
+  const aggregated = dataAggregator.aggregate(
+    [
+      { source: 'emails', items: emails.value || [] },
+      { source: 'files', items: files.value || [] },
+      { source: 'sites', items: sites.value || [] },
+      { source: 'calendar', items: events.value || [] },
+      { source: 'tasks', items: tasks.value || [] },
+    ],
+    {
+      sortBy: 'timestamp',
+      sortOrder: 'desc',
+      maxItems: limit * 2,
+      deduplicate: true,
+    }
+  );
+
+  // Categorize aggregated items by source
+  const categorizedResults: Record<string, unknown[]> = {
+    emails: [],
+    files: [],
+    sites: [],
+    meetings: [],
+    tasks: [],
+  };
+
+  for (const item of aggregated.items) {
+    const data = item.data as Record<string, unknown>;
+    if (item.source === 'emails') {
+      categorizedResults.emails.push(data);
+    } else if (item.source === 'files') {
+      categorizedResults.files.push(data);
+    } else if (item.source === 'sites') {
+      categorizedResults.sites.push(data);
+    } else if (item.source === 'calendar') {
+      categorizedResults.meetings.push(data);
+    } else if (item.source === 'tasks') {
+      categorizedResults.tasks.push(data);
+    }
+  }
+
   // Build discovery response
   const response: DiscoveryResponse = {
     target: projectName,
@@ -3389,34 +3466,29 @@ async function handleDiscoverProject(
       ],
     },
     summary: {
-      totalItems:
-        (emails.value?.length || 0) +
-        (files.value?.length || 0) +
-        (sites.value?.length || 0) +
-        (events.value?.length || 0),
-      sources: ['emails', 'files', 'sites', 'calendar', 'tasks'].filter((s) => {
-        if (s === 'emails') return emails.value?.length > 0;
-        if (s === 'files') return files.value?.length > 0;
-        if (s === 'sites') return sites.value?.length > 0;
-        if (s === 'calendar') return events.value?.length > 0;
-        if (s === 'tasks') return tasks.value?.length > 0;
-        return false;
-      }),
+      totalItems: aggregated.uniqueItems,
+      sources: aggregated.sources || [],
       timeRange: `Last ${days} days`,
     },
     results: {
-      emails: emails.value?.slice(0, limit),
-      files: files.value?.slice(0, limit),
-      sites: sites.value,
-      meetings: events.value?.slice(0, limit),
-      tasks: tasks.value,
+      emails: categorizedResults.emails.slice(0, limit),
+      files: categorizedResults.files.slice(0, limit),
+      sites: categorizedResults.sites,
+      meetings: categorizedResults.meetings.slice(0, limit),
+      tasks: categorizedResults.tasks,
     },
     insights: {
-      recentActivity: `${emails.value?.length || 0} emails, ${files.value?.length || 0} files, ${events.value?.length || 0} meetings`,
+      recentActivity: `${categorizedResults.emails.length} emails, ${categorizedResults.files.length} files, ${categorizedResults.meetings.length} meetings`,
       recommendations: [
-        files.value?.length > 0 ? `📁 ${files.value.length} project files found` : null,
-        sites.value?.length > 0 ? `🌐 ${sites.value.length} SharePoint sites related` : null,
-        events.value?.length > 0 ? `📅 ${events.value.length} meetings scheduled` : null,
+        categorizedResults.files.length > 0
+          ? `📁 ${categorizedResults.files.length} project files found`
+          : null,
+        categorizedResults.sites.length > 0
+          ? `🌐 ${categorizedResults.sites.length} SharePoint sites related`
+          : null,
+        categorizedResults.meetings.length > 0
+          ? `📅 ${categorizedResults.meetings.length} meetings scheduled`
+          : null,
       ].filter(Boolean) as string[],
     },
   };
@@ -3636,11 +3708,52 @@ async function handleDiscoverCompany(
     contactsResult.status === 'fulfilled' ? JSON.parse(contactsResult.value) : { value: [] };
   const sites = sitesResult.status === 'fulfilled' ? JSON.parse(sitesResult.value) : { value: [] };
 
+  // Use DataAggregator for consistent deduplication and sorting
+  const aggregated = dataAggregator.aggregate(
+    [
+      { source: 'emails', items: emails.value || [] },
+      { source: 'calendar', items: events.value || [] },
+      { source: 'files', items: files.value || [] },
+      { source: 'contacts', items: contacts.value || [] },
+      { source: 'sites', items: sites.value || [] },
+    ],
+    {
+      sortBy: 'timestamp',
+      sortOrder: 'desc',
+      maxItems: limit * 2,
+      deduplicate: true,
+    }
+  );
+
+  // Categorize aggregated items by source
+  const categorizedResults: Record<string, unknown[]> = {
+    emails: [],
+    meetings: [],
+    files: [],
+    contacts: [],
+    sites: [],
+  };
+
+  for (const item of aggregated.items) {
+    const data = item.data as Record<string, unknown>;
+    if (item.source === 'emails') {
+      categorizedResults.emails.push(data);
+    } else if (item.source === 'calendar') {
+      categorizedResults.meetings.push(data);
+    } else if (item.source === 'files') {
+      categorizedResults.files.push(data);
+    } else if (item.source === 'contacts') {
+      categorizedResults.contacts.push(data);
+    } else if (item.source === 'sites') {
+      categorizedResults.sites.push(data);
+    }
+  }
+
   // Calculate relationship score based on interaction frequency
-  const emailCount = emails.value?.length || 0;
-  const meetingCount = events.value?.length || 0;
-  const contactCount = contacts.value?.length || 0;
-  const fileCount = files.value?.length || 0;
+  const emailCount = categorizedResults.emails.length;
+  const meetingCount = categorizedResults.meetings.length;
+  const contactCount = categorizedResults.contacts.length;
+  const fileCount = categorizedResults.files.length;
 
   const relationshipScore = Math.min(
     100,
@@ -3667,27 +3780,23 @@ async function handleDiscoverCompany(
       ],
     },
     summary: {
-      totalItems: emailCount + meetingCount + fileCount + contactCount + (sites.value?.length || 0),
-      sources: ['emails', 'calendar', 'files', 'contacts', 'sites'].filter((s) => {
-        if (s === 'emails') return emailCount > 0;
-        if (s === 'calendar') return meetingCount > 0;
-        if (s === 'files') return fileCount > 0;
-        if (s === 'contacts') return contactCount > 0;
-        if (s === 'sites') return sites.value?.length > 0;
-        return false;
-      }),
+      totalItems: aggregated.uniqueItems,
+      sources: aggregated.sources || [],
       timeRange: `Last ${days} days`,
     },
     results: {
-      emails: emails.value?.slice(0, limit),
-      meetings: events.value?.slice(0, limit),
-      files: files.value?.slice(0, limit),
-      contacts: contacts.value,
-      sites: sites.value,
+      emails: categorizedResults.emails.slice(0, limit),
+      meetings: categorizedResults.meetings.slice(0, limit),
+      files: categorizedResults.files.slice(0, limit),
+      contacts: categorizedResults.contacts,
+      sites: categorizedResults.sites,
     },
     insights: {
       relationshipScore,
-      lastInteraction: emails.value?.[0]?.receivedDateTime || 'Unknown',
+      lastInteraction:
+        categorizedResults.emails[0]?.['receivedDateTime'] ||
+        categorizedResults.meetings[0]?.['start']?.['dateTime'] ||
+        'Unknown',
       recentActivity: `${emailCount} emails, ${meetingCount} meetings, ${contactCount} contacts`,
       recommendations: generateCompanyRecommendations(
         relationshipScore,
@@ -3703,7 +3812,7 @@ async function handleDiscoverCompany(
   thinking.push(`   📅 Meetings: ${meetingCount}`);
   thinking.push(`   📁 Files: ${fileCount}`);
   thinking.push(`   👥 Contacts: ${contactCount}`);
-  thinking.push(`   🌐 Sites: ${sites.value?.length || 0}`);
+  thinking.push(`   🌐 Sites: ${categorizedResults.sites.length}`);
   thinking.push(`   💯 Relationship Score: ${relationshipScore}/100`);
 
   return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);

@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **search:** integrate nlp for intelligent calendar query detection and better suggestions ([ed4b9c8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/ed4b9c880ece01f53e878e9fad5f37b3801273f7))
+- **search:** integrate nlp for intelligent calendar query detection and better suggestions ([ed4b9c8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/ed4b9c880ece01f53e878e9fad5f37b3801273f7))
 
 ## [1.10.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.9.1...v1.10.0) (2026-01-28)
 
