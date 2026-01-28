@@ -507,6 +507,38 @@ async function callGraphWithRetry(
 }
 
 /**
+ * Invalidate cache for write operations
+ */
+function invalidateCacheForWrite(endpoint: string): void {
+  // Invalidate related caches based on endpoint
+  if (endpoint.includes('/messages') || endpoint.includes('/sendMail')) {
+    // Invalidate email-related caches
+    apiCache.invalidate('GET.*messages');
+    apiCache.invalidate('GET.*mailFolders');
+    logger.debug('Invalidated email cache due to write operation', { endpoint });
+  } else if (endpoint.includes('/events') || endpoint.includes('/calendar')) {
+    // Invalidate calendar-related caches
+    apiCache.invalidate('GET.*events');
+    apiCache.invalidate('GET.*calendar');
+    logger.debug('Invalidated calendar cache due to write operation', { endpoint });
+  } else if (endpoint.includes('/drive') || endpoint.includes('/items')) {
+    // Invalidate file-related caches
+    apiCache.invalidate('GET.*drive');
+    apiCache.invalidate('GET.*items');
+    logger.debug('Invalidated files cache due to write operation', { endpoint });
+  } else if (endpoint.includes('/contacts')) {
+    // Invalidate contact-related caches
+    apiCache.invalidate('GET.*contacts');
+    apiCache.invalidate('GET.*users');
+    logger.debug('Invalidated contacts cache due to write operation', { endpoint });
+  } else {
+    // Broad invalidation for unknown endpoints
+    apiCache.clear();
+    logger.debug('Cleared all cache due to write operation', { endpoint });
+  }
+}
+
+/**
  * Helper function to call Graph API endpoints (backward compatible)
  * Wraps callGraphWithRetry with default settings
  */
@@ -518,6 +550,11 @@ async function callGraph(
   body?: unknown,
   headers?: Record<string, string>
 ): Promise<string> {
+  // Invalidate cache for write operations
+  if (method !== 'GET' && method !== '') {
+    invalidateCacheForWrite(endpoint);
+  }
+
   return callGraphWithRetry(graphClient, method, endpoint, queryParams, body, headers);
 }
 
@@ -796,6 +833,126 @@ class RateLimiter {
 
 // Global rate limiter instance
 const rateLimiter = new RateLimiter();
+
+// ============================================================================
+// BATCH OPERATIONS & REQUEST DEDUPLICATION
+// ============================================================================
+
+interface PendingRequest {
+  key: string;
+  promise: Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  timestamp: number;
+}
+
+/**
+ * Request deduplication - prevents duplicate API calls
+ */
+class RequestDeduplicator {
+  private pendingRequests = new Map<string, PendingRequest>();
+  private readonly maxAge = 5000; // 5 seconds max age for pending requests
+
+  /**
+   * Execute request with deduplication
+   */
+  async execute<T>(key: string, operation: () => Promise<T>): Promise<T> {
+    // Check if same request is already pending
+    const pending = this.pendingRequests.get(key);
+    if (pending) {
+      const age = Date.now() - pending.timestamp;
+      if (age < this.maxAge) {
+        logger.debug(`Deduplicating request: ${key} (age: ${age}ms)`);
+        return pending.promise as Promise<T>;
+      } else {
+        // Request is too old, remove it
+        this.pendingRequests.delete(key);
+      }
+    }
+
+    // Create new request
+    let resolve: (value: T) => void;
+    let reject: (error: Error) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+
+    const pendingRequest: PendingRequest = {
+      key,
+      promise: promise as Promise<unknown>,
+      resolve: resolve as (value: unknown) => void,
+      reject: reject as (error: Error) => void,
+      timestamp: Date.now(),
+    };
+
+    this.pendingRequests.set(key, pendingRequest);
+
+    // Execute operation
+    try {
+      const result = await operation();
+      resolve!(result);
+      this.pendingRequests.delete(key);
+      return result;
+    } catch (error) {
+      reject!(error instanceof Error ? error : new Error(String(error)));
+      this.pendingRequests.delete(key);
+      throw error;
+    }
+  }
+
+  /**
+   * Clean up old pending requests
+   */
+  cleanup(): void {
+    const now = Date.now();
+    for (const [key, request] of this.pendingRequests.entries()) {
+      if (now - request.timestamp > this.maxAge) {
+        this.pendingRequests.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Clear all pending requests
+   */
+  clear(): void {
+    this.pendingRequests.clear();
+  }
+}
+
+// Global request deduplicator
+const requestDeduplicator = new RequestDeduplicator();
+
+/**
+ * Batch API calls with deduplication and error handling
+ */
+async function batchAPICalls<T>(
+  calls: Array<{
+    key: string;
+    operation: () => Promise<T>;
+    description?: string;
+  }>
+): Promise<Array<{ key: string; result?: T; error?: Error; description?: string }>> {
+  // Clean up old requests
+  requestDeduplicator.cleanup();
+
+  // Execute all calls in parallel with deduplication
+  const promises = calls.map(async ({ key, operation, description }) => {
+    try {
+      const result = await requestDeduplicator.execute(key, operation);
+      return { key, result, description };
+    } catch (error) {
+      return {
+        key,
+        error: error instanceof Error ? error : new Error(String(error)),
+        description,
+      };
+    }
+  });
+
+  return Promise.all(promises);
+}
 
 // ============================================================================
 // NLP QUERY OPTIMIZATION
@@ -3138,42 +3295,142 @@ async function handleAssistant(
     }
 
     case 'my-day': {
+      const startTime = Date.now();
       thinking.push("Getting today's summary");
       const today = new Date();
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
 
-      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
-        startDateTime: today.toISOString(),
-        endDateTime: tomorrow.toISOString(),
-      });
-      results.todayEvents = JSON.parse(eventsResult);
+      // Batch API calls with deduplication
+      const batchResults = await batchAPICalls([
+        {
+          key: `calendarView_${today.toISOString()}_${tomorrow.toISOString()}`,
+          description: "Today's calendar events",
+          operation: async () => {
+            const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
+              startDateTime: today.toISOString(),
+              endDateTime: tomorrow.toISOString(),
+            });
+            return JSON.parse(result);
+          },
+        },
+        {
+          key: 'messages_recent_10',
+          description: 'Recent emails',
+          operation: async () => {
+            const result = await callGraph(graphClient, 'GET', '/me/messages', {
+              $top: '10',
+              $orderby: 'receivedDateTime desc',
+            });
+            return JSON.parse(result);
+          },
+        },
+      ]);
 
-      const emailsResult = await callGraph(graphClient, 'GET', '/me/messages', {
-        $top: '10',
-        $orderby: 'receivedDateTime desc',
-      });
-      results.recentEmails = JSON.parse(emailsResult);
+      // Process batch results
+      const errors: ErrorInfo[] = [];
+      for (const batchResult of batchResults) {
+        if (batchResult.error) {
+          errors.push({
+            message: `${batchResult.description || batchResult.key} failed: ${batchResult.error.message}`,
+            retryable: true,
+            details: batchResult.error,
+          });
+        } else if (batchResult.description === "Today's calendar events") {
+          results.todayEvents = batchResult.result;
+        } else if (batchResult.description === 'Recent emails') {
+          results.recentEmails = batchResult.result;
+        }
+      }
 
-      return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
+      const executionTime = Date.now() - startTime;
+
+      // Format response with metadata
+      const responseWithMetadata = formatStandardResponse(results, {
+        executionTime,
+        sources: ['calendar', 'email'].filter((s) => {
+          if (s === 'calendar') return results.todayEvents;
+          if (s === 'email') return results.recentEmails;
+          return false;
+        }),
+        cacheHit: false,
+        ...(errors.length > 0 && { errors }),
+        suggestions: [
+          '💡 Use "calendar" tool with action "view" for detailed calendar view',
+          '💡 Use "email" tool with action "list" to see more emails',
+          '💡 Use "assistant" tool with action "my-week" for week overview',
+        ],
+      });
+
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     case 'my-week': {
+      const startTime = Date.now();
       thinking.push('Getting week summary');
       const today = new Date();
       const weekEnd = new Date(today);
       weekEnd.setDate(weekEnd.getDate() + 7);
 
-      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
-        startDateTime: today.toISOString(),
-        endDateTime: weekEnd.toISOString(),
+      // Batch API calls with deduplication
+      const batchResults = await batchAPICalls([
+        {
+          key: `calendarView_${today.toISOString()}_${weekEnd.toISOString()}`,
+          description: 'Week calendar events',
+          operation: async () => {
+            const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
+              startDateTime: today.toISOString(),
+              endDateTime: weekEnd.toISOString(),
+            });
+            return JSON.parse(result);
+          },
+        },
+        {
+          key: 'todo_lists',
+          description: 'To-Do lists',
+          operation: async () => {
+            const result = await callGraph(graphClient, 'GET', '/me/todo/lists');
+            return JSON.parse(result);
+          },
+        },
+      ]);
+
+      // Process batch results
+      const errors: ErrorInfo[] = [];
+      for (const batchResult of batchResults) {
+        if (batchResult.error) {
+          errors.push({
+            message: `${batchResult.description || batchResult.key} failed: ${batchResult.error.message}`,
+            retryable: true,
+            details: batchResult.error,
+          });
+        } else if (batchResult.description === 'Week calendar events') {
+          results.weekEvents = batchResult.result;
+        } else if (batchResult.description === 'To-Do lists') {
+          results.tasks = batchResult.result;
+        }
+      }
+
+      const executionTime = Date.now() - startTime;
+
+      // Format response with metadata
+      const responseWithMetadata = formatStandardResponse(results, {
+        executionTime,
+        sources: ['calendar', 'tasks'].filter((s) => {
+          if (s === 'calendar') return results.weekEvents;
+          if (s === 'tasks') return results.tasks;
+          return false;
+        }),
+        cacheHit: false,
+        ...(errors.length > 0 && { errors }),
+        suggestions: [
+          '💡 Use "calendar" tool with action "view" for detailed calendar view',
+          '💡 Use "tasks" tool with action "todo-lists" to see task lists',
+          '💡 Use "assistant" tool with action "my-day" for today\'s summary',
+        ],
       });
-      results.weekEvents = JSON.parse(eventsResult);
 
-      const tasksResult = await callGraph(graphClient, 'GET', '/me/todo/lists');
-      results.tasks = JSON.parse(tasksResult);
-
-      return addThinkingToResponse(JSON.stringify(results, null, 2), thinking);
+      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
     }
 
     case 'person-info': {
