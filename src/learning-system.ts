@@ -295,12 +295,21 @@ export class LearningSystem {
       return pattern.entityTypes;
     }
 
-    // Default entity types based on context
+    // Default entity types based on context - comprehensive set
     if (context === 'project') {
-      return ['driveItem', 'site', 'chatMessage', 'event', 'message'];
+      return [
+        'driveItem',
+        'site',
+        'listItem',
+        'chatMessage',
+        'event',
+        'message',
+        'acronym',
+        'bookmark',
+      ];
     }
     if (context === 'person') {
-      return ['person', 'message', 'event', 'driveItem'];
+      return ['person', 'message', 'event', 'driveItem', 'chatMessage'];
     }
     if (context === 'document') {
       return ['driveItem', 'message'];
@@ -309,8 +318,19 @@ export class LearningSystem {
       return ['event', 'message', 'driveItem'];
     }
 
-    // Default: search all
-    return ['driveItem', 'message', 'event', 'site', 'chatMessage', 'person'];
+    // Default: comprehensive search across all available entity types
+    return [
+      'driveItem',
+      'message',
+      'event',
+      'site',
+      'list',
+      'listItem',
+      'chatMessage',
+      'person',
+      'acronym',
+      'bookmark',
+    ];
   }
 
   /**

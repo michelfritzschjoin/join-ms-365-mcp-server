@@ -29,6 +29,11 @@ import {
 import { TokenController } from '../core/token-controller.js';
 import { CacheManager } from '../core/cache-manager.js';
 import type { SupportedLanguage } from '../i18n/index.js';
+import type { SourceInfo, DocumentLink } from '../i18n/response-templates.js';
+import DownloadLinkGenerator from '../../download-link-generator.js';
+import { getRequestTokens } from '../../request-context.js';
+import DataAggregator from '../../data-aggregator.js';
+import logger from '../../logger.js';
 
 /**
  * UQAS analysis result
@@ -79,6 +84,8 @@ export class UQASIntegration {
   private searchExpander: CrossLanguageSearchExpander;
   private tokenController: TokenController;
   private cache: CacheManager<UQASAnalysis>;
+  private dataAggregator: DataAggregator;
+  private downloadLinkGenerator: DownloadLinkGenerator | null = null;
 
   private constructor() {
     this.languageDetector = new LanguageDetector();
@@ -88,6 +95,14 @@ export class UQASIntegration {
     this.searchExpander = new CrossLanguageSearchExpander(this.thesaurus);
     this.tokenController = new TokenController({ maxTokens: 1500 });
     this.cache = new CacheManager<UQASAnalysis>({ defaultTTL: 300 });
+    this.dataAggregator = new DataAggregator();
+  }
+
+  /**
+   * Set DownloadLinkGenerator (called from super-tools integration)
+   */
+  setDownloadLinkGenerator(generator: DownloadLinkGenerator | null): void {
+    this.downloadLinkGenerator = generator;
   }
 
   /**
@@ -207,17 +222,22 @@ export class UQASIntegration {
   /**
    * Create response data from search results
    */
-  createResponseData(
+  async createResponseData(
     results: unknown[],
     analysis: UQASAnalysis,
     sourceCount: number = 1
-  ): ResponseData {
+  ): Promise<ResponseData> {
     const facts = this.extractFacts(results, analysis.language);
     const timeline = this.extractTimeline(results);
     const confidence = this.calculateConfidence(results, analysis);
 
     // Generate summary
     const summary = this.generateSummary(results, analysis);
+
+    // Extract sources and document links
+    const sources = await this.extractSources(results);
+    const documentLinks = await this.extractDocumentLinks(results);
+    const importantDocuments = await this.identifyImportantDocuments(results);
 
     return {
       summary,
@@ -227,7 +247,223 @@ export class UQASIntegration {
       facts,
       timeline,
       recommendations: this.generateRecommendations(analysis),
+      sources,
+      documentLinks,
+      importantDocuments,
     };
+  }
+
+  /**
+   * Extract sources from results
+   */
+  private async extractSources(results: unknown[]): Promise<SourceInfo[]> {
+    const sources: SourceInfo[] = [];
+    const seen = new Set<string>();
+
+    for (const item of results) {
+      if (typeof item !== 'object' || item === null) continue;
+      const obj = item as Record<string, unknown>;
+
+      const entityType = (obj['@odata.type'] as string) || 'unknown';
+      const name =
+        (obj.name as string) ||
+        (obj.subject as string) ||
+        (obj.title as string) ||
+        (obj.displayName as string) ||
+        'Unknown';
+      const webUrl = (obj.webUrl as string) || (obj.webLink as string) || undefined;
+      const rank = (obj.rank as number) || 0.5;
+
+      // Create unique key
+      const key = webUrl || `${entityType}:${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      sources.push({
+        type: entityType,
+        name,
+        webUrl,
+        relevance: rank,
+      });
+    }
+
+    // Sort by relevance
+    sources.sort((a, b) => b.relevance - a.relevance);
+
+    return sources;
+  }
+
+  /**
+   * Extract document links from results
+   */
+  private async extractDocumentLinks(results: unknown[]): Promise<DocumentLink[]> {
+    const links: DocumentLink[] = [];
+    const driveItems: unknown[] = [];
+
+    // Collect all driveItems
+    for (const item of results) {
+      if (typeof item === 'object' && item !== null) {
+        const obj = item as Record<string, unknown>;
+        const entityType = obj['@odata.type'] as string | undefined;
+        const isFile =
+          entityType?.includes('driveItem') ||
+          entityType?.includes('listItem') ||
+          obj['file'] !== undefined ||
+          obj['webUrl']?.toString().includes('/sites/') ||
+          obj['webUrl']?.toString().includes('/drives/');
+
+        if (isFile) {
+          driveItems.push(item);
+        }
+      }
+    }
+
+    // Generate download links if generator available
+    if (this.downloadLinkGenerator && driveItems.length > 0) {
+      try {
+        const requestTokens = getRequestTokens();
+        const accessToken = requestTokens?.accessToken;
+
+        const enrichedResults = await this.downloadLinkGenerator.addDownloadLinksToResults(
+          driveItems,
+          accessToken
+        );
+
+        for (const item of enrichedResults) {
+          if (typeof item === 'object' && item !== null) {
+            const obj = item as Record<string, unknown>;
+            const downloadLink = obj.downloadLink as
+              | { fileName: string; downloadUrl: string; webUrl?: string }
+              | undefined;
+
+            if (downloadLink) {
+              links.push({
+                fileName: downloadLink.fileName,
+                webUrl: downloadLink.webUrl || (obj.webUrl as string) || '',
+                downloadUrl: downloadLink.downloadUrl,
+                type: (obj['@odata.type'] as string) || 'driveItem',
+              });
+            } else if (obj.webUrl) {
+              const name = (obj.name as string) || (obj.title as string) || 'Unknown';
+              links.push({
+                fileName: name,
+                webUrl: obj.webUrl as string,
+                type: (obj['@odata.type'] as string) || 'unknown',
+              });
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn(`Failed to generate document links: ${error}`);
+      }
+    } else {
+      // Fallback: extract webUrls without download links
+      for (const item of driveItems) {
+        if (typeof item === 'object' && item !== null) {
+          const obj = item as Record<string, unknown>;
+          if (obj.webUrl) {
+            const name = (obj.name as string) || (obj.title as string) || 'Unknown';
+            links.push({
+              fileName: name,
+              webUrl: obj.webUrl as string,
+              type: (obj['@odata.type'] as string) || 'unknown',
+            });
+          }
+        }
+      }
+    }
+
+    return links;
+  }
+
+  /**
+   * Identify important documents based on relevance
+   */
+  private async identifyImportantDocuments(results: unknown[]): Promise<SourceInfo[]> {
+    // Convert results to AggregatedItem format for DataAggregator
+    const aggregatedItems = results.map((item) => {
+      if (typeof item === 'object' && item !== null) {
+        const obj = item as Record<string, unknown>;
+        const id = (obj.id as string) || String(Math.random());
+        const relevanceScore = (obj.rank as number) || 0.5;
+        const source = (obj['@odata.type'] as string) || 'unknown';
+        const timestamp = this.extractTimestamp(obj);
+
+        return {
+          id,
+          data: item,
+          relevanceScore,
+          source,
+          timestamp,
+        };
+      }
+      return {
+        id: String(Math.random()),
+        data: item,
+        relevanceScore: 0.5,
+        source: 'unknown',
+      };
+    });
+
+    // Use DataAggregator to identify important documents
+    const important = this.dataAggregator.identifyImportantDocuments(aggregatedItems, 0.7, 10);
+
+    // Convert back to SourceInfo format
+    const sources: SourceInfo[] = [];
+    for (const item of important) {
+      if (typeof item.data === 'object' && item.data !== null) {
+        const obj = item.data as Record<string, unknown>;
+        const name =
+          (obj.name as string) ||
+          (obj.subject as string) ||
+          (obj.title as string) ||
+          (obj.displayName as string) ||
+          'Unknown';
+        const webUrl = (obj.webUrl as string) || (obj.webLink as string) || undefined;
+
+        sources.push({
+          type: item.source,
+          name,
+          webUrl,
+          relevance: item.relevanceScore,
+        });
+      }
+    }
+
+    return sources;
+  }
+
+  /**
+   * Extract timestamp from object
+   */
+  private extractTimestamp(obj: Record<string, unknown>): Date | undefined {
+    const timeFields = [
+      'createdDateTime',
+      'lastModifiedDateTime',
+      'start',
+      'end',
+      'sentDateTime',
+      'receivedDateTime',
+    ];
+
+    for (const field of timeFields) {
+      if (typeof obj[field] === 'string') {
+        const date = new Date(obj[field] as string);
+        if (!isNaN(date.getTime())) {
+          return date;
+        }
+      } else if (typeof obj[field] === 'object' && obj[field] !== null) {
+        const dateObj = obj[field] as Record<string, unknown>;
+        if (typeof dateObj.dateTime === 'string') {
+          const date = new Date(dateObj.dateTime);
+          if (!isNaN(date.getTime())) {
+            return date;
+          }
+        }
+      }
+    }
+
+    return undefined;
   }
 
   /**

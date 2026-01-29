@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **search:** validate entity types to prevent invalid combinations ([cb352c8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/cb352c85bdfca10150098955b7452c650a74543d))
+- **search:** validate entity types to prevent invalid combinations ([cb352c8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/cb352c85bdfca10150098955b7452c650a74543d))
 
 ## [1.14.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.13.0...v1.14.0) (2026-01-28)
 

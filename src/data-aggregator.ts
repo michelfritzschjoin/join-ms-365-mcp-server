@@ -308,6 +308,38 @@ export class DataAggregator {
   }
 
   /**
+   * Identify important documents based on relevance score
+   * Returns top N documents sorted by relevance
+   */
+  identifyImportantDocuments(
+    items: AggregatedItem[],
+    threshold: number = 0.7,
+    maxItems: number = 10
+  ): AggregatedItem[] {
+    // Filter items that are documents (files, driveItems, listItems)
+    const documentItems = items.filter((item) => {
+      if (typeof item.data === 'object' && item.data !== null) {
+        const obj = item.data as Record<string, unknown>;
+        const entityType = obj['@odata.type'] as string | undefined;
+        return (
+          entityType?.includes('driveItem') ||
+          entityType?.includes('listItem') ||
+          obj['file'] !== undefined ||
+          obj['webUrl']?.toString().includes('/sites/') ||
+          obj['webUrl']?.toString().includes('/drives/')
+        );
+      }
+      return false;
+    });
+
+    // Sort by relevance score (descending)
+    documentItems.sort((a, b) => b.relevanceScore - a.relevanceScore);
+
+    // Filter by threshold and limit to maxItems
+    return documentItems.filter((item) => item.relevanceScore >= threshold).slice(0, maxItems);
+  }
+
+  /**
    * Remove duplicates based on similarity
    */
   deduplicateBySimilarity(items: AggregatedItem[], similarityThreshold = 0.8): AggregatedItem[] {

@@ -8,6 +8,27 @@
 import type { SupportedLanguage } from './index.js';
 
 /**
+ * Source information
+ */
+export interface SourceInfo {
+  type: string;
+  name: string;
+  webUrl?: string;
+  downloadUrl?: string;
+  relevance: number;
+}
+
+/**
+ * Document link information
+ */
+export interface DocumentLink {
+  fileName: string;
+  webUrl: string;
+  downloadUrl?: string;
+  type: string;
+}
+
+/**
  * Response data structure
  */
 export interface ResponseData {
@@ -20,6 +41,9 @@ export interface ResponseData {
   recommendations?: string[];
   entities?: Map<string, unknown>;
   tokenBudget?: number;
+  sources?: SourceInfo[];
+  documentLinks?: DocumentLink[];
+  importantDocuments?: SourceInfo[];
 }
 
 /**
@@ -75,6 +99,10 @@ export interface ResponseTemplates {
     file: string;
     task: string;
   };
+  // Source and document sections
+  important_documents: string;
+  document_links: string;
+  all_sources: string;
 }
 
 /**
@@ -118,6 +146,9 @@ export const RESPONSE_TEMPLATES: Record<SupportedLanguage, ResponseTemplates> = 
       file: 'Datei',
       task: 'Aufgabe',
     },
+    important_documents: '### 📄 Wichtige Dokumente',
+    document_links: '### 🔗 Dokumenten-Links',
+    all_sources: '### 📚 Alle Quellen',
   },
   en: {
     answer_prefix: '## 📋 Answer\n\n',
@@ -156,6 +187,9 @@ export const RESPONSE_TEMPLATES: Record<SupportedLanguage, ResponseTemplates> = 
       file: 'File',
       task: 'Task',
     },
+    important_documents: '### 📄 Important Documents',
+    document_links: '### 🔗 Document Links',
+    all_sources: '### 📚 All Sources',
   },
 };
 
@@ -241,6 +275,52 @@ export class BilingualResponseBuilder {
     if (data.timeline && data.timeline.length > 0) {
       parts.push(this.templates.timeline);
       parts.push(this.formatTimeline(data.timeline));
+      parts.push('');
+    }
+
+    // Important documents
+    if (data.importantDocuments && data.importantDocuments.length > 0) {
+      parts.push(this.templates.important_documents);
+      for (const doc of data.importantDocuments.slice(0, 10)) {
+        const link = doc.webUrl ? `[${doc.name}](${doc.webUrl})` : doc.name;
+        const download = doc.downloadUrl ? ` [📥 Download](${doc.downloadUrl})` : '';
+        parts.push(`• ${link}${download} (${doc.type})`);
+      }
+      parts.push('');
+    }
+
+    // Document links
+    if (data.documentLinks && data.documentLinks.length > 0) {
+      parts.push(this.templates.document_links);
+      for (const link of data.documentLinks.slice(0, 20)) {
+        const download = link.downloadUrl ? ` [📥 Download](${link.downloadUrl})` : '';
+        parts.push(`• [${link.fileName}](${link.webUrl})${download}`);
+      }
+      if (data.documentLinks.length > 20) {
+        const remaining = this.lang === 'de' ? 'weitere Links' : 'more links';
+        parts.push(
+          `  ... ${this.lang === 'de' ? 'und' : 'and'} ${data.documentLinks.length - 20} ${remaining}`
+        );
+      }
+      parts.push('');
+    }
+
+    // All sources
+    if (data.sources && data.sources.length > 0) {
+      parts.push(this.templates.all_sources);
+      for (const source of data.sources.slice(0, 15)) {
+        if (source.webUrl) {
+          parts.push(`• [${source.name}](${source.webUrl}) (${source.type})`);
+        } else {
+          parts.push(`• ${source.name} (${source.type})`);
+        }
+      }
+      if (data.sources.length > 15) {
+        const remaining = this.lang === 'de' ? 'weitere Quellen' : 'more sources';
+        parts.push(
+          `  ... ${this.lang === 'de' ? 'und' : 'and'} ${data.sources.length - 15} ${remaining}`
+        );
+      }
       parts.push('');
     }
 

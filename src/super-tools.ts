@@ -36,6 +36,9 @@ import {
 } from './errors.js';
 // UQAS Pro - Bilingual Support (DE/EN)
 import { getUQAS } from './uqas/integration/index.js';
+import DownloadLinkGenerator from './download-link-generator.js';
+import type { AppSecrets } from './secrets.js';
+import { getRequestTokens } from './request-context.js';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
@@ -2538,7 +2541,44 @@ const searchEntityTypes = [
   'listItem',
   'chatMessage',
   'person',
+  'acronym',
+  'bookmark',
+  'qna',
+  'externalItem',
 ] as const;
+
+/**
+ * Get available entity types based on token permissions
+ * Uses comprehensive default set and filters based on API responses
+ */
+async function getAvailableEntityTypes(
+  graphClient: GraphClient,
+  defaultTypes: string[]
+): Promise<string[]> {
+  // Start with comprehensive set including all possible entity types
+  const allPossibleTypes = [
+    'message',
+    'event',
+    'driveItem',
+    'site',
+    'list',
+    'listItem',
+    'chatMessage',
+    'person',
+    'acronym',
+    'bookmark',
+    'qna',
+    'externalItem',
+  ];
+
+  // Use default types if provided, otherwise use all possible
+  const typesToTry = defaultTypes.length > 0 ? defaultTypes : allPossibleTypes;
+
+  // For now, return the types to try
+  // In future, we could test each type with a minimal search query
+  // and filter out those that return permission errors
+  return typesToTry;
+}
 
 const searchSchema = z.object({
   query: z.string().describe('The search query - natural language or keywords'),
@@ -2793,9 +2833,30 @@ async function handleSearch(
 
   if (!entityTypes || entityTypes.length === 0) {
     // Default: include all common types including chatMessage
-    entityTypes = ['message', 'event', 'driveItem', 'site', 'chatMessage'];
+    // Use comprehensive set for token-based search
+    const defaultComprehensiveTypes = [
+      'message',
+      'event',
+      'driveItem',
+      'site',
+      'list',
+      'listItem',
+      'chatMessage',
+      'acronym',
+      'bookmark',
+    ];
 
-    // Use NLP service hint
+    // Get available entity types based on token
+    try {
+      entityTypes = await getAvailableEntityTypes(graphClient, defaultComprehensiveTypes);
+      thinking.push(`🔍 Using comprehensive entity types: ${entityTypes.join(', ')}`);
+    } catch (error) {
+      // Fallback to standard set
+      entityTypes = ['message', 'event', 'driveItem', 'site', 'chatMessage'];
+      thinking.push('⚠️ Could not determine available entity types, using standard set');
+    }
+
+    // Use NLP service hint to narrow down
     if (nlpService === 'mail') {
       entityTypes = ['message'];
       thinking.push('💡 NLP detected mail query - searching messages');
@@ -3104,6 +3165,141 @@ async function handleSearch(
       thinking.push('💡 Suggested next tools: ' + [...new Set(toolSuggestions)].join(', '));
     }
 
+    // Extract all driveItems for download link generation
+    const driveItems: unknown[] = [];
+    const driveItemTypes = [
+      '#microsoft.graph.driveItem',
+      'driveItem',
+      '#microsoft.graph.listItem',
+      'listItem',
+    ];
+
+    for (const entityType of Object.keys(formattedResults)) {
+      if (driveItemTypes.some((type) => entityType.includes(type))) {
+        driveItems.push(...formattedResults[entityType]);
+      }
+    }
+
+    // Generate download links for files
+    const documentLinks: Array<{
+      fileName: string;
+      webUrl: string;
+      downloadUrl?: string;
+      type: string;
+    }> = [];
+    const importantDocuments: Array<{
+      name: string;
+      type: string;
+      webUrl: string;
+      downloadUrl?: string;
+      relevance: number;
+    }> = [];
+
+    if (downloadLinkGenerator && driveItems.length > 0) {
+      thinking.push(`🔗 Generating download links for ${driveItems.length} files...`);
+      try {
+        const requestTokens = getRequestTokens();
+        const accessToken = requestTokens?.accessToken;
+
+        const enrichedResults = await downloadLinkGenerator.addDownloadLinksToResults(
+          driveItems,
+          accessToken
+        );
+
+        // Extract links and webUrls
+        for (const item of enrichedResults) {
+          if (typeof item === 'object' && item !== null) {
+            const obj = item as Record<string, unknown>;
+            const downloadLink = obj.downloadLink as
+              | { fileName: string; downloadUrl: string; webUrl?: string }
+              | undefined;
+
+            if (downloadLink) {
+              documentLinks.push({
+                fileName: downloadLink.fileName,
+                webUrl: downloadLink.webUrl || (obj.webUrl as string) || '',
+                downloadUrl: downloadLink.downloadUrl,
+                type: (obj['@odata.type'] as string) || 'driveItem',
+              });
+            } else if (obj.webUrl) {
+              // Include items with webUrl even if no download link
+              const name = (obj.name as string) || (obj.title as string) || 'Unknown';
+              documentLinks.push({
+                fileName: name,
+                webUrl: obj.webUrl as string,
+                type: (obj['@odata.type'] as string) || 'unknown',
+              });
+            }
+          }
+        }
+
+        thinking.push(`✅ Generated ${documentLinks.length} document links`);
+      } catch (error) {
+        logger.warn(`Failed to generate download links: ${error}`);
+        thinking.push(
+          `⚠️ Could not generate download links: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+
+    // Extract webUrls from all results for sources
+    const allSources = new Set<string>();
+    const sourcesWithUrls: Array<{
+      type: string;
+      name: string;
+      webUrl?: string;
+      downloadUrl?: string;
+      relevance: number;
+    }> = [];
+
+    for (const [entityType, items] of Object.entries(formattedResults)) {
+      for (const item of items) {
+        if (typeof item === 'object' && item !== null) {
+          const obj = item as Record<string, unknown>;
+          const webUrl = obj.webUrl as string | undefined;
+          const webLink = obj.webLink as string | undefined;
+          const name =
+            (obj.name as string) ||
+            (obj.subject as string) ||
+            (obj.title as string) ||
+            (obj.displayName as string) ||
+            'Unknown';
+
+          if (webUrl || webLink) {
+            const url = webUrl || webLink || '';
+            allSources.add(url);
+
+            // Find corresponding download link if available
+            const downloadLink = documentLinks.find((link) => link.webUrl === url);
+
+            sourcesWithUrls.push({
+              type: entityType,
+              name,
+              webUrl: url,
+              downloadUrl: downloadLink?.downloadUrl,
+              relevance: (obj.rank as number) || 0.5,
+            });
+          } else {
+            // Still add as source even without URL
+            allSources.add(`${entityType}:${name}`);
+            sourcesWithUrls.push({
+              type: entityType,
+              name,
+              relevance: (obj.rank as number) || 0.5,
+            });
+          }
+        }
+      }
+    }
+
+    // Identify important documents (top 10 by relevance)
+    const sortedSources = sourcesWithUrls
+      .filter((s) => s.webUrl && (s.type.includes('driveItem') || s.type.includes('listItem')))
+      .sort((a, b) => b.relevance - a.relevance)
+      .slice(0, 10);
+
+    importantDocuments.push(...sortedSources);
+
     const output: Record<string, unknown> = {
       query: input.query,
       language: {
@@ -3122,6 +3318,12 @@ async function handleSearch(
       entityTypes: Object.keys(formattedResults),
       results: formattedResults,
       suggestions: [...new Set(toolSuggestions)],
+      sources: {
+        importantDocuments,
+        allSources: Array.from(allSources),
+        totalSources: allSources.size,
+      },
+      documentLinks: documentLinks.slice(0, 50), // Limit to top 50
     };
 
     // Add full chat messages if fetched
@@ -4481,12 +4683,23 @@ function generateCompanyRecommendations(
 // ============================================================================
 // REGISTRATION FUNCTION
 // ============================================================================
+// Global DownloadLinkGenerator instance (initialized when secrets available)
+let downloadLinkGenerator: DownloadLinkGenerator | null = null;
+
 export function registerSuperTools(
   server: McpServer,
   graphClient: GraphClient,
-  readOnly: boolean = false
+  readOnly: boolean = false,
+  secrets?: AppSecrets
 ): void {
   logger.info(`Registering Super-Tools (consolidated interface, readOnly=${readOnly})`);
+
+  // Initialize DownloadLinkGenerator if secrets provided
+  if (secrets) {
+    downloadLinkGenerator = new DownloadLinkGenerator(graphClient, secrets);
+    // Also set in UQAS integration
+    uqas.setDownloadLinkGenerator(downloadLinkGenerator);
+  }
 
   // 0. SEARCH (Microsoft 365 Unified Search - RECOMMENDED FIRST TOOL)
   server.tool(

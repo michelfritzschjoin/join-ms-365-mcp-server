@@ -107,9 +107,25 @@ export class SearchFirstStrategy {
   async executeSearchQuery(query: string, context?: SearchContext): Promise<SearchResult> {
     try {
       // Get recommended entity types from learning system
-      const recommendedEntityTypes =
+      let recommendedEntityTypes =
         context?.entityTypes ||
         this.learningSystem.getRecommendedEntityTypes(query, context?.sources?.join(','));
+
+      // If no specific types recommended, use comprehensive default set
+      if (!recommendedEntityTypes || recommendedEntityTypes.length === 0) {
+        recommendedEntityTypes = [
+          'message',
+          'event',
+          'driveItem',
+          'site',
+          'list',
+          'listItem',
+          'chatMessage',
+          'acronym',
+          'bookmark',
+        ];
+        logger.debug('Using comprehensive default entity types for search');
+      }
 
       // Build search request body
       const now = new Date();
