@@ -34,12 +34,17 @@ import {
   isRetryableError,
   getRetryAfter,
 } from './errors.js';
+// UQAS Pro - Bilingual Support (DE/EN)
+import { getUQAS } from './uqas/integration/index.js';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
 
 // Initialize Data Aggregator for consistent data processing
 const dataAggregator = new DataAggregator();
+
+// Initialize UQAS for bilingual support
+const uqas = getUQAS();
 
 /**
  * Format search query for Microsoft Graph API endpoints that require property:value format
@@ -2626,6 +2631,17 @@ async function handleSearch(
   thinking.push(`🔍 Microsoft 365 Search: "${input.query}"`);
 
   // =========================================================================
+  // UQAS BILINGUAL ANALYSIS - Detect language and expand queries (DE/EN)
+  // =========================================================================
+  const uqasAnalysis = uqas.analyze(input.query);
+  const uqasThinking = uqas.createThinkingSteps(uqasAnalysis);
+  thinking.push(...uqasThinking);
+
+  // Use cross-language search variants for better coverage
+  const searchVariants = uqasAnalysis.searchQueries;
+  const detectedLang = uqasAnalysis.language;
+
+  // =========================================================================
   // NLP ANALYSIS - Use NLP to understand query intent
   // =========================================================================
   const decomposed = nlpEnhancer.decomposeQuery(input.query);
@@ -2703,6 +2719,10 @@ async function handleSearch(
 
       const output = {
         query: input.query,
+        language: {
+          detected: detectedLang,
+          confidence: Math.round(uqasAnalysis.languageConfidence * 100),
+        },
         nlpAnalysis: {
           intent: nlpIntent,
           service: nlpService,
@@ -2794,23 +2814,38 @@ async function handleSearch(
 
   // Validate entity types - Microsoft Graph API has restrictions on combinations
   // Rule: 'person' cannot be combined with other entity types
-  if (entityTypes.includes('person') && entityTypes.length > 1) {
-    thinking.push('⚠️ Person entity type cannot be combined with others - using only person');
-    entityTypes = ['person'];
+  // However, we should be smart: if the query doesn't look like a person name,
+  // remove 'person' instead of removing all other types
+  const hasPerson = entityTypes.includes('person');
+  const hasMultipleTypes = entityTypes.length > 1;
+
+  if (hasPerson && hasMultipleTypes) {
+    // Check if query looks like a person name (capitalized words, not all caps, not a single word that's all caps)
+    const queryWords = input.query.trim().split(/\s+/);
+    const looksLikePersonName =
+      queryWords.length >= 2 &&
+      queryWords.every((word) => /^[A-ZÄÖÜ][a-zäöüß]+$/.test(word)) &&
+      !/^[A-Z]{2,}$/.test(input.query.trim()); // Not all caps (like "DZBANK")
+
+    if (looksLikePersonName) {
+      // Query looks like a person name - use only person
+      thinking.push(
+        '⚠️ Person entity type cannot be combined with others - query looks like a person name, using only person'
+      );
+      entityTypes = ['person'];
+    } else {
+      // Query doesn't look like a person name - remove person, keep others
+      thinking.push(
+        '⚠️ Person entity type cannot be combined with others - query does not look like a person name, removing person type'
+      );
+      entityTypes = entityTypes.filter((type) => type !== 'person');
+    }
   }
 
   // Rule: Ensure at least one valid entity type
   if (entityTypes.length === 0) {
     entityTypes = ['message', 'event', 'driveItem', 'site'];
     thinking.push('⚠️ No valid entity types - using default set');
-  }
-
-  // Additional validation: Remove any invalid combinations
-  // According to Microsoft Graph API, certain combinations are not allowed
-  // If person is present, remove all others
-  const hasPerson = entityTypes.includes('person');
-  if (hasPerson) {
-    entityTypes = ['person'];
   }
 
   thinking.push(`Searching in: ${entityTypes.join(', ')}`);
@@ -2825,6 +2860,17 @@ async function handleSearch(
     thinking.push(
       `💡 Simplified query to person name: "${searchQuery}" for better Teams search results`
     );
+  } else if (searchVariants.crossLangVariants.length > 0) {
+    // Use cross-language combined query for bilingual search (DE/EN)
+    // Only add variants if query isn't already simplified to a person name
+    const crossLangKeyword = searchVariants.crossLangVariants[0];
+    if (crossLangKeyword && !searchQuery.toLowerCase().includes(crossLangKeyword.toLowerCase())) {
+      // Add the first cross-language variant as OR clause for better coverage
+      searchQuery = `${searchQuery} OR ${crossLangKeyword}`;
+      thinking.push(
+        `🌐 Added cross-language variant: "${crossLangKeyword}" (${detectedLang === 'de' ? 'EN' : 'DE'})`
+      );
+    }
   }
 
   // Format KQL query to ensure proper syntax (handles property filters with spaces, OR/AND operators)
@@ -3060,6 +3106,11 @@ async function handleSearch(
 
     const output: Record<string, unknown> = {
       query: input.query,
+      language: {
+        detected: detectedLang,
+        confidence: Math.round(uqasAnalysis.languageConfidence * 100),
+        crossLangSearch: searchVariants.crossLangVariants.length > 0,
+      },
       nlpAnalysis: {
         intent: nlpIntent,
         service: nlpService || 'general',
