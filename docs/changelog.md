@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.5](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.4...v1.17.5) (2026-01-30)
+
+### Bug Fixes
+
+* **generate:** add retry logic for openapi download ([68b3818](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/68b38188ef47b1bcdc5711792ee2b1d447c95606))
+
 ## [1.17.4](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.3...v1.17.4) (2026-01-30)
 
 ### Bug Fixes
