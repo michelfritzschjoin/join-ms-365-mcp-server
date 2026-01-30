@@ -11,13 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* handle non-string values in formatsearchquery and normalizequery result ([d8496fc](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d8496fca50c74911f0695b28d9b2618323470dd8))
+- handle non-string values in formatsearchquery and normalizequery result ([d8496fc](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d8496fca50c74911f0695b28d9b2618323470dd8))
 
 ## [1.17.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.16.0...v1.17.0) (2026-01-30)
 
 ### Features
 
-* enhance discover-company with sharepoint list items and document content extraction ([7abe6f0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/7abe6f006c2a09731991eb1624cc0f890f402cfe))
+- enhance discover-company with sharepoint list items and document content extraction ([7abe6f0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/7abe6f006c2a09731991eb1624cc0f890f402cfe))
 
 ## [1.16.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.15.0...v1.16.0) (2026-01-29)
 

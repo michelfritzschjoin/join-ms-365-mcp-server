@@ -34,12 +34,15 @@ import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
 import { requestContext, createTokenHash } from './request-context.js';
+import type { RequestContext } from './request-context.js';
 import { randomUUID } from 'crypto';
 import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
 import { getQueryStore } from './query-store.js';
 import { z } from 'zod';
 import { isThinkingEnabled, getThinkingLevel } from './thinking-process.js';
 import { createRequire } from 'module';
+import { getUserProfileService, type UserProfile } from './user-profile.js';
+import { getChatMemoryStore } from './chat-memory.js';
 
 /**
  * Extract chat ID from request headers
@@ -99,6 +102,111 @@ function extractUserId(
   }
 
   return undefined;
+}
+
+/**
+ * Load user profile from Microsoft Graph or cache
+ * Includes profession detection and manual override from chat memory
+ *
+ * @param accessToken - Microsoft Graph access token
+ * @param userId - User ID from token
+ * @param chatId - Chat ID for loading preferences
+ * @param secrets - App secrets for Graph API
+ * @returns UserProfile or undefined if loading fails
+ */
+async function loadUserProfile(
+  accessToken: string,
+  userId: string,
+  chatId?: string,
+  secrets?: AppSecrets
+): Promise<UserProfile | undefined> {
+  const profileService = getUserProfileService();
+
+  // Check cache first
+  const cachedProfile = profileService.getCachedProfile(userId);
+  if (cachedProfile) {
+    // Check for profession override from chat memory
+    if (chatId) {
+      try {
+        const memoryStore = getChatMemoryStore();
+        const memory = memoryStore.getMemory(chatId, userId);
+        const override = memory.preferences.professionOverride;
+
+        if (override && override !== cachedProfile.professionProfile.id) {
+          // Update profession override
+          const updatedProfile = profileService.updateProfessionOverride(userId, override);
+          if (updatedProfile) {
+            logger.debug('Applied profession override from chat memory', {
+              userId: userId.substring(0, 8),
+              override,
+            });
+            return updatedProfile;
+          }
+        }
+      } catch {
+        // Chat memory access failed, continue with cached profile
+      }
+    }
+    return cachedProfile;
+  }
+
+  // Load from Microsoft Graph
+  if (!accessToken || !secrets) {
+    logger.debug('Cannot load user profile - missing accessToken or secrets');
+    return undefined;
+  }
+
+  try {
+    const cloudEndpoints = getCloudEndpoints(secrets.cloudType);
+    const response = await fetch(
+      `${cloudEndpoints.graphApi}/v1.0/me?$select=id,displayName,jobTitle,department,mail,userPrincipalName`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      logger.warn('Failed to load user profile from Graph API', {
+        status: response.status,
+        userId: userId.substring(0, 8),
+      });
+      return undefined;
+    }
+
+    const graphData = await response.json();
+
+    // Check for profession override from chat memory
+    let professionOverride: string | undefined;
+    if (chatId) {
+      try {
+        const memoryStore = getChatMemoryStore();
+        const memory = memoryStore.getMemory(chatId, userId);
+        professionOverride = memory.preferences.professionOverride;
+      } catch {
+        // Chat memory access failed, continue without override
+      }
+    }
+
+    const profile = profileService.createProfileFromGraphData(graphData, professionOverride);
+
+    logger.info('Loaded user profile from Microsoft Graph', {
+      userId: userId.substring(0, 8),
+      jobTitle: graphData.jobTitle,
+      department: graphData.department,
+      professionId: profile.professionProfile.id,
+      isOverride: profile.isManualOverride,
+    });
+
+    return profile;
+  } catch (error) {
+    logger.error('Error loading user profile from Graph API', {
+      error: (error as Error).message,
+      userId: userId.substring(0, 8),
+    });
+    return undefined;
+  }
 }
 
 /**
@@ -2166,16 +2274,27 @@ class MicrosoftGraphServer {
             if (req.microsoftAuth) {
               // SECURITY: Include token hash for secure logging/correlation
               const tokenHash = createTokenHash(req.microsoftAuth.accessToken);
-              await requestContext.run(
-                {
-                  accessToken: req.microsoftAuth.accessToken,
-                  refreshToken: req.microsoftAuth.refreshToken,
-                  chatId,
+
+              // Load user profile for profession-based personalization
+              let userProfile: UserProfile | undefined;
+              if (userId) {
+                userProfile = await loadUserProfile(
+                  req.microsoftAuth.accessToken,
                   userId,
-                  tokenHash,
-                },
-                handler
-              );
+                  chatId,
+                  this.secrets || undefined
+                );
+              }
+
+              const context: RequestContext = {
+                accessToken: req.microsoftAuth.accessToken,
+                refreshToken: req.microsoftAuth.refreshToken,
+                chatId,
+                userId,
+                tokenHash,
+                userProfile,
+              };
+              await requestContext.run(context, handler);
             } else {
               // Even without auth, provide chat context
               await requestContext.run(
@@ -2415,16 +2534,27 @@ class MicrosoftGraphServer {
             if (req.microsoftAuth) {
               // SECURITY: Include token hash for secure logging/correlation
               const tokenHash = createTokenHash(req.microsoftAuth.accessToken);
-              await requestContext.run(
-                {
-                  accessToken: req.microsoftAuth.accessToken,
-                  refreshToken: req.microsoftAuth.refreshToken,
-                  chatId,
+
+              // Load user profile for profession-based personalization
+              let userProfile: UserProfile | undefined;
+              if (userId) {
+                userProfile = await loadUserProfile(
+                  req.microsoftAuth.accessToken,
                   userId,
-                  tokenHash,
-                },
-                handler
-              );
+                  chatId,
+                  this.secrets || undefined
+                );
+              }
+
+              const context: RequestContext = {
+                accessToken: req.microsoftAuth.accessToken,
+                refreshToken: req.microsoftAuth.refreshToken,
+                chatId,
+                userId,
+                tokenHash,
+                userProfile,
+              };
+              await requestContext.run(context, handler);
             } else {
               // Even without auth, provide chat context
               await requestContext.run(

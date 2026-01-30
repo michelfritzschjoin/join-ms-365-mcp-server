@@ -26,7 +26,7 @@ import {
   isMailResponse,
 } from './response-formatter.js';
 import NLPEnhancer, { type DecomposedQuery, type ExtractedEntity } from './nlp-enhancer.js';
-import DataAggregator from './data-aggregator.js';
+import DataAggregator, { type AggregationResult, type AggregatedItem } from './data-aggregator.js';
 import {
   GraphApiError,
   RateLimitError,
@@ -38,8 +38,15 @@ import {
 import { getUQAS } from './uqas/integration/index.js';
 import DownloadLinkGenerator from './download-link-generator.js';
 import type { AppSecrets } from './secrets.js';
-import { getRequestTokens } from './request-context.js';
+import { getRequestTokens, getProfessionProfile, getUserProfile } from './request-context.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
+import type { ProfessionProfile } from './user-profile.js';
+import {
+  calendarResponseToTextByProfession,
+  mailResponseToTextByProfession,
+  formatDataByProfession,
+  getProfessionGreeting,
+} from './response-formatter.js';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
@@ -657,6 +664,7 @@ interface StandardResponse<T> {
 
 /**
  * Format standard response with metadata
+ * Supports profession-based personalization via context
  */
 function formatStandardResponse<T>(
   data: T | undefined,
@@ -671,6 +679,8 @@ function formatStandardResponse<T>(
     nlpAnalysis?: NLPAnalysis;
     thinking?: string[];
     requestId?: string;
+    responseType?: 'calendar' | 'mail' | 'search' | 'general';
+    professionProfile?: ProfessionProfile;
   } = {}
 ): StandardResponse<T> {
   const {
@@ -684,7 +694,12 @@ function formatStandardResponse<T>(
     nlpAnalysis,
     thinking,
     requestId,
+    responseType,
+    professionProfile,
   } = options;
+
+  // Get active profession profile from context or options
+  const activeProfile = professionProfile || getProfessionProfile();
 
   const metadata: StandardResponseMetadata = {
     timestamp: new Date().toISOString(),
@@ -695,6 +710,16 @@ function formatStandardResponse<T>(
     ...(requestId && { requestId }),
   };
 
+  // Add profession info to metadata if available
+  if (activeProfile) {
+    (
+      metadata as StandardResponseMetadata & { professionProfile?: { id: string; name: string } }
+    ).professionProfile = {
+      id: activeProfile.id,
+      name: activeProfile.name,
+    };
+  }
+
   const response: StandardResponse<T> = {
     success,
     ...(data !== undefined && { data }),
@@ -704,6 +729,15 @@ function formatStandardResponse<T>(
     ...(nlpAnalysis && { nlpAnalysis }),
     ...(thinking && thinking.length > 0 && { thinking }),
   };
+
+  // Add profession greeting if available
+  if (activeProfile && responseType) {
+    const greeting = getProfessionGreeting(responseType, { professionProfile: activeProfile });
+    if (greeting) {
+      (response as StandardResponse<T> & { _professionGreeting?: string })._professionGreeting =
+        greeting;
+    }
+  }
 
   return response;
 }
@@ -1195,10 +1229,11 @@ async function handleEmail(
       // Extract pagination info
       const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
 
-      // Format mail response with quick summary
+      // Format mail response with profession-specific formatting
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
-        const formattedText = mailResponseToText(formatted);
+        // Use profession-specific text formatting
+        const formattedText = mailResponseToTextByProfession(formatted);
 
         // Add metadata to response
         const responseWithMetadata = formatStandardResponse(
@@ -1208,6 +1243,7 @@ async function handleEmail(
             sources: ['email'],
             cacheHit: false,
             pagination,
+            responseType: 'mail',
             suggestions: [
               '💡 Use "email" tool with action "get" to view email details',
               '💡 Use "email" tool with action "search" for advanced search',
@@ -1283,10 +1319,11 @@ async function handleEmail(
       const parsedResult = JSON.parse(result);
       const executionTime = Date.now() - startTime;
 
-      // Format mail response with quick summary
+      // Format mail response with profession-specific formatting
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
-        const formattedText = mailResponseToText(formatted);
+        // Use profession-specific text formatting
+        const formattedText = mailResponseToTextByProfession(formatted);
 
         // Add NLP insights to response
         const responseWithMetadata = formatStandardResponse(
@@ -1295,6 +1332,7 @@ async function handleEmail(
             executionTime,
             sources: ['email'],
             cacheHit: false,
+            responseType: 'mail',
             nlpAnalysis: optimized.nlpAnalysis,
             suggestions: [
               '💡 Use "email" tool with action "get" to view full email details',
@@ -1452,9 +1490,11 @@ async function handleCalendar(
       const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
 
       // Format calendar response with quick summary
+      // Use profession-based formatting if available
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult);
-        const formattedText = calendarResponseToText(formatted);
+        // Use profession-specific text formatting
+        const formattedText = calendarResponseToTextByProfession(formatted);
 
         // Add metadata to response
         const responseWithMetadata = formatStandardResponse(
@@ -1464,6 +1504,7 @@ async function handleCalendar(
             sources: ['calendar'],
             cacheHit: false,
             pagination,
+            responseType: 'calendar',
             suggestions: [
               '💡 Use "calendar" tool with action "get" to view event details',
               '💡 Use "calendar" tool with action "view" for date range queries',
@@ -1520,14 +1561,15 @@ async function handleCalendar(
       );
       const parsedResult = JSON.parse(result);
 
-      // Format calendar response with quick summary
+      // Format calendar response with profession-specific formatting
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(
           parsedResult,
           input.startDateTime,
           input.endDateTime
         );
-        const formattedText = calendarResponseToText(formatted);
+        // Use profession-specific text formatting
+        const formattedText = calendarResponseToTextByProfession(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
 
@@ -1556,10 +1598,11 @@ async function handleCalendar(
       );
       const parsedResult = JSON.parse(result);
 
-      // Format calendar response with quick summary
+      // Format calendar response with profession-specific formatting
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult);
-        const formattedText = calendarResponseToText(formatted);
+        // Use profession-specific text formatting
+        const formattedText = calendarResponseToTextByProfession(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
 
@@ -3435,6 +3478,14 @@ interface DiscoveryResponse {
     recommendations?: string[];
     recentActivity?: string;
     lastInteraction?: string;
+    dataSummary?: string;
+  };
+  keyFindings?: {
+    companyInfo?: string[];
+    keyContacts?: Array<{ name?: string; email?: string; role?: string }>;
+    recentTopics?: string[];
+    importantFiles?: Array<{ name?: string; webUrl?: string; lastModified?: string }>;
+    sites?: Array<{ name?: string; webUrl?: string }>;
   };
 }
 
@@ -4881,29 +4932,75 @@ async function handleDiscoverCompany(
   const allSites = [...searchSites, ...(sites.value || [])];
   const allListItems = searchListItems; // SharePoint list items
 
+  // Store raw counts BEFORE aggregation for accurate statistics
+  const rawCounts = {
+    emails: allEmails.length,
+    events: allEvents.length,
+    files: allFiles.length,
+    contacts: allContacts.length,
+    sites: allSites.length,
+    listItems: allListItems.length,
+  };
+
   // Use DataAggregator for consistent deduplication and sorting
-  const aggregated = dataAggregator.aggregate(
-    [
-      { source: 'emails', items: allEmails },
-      { source: 'calendar', items: allEvents },
-      { source: 'files', items: allFiles },
-      { source: 'contacts', items: allContacts },
-      { source: 'sites', items: allSites },
-      { source: 'listItems', items: allListItems },
-    ],
-    {
-      sortBy: 'timestamp',
-      sortOrder: 'desc',
-      maxItems: limit * 2,
-      deduplicate: true,
+  // Increase maxItems to ensure we capture items from all sources
+  // Use a per-source balanced approach: aggregate each source separately, then combine top items
+  const sourceAggregations: Record<string, AggregationResult> = {};
+  const sourceLimit = Math.ceil((limit * 2) / 6); // Distribute limit across 6 sources
+
+  // Aggregate each source separately to ensure representation
+  const sources = [
+    { name: 'emails', items: allEmails },
+    { name: 'calendar', items: allEvents },
+    { name: 'files', items: allFiles },
+    { name: 'contacts', items: allContacts },
+    { name: 'sites', items: allSites },
+    { name: 'listItems', items: allListItems },
+  ];
+
+  for (const { name, items } of sources) {
+    if (items.length > 0) {
+      sourceAggregations[name] = dataAggregator.aggregate([{ source: name, items }], {
+        sortBy: 'timestamp',
+        sortOrder: 'desc',
+        maxItems: sourceLimit,
+        deduplicate: true,
+      });
     }
-  );
+  }
+
+  // Combine top items from each source
+  const combinedItems: AggregatedItem[] = [];
+  for (const { name } of sources) {
+    const agg = sourceAggregations[name];
+    if (agg) {
+      combinedItems.push(...agg.items);
+    }
+  }
+
+  // Sort combined items by timestamp
+  combinedItems.sort((a, b) => {
+    const aTime = a.timestamp?.getTime() || 0;
+    const bTime = b.timestamp?.getTime() || 0;
+    return bTime - aTime; // Descending
+  });
+
+  // Limit to maxItems total
+  const limitedItems = combinedItems.slice(0, limit * 2);
+
+  // Create aggregated result structure
+  const aggregated: AggregationResult = {
+    items: limitedItems,
+    totalItems: combinedItems.length,
+    uniqueItems: limitedItems.length,
+    sources: sources.filter((s) => sourceAggregations[s.name]).map((s) => s.name),
+  };
 
   // Log search statistics for debugging
   thinking.push(`🔍 Search statistics:`);
   thinking.push(`   Microsoft Search API: ${searchItems.length} items found`);
   thinking.push(
-    `   Direct API calls: ${allEmails.length} emails, ${allEvents.length} events, ${allFiles.length} files, ${allContacts.length} contacts, ${allSites.length} sites`
+    `   Direct API calls: ${rawCounts.emails} emails, ${rawCounts.events} events, ${rawCounts.files} files, ${rawCounts.contacts} contacts, ${rawCounts.sites} sites`
   );
 
   // Categorize aggregated items by source
@@ -4949,11 +5046,21 @@ async function handleDiscoverCompany(
   }
 
   // Calculate relationship score based on interaction frequency
-  const emailCount = categorizedResults.emails.length;
-  const meetingCount = categorizedResults.meetings.length;
-  const contactCount = categorizedResults.contacts.length;
-  const fileCount = categorizedResults.files.length;
-  const listItemCount = categorizedResults.listItems.length;
+  // Use raw counts for accurate scoring, but categorized counts for results
+  const emailCount = rawCounts.emails;
+  const meetingCount = rawCounts.events;
+  const contactCount = rawCounts.contacts;
+  const fileCount = rawCounts.files;
+  const siteCount = rawCounts.sites;
+  const listItemCount = rawCounts.listItems;
+
+  // Counts for results (limited by aggregation)
+  const resultEmailCount = categorizedResults.emails.length;
+  const resultMeetingCount = categorizedResults.meetings.length;
+  const resultContactCount = categorizedResults.contacts.length;
+  const resultFileCount = categorizedResults.files.length;
+  const resultSiteCount = categorizedResults.sites.length;
+  const resultListItemCount = categorizedResults.listItems.length;
 
   const relationshipScore = Math.min(
     100,
@@ -4963,6 +5070,153 @@ async function handleDiscoverCompany(
         10
     )
   );
+
+  // Extract key findings for LLM to use directly
+  const keyFindings: {
+    companyInfo?: string[];
+    keyContacts?: Array<{ name?: string; email?: string; role?: string }>;
+    recentTopics?: string[];
+    importantFiles?: Array<{ name?: string; webUrl?: string; lastModified?: string }>;
+    sites?: Array<{ name?: string; webUrl?: string }>;
+  } = {};
+
+  // Extract company info from email signatures and content
+  const companyInfoSet = new Set<string>();
+  for (const email of categorizedResults.emails.slice(0, 10)) {
+    const emailObj = email as Record<string, unknown>;
+    const bodyObj = emailObj.body as Record<string, unknown> | undefined;
+    const body = bodyObj?.content as string | undefined;
+    const subject = emailObj.subject as string | undefined;
+
+    if (body) {
+      // Look for company name patterns in email body
+      const companyPattern = new RegExp(`${companyName}[^\\s]*`, 'gi');
+      const matches = body.match(companyPattern);
+      if (matches) {
+        matches.forEach((m) => companyInfoSet.add(m));
+      }
+
+      // Extract address patterns
+      const addressPattern = /(\d{5})\s+([A-ZÄÖÜ][a-zäöüß\s]+)/g;
+      const addressMatches = body.match(addressPattern);
+      if (addressMatches) {
+        addressMatches.forEach((m) => companyInfoSet.add(m.trim()));
+      }
+    }
+  }
+  if (companyInfoSet.size > 0) {
+    keyFindings.companyInfo = Array.from(companyInfoSet).slice(0, 10);
+  }
+
+  // Extract key contacts from emails and contacts
+  const contactsMap = new Map<string, { name?: string; email?: string; role?: string }>();
+
+  // From contacts
+  for (const contact of categorizedResults.contacts) {
+    const contactObj = contact as Record<string, unknown>;
+    const emailAddresses = contactObj.emailAddresses as Array<Record<string, unknown>> | undefined;
+    const email = emailAddresses?.[0]?.address as string | undefined;
+    const name = contactObj.displayName as string | undefined;
+    const company = contactObj.companyName as string | undefined;
+
+    if (email && !contactsMap.has(email)) {
+      contactsMap.set(email, {
+        name: name || email.split('@')[0],
+        email,
+        role: company,
+      });
+    }
+  }
+
+  // From emails (senders and recipients)
+  for (const email of categorizedResults.emails.slice(0, 20)) {
+    const emailObj = email as Record<string, unknown>;
+    const from = emailObj.from as Record<string, unknown> | undefined;
+    const toRecipients = (emailObj.toRecipients as Array<Record<string, unknown>>) || [];
+
+    if (from) {
+      const emailAddress = from.emailAddress as Record<string, unknown> | undefined;
+      const email = emailAddress?.address as string | undefined;
+      const name = emailAddress?.name as string | undefined;
+      if (email && email.includes(companyName.toLowerCase()) && !contactsMap.has(email)) {
+        contactsMap.set(email, {
+          name: name || email.split('@')[0],
+          email,
+        });
+      }
+    }
+
+    for (const recipient of toRecipients) {
+      const emailAddress = recipient.emailAddress as Record<string, unknown> | undefined;
+      const email = emailAddress?.address as string | undefined;
+      const name = emailAddress?.name as string | undefined;
+      if (email && email.includes(companyName.toLowerCase()) && !contactsMap.has(email)) {
+        contactsMap.set(email, {
+          name: name || email.split('@')[0],
+          email,
+        });
+      }
+    }
+  }
+
+  if (contactsMap.size > 0) {
+    keyFindings.keyContacts = Array.from(contactsMap.values()).slice(0, 10);
+  }
+
+  // Extract recent topics from email subjects
+  const topicsSet = new Set<string>();
+  for (const email of categorizedResults.emails.slice(0, 20)) {
+    const emailObj = email as Record<string, unknown>;
+    const subject = emailObj.subject as string | undefined;
+    if (subject && subject.length > 0) {
+      // Remove common prefixes like "RE:", "AW:", "FWD:"
+      const cleanSubject = subject.replace(/^(RE:|AW:|FWD:|FW:)\s*/i, '').trim();
+      if (cleanSubject.length > 5 && cleanSubject.length < 100) {
+        topicsSet.add(cleanSubject);
+      }
+    }
+  }
+  if (topicsSet.size > 0) {
+    keyFindings.recentTopics = Array.from(topicsSet).slice(0, 10);
+  }
+
+  // Extract important files
+  const importantFiles: Array<{ name?: string; webUrl?: string; lastModified?: string }> = [];
+  for (const file of categorizedResults.files.slice(0, 10)) {
+    const fileObj = file as Record<string, unknown>;
+    const name = fileObj.name as string | undefined;
+    const webUrl = fileObj.webUrl as string | undefined;
+    const lastModified = fileObj.lastModifiedDateTime as string | undefined;
+
+    if (name) {
+      importantFiles.push({
+        name,
+        webUrl,
+        lastModified,
+      });
+    }
+  }
+  if (importantFiles.length > 0) {
+    keyFindings.importantFiles = importantFiles;
+  }
+
+  // Extract sites
+  const siteFindings: Array<{ name?: string; webUrl?: string }> = [];
+  for (const site of categorizedResults.sites) {
+    const siteObj = site as Record<string, unknown>;
+    const name = siteObj.displayName as string | undefined;
+    const webUrl = siteObj.webUrl as string | undefined;
+
+    if (name || webUrl) {
+      siteFindings.push({
+        name: name || webUrl,
+        webUrl,
+      });
+    }
+  }
+  if (siteFindings.length > 0) {
+    keyFindings.sites = siteFindings;
+  }
 
   // Build discovery response
   const response: DiscoveryResponse = {
@@ -4984,7 +5238,7 @@ async function handleDiscoverCompany(
       ],
     },
     summary: {
-      totalItems: aggregated.uniqueItems,
+      totalItems: emailCount + meetingCount + fileCount + contactCount + siteCount + listItemCount,
       sources: aggregated.sources || [],
       timeRange: `Last ${days} days`,
     },
@@ -5006,23 +5260,27 @@ async function handleDiscoverCompany(
         categorizedResults.emails[0]?.['receivedDateTime'] ||
         categorizedResults.meetings[0]?.['start']?.['dateTime'] ||
         'Unknown',
-      recentActivity: `${emailCount} emails, ${meetingCount} meetings, ${contactCount} contacts`,
+      recentActivity: `${emailCount} emails, ${meetingCount} meetings, ${fileCount} files, ${contactCount} contacts, ${siteCount} sites`,
       recommendations: generateCompanyRecommendations(
         relationshipScore,
         emailCount,
         meetingCount,
         companyName
       ),
+      dataSummary: `IMPORTANT: Found ${emailCount} emails, ${fileCount} files, ${siteCount} sites, ${contactCount} contacts, and ${meetingCount} meetings related to ${companyName}. Use the data in 'results' and 'keyFindings' sections to answer questions about ${companyName}. Do NOT use general knowledge - use only the data provided here.`,
     },
+    keyFindings: Object.keys(keyFindings).length > 0 ? keyFindings : undefined,
   };
 
   thinking.push(`✅ Customer 360 discovery complete:`);
-  thinking.push(`   📧 Emails: ${emailCount}`);
-  thinking.push(`   📅 Meetings: ${meetingCount}`);
-  thinking.push(`   📁 Files: ${fileCount}`);
-  thinking.push(`   👥 Contacts: ${contactCount}`);
-  thinking.push(`   🌐 Sites: ${categorizedResults.sites.length}`);
-  thinking.push(`   📄 SharePoint List Items: ${listItemCount}`);
+  thinking.push(`   📧 Emails: ${emailCount} (${resultEmailCount} in results)`);
+  thinking.push(`   📅 Meetings: ${meetingCount} (${resultMeetingCount} in results)`);
+  thinking.push(`   📁 Files: ${fileCount} (${resultFileCount} in results)`);
+  thinking.push(`   👥 Contacts: ${contactCount} (${resultContactCount} in results)`);
+  thinking.push(`   🌐 Sites: ${siteCount} (${resultSiteCount} in results)`);
+  thinking.push(
+    `   📄 SharePoint List Items: ${listItemCount} (${resultListItemCount} in results)`
+  );
   thinking.push(`   📄 Documents with extracted content: ${filesWithContent.length}`);
   thinking.push(`   💯 Relationship Score: ${relationshipScore}/100`);
 

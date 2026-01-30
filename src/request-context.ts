@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'crypto';
+import type { UserProfile, ProfessionProfile } from './user-profile.js';
 
 /**
  * Request context that is passed through async operations
@@ -16,6 +17,8 @@ export interface RequestContext {
   userId?: string;
   /** Token hash for logging (never log actual token) */
   tokenHash?: string;
+  /** User profile with job title, department, and profession profile */
+  userProfile?: UserProfile;
 }
 
 /**
@@ -105,6 +108,7 @@ export function getSecureLogContext(): {
   userIdPrefix?: string;
   chatIdPrefix?: string;
   tokenHash?: string;
+  professionProfile?: string;
 } {
   const ctx = requestContext.getStore();
   return {
@@ -113,5 +117,30 @@ export function getSecureLogContext(): {
     userIdPrefix: ctx?.userId?.substring(0, 8),
     chatIdPrefix: ctx?.chatId?.substring(0, 8),
     tokenHash: ctx?.tokenHash,
+    professionProfile: ctx?.userProfile?.professionProfile?.id,
   };
+}
+
+/**
+ * Get the current user profile from context
+ * @returns UserProfile or undefined if not available
+ */
+export function getUserProfile(): UserProfile | undefined {
+  return requestContext.getStore()?.userProfile;
+}
+
+/**
+ * Get the current profession profile from context
+ * @returns ProfessionProfile or undefined if not available
+ */
+export function getProfessionProfile(): ProfessionProfile | undefined {
+  return requestContext.getStore()?.userProfile?.professionProfile;
+}
+
+/**
+ * Check if we have a profession profile in context
+ * @returns True if profession profile is available
+ */
+export function hasProfessionProfile(): boolean {
+  return !!getProfessionProfile();
 }

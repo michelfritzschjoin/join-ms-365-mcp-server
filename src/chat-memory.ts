@@ -46,6 +46,13 @@ export interface ChatPreferences {
   language?: 'en' | 'de' | 'auto';
   resultLimit?: number;
   preferredSources?: string[];
+  /**
+   * Manual profession profile override
+   * If set, this takes priority over auto-detected profession from Microsoft Graph
+   * Valid values: 'executive', 'manager', 'developer', 'it', 'sales', 'marketing',
+   * 'hr', 'finance', 'legal', 'research', 'consulting', 'design', 'operations', 'default'
+   */
+  professionOverride?: string;
 }
 
 /**

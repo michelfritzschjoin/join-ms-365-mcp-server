@@ -1,9 +1,22 @@
 /**
  * Response Formatter - Formats API responses into structured, human-readable output
  * with server local time conversion (no UTC)
+ *
+ * Supports profession-based personalization:
+ * - Executive: High-level bullet summaries
+ * - Developer: Technical details with code examples
+ * - Sales: Customer-focused narrative
+ * - Default: Balanced structured output
  */
 
 import logger from './logger.js';
+import type {
+  ProfessionProfile,
+  DetailLevel,
+  LanguageStyle,
+  FormatPreference,
+} from './user-profile.js';
+import { getProfessionProfile } from './request-context.js';
 
 /**
  * Structured calendar event interface
@@ -877,17 +890,516 @@ export function formatGraphResponse(
   return { formatted: response, isFormatted: false };
 }
 
+// ============================================================
+// PROFESSION-BASED FORMATTING FUNCTIONS
+// ============================================================
+
+/**
+ * Format options for profession-based customization
+ */
+export interface ProfessionFormatOptions {
+  /** Override profession profile (if not using context) */
+  professionProfile?: ProfessionProfile;
+  /** Maximum items to show in summaries */
+  maxItems?: number;
+  /** Whether to include technical details */
+  includeTechnicalDetails?: boolean;
+}
+
+/**
+ * Get the active profession profile from context or options
+ */
+function getActiveProfessionProfile(
+  options?: ProfessionFormatOptions
+): ProfessionProfile | undefined {
+  // Options override takes priority
+  if (options?.professionProfile) {
+    return options.professionProfile;
+  }
+  // Fall back to request context
+  return getProfessionProfile();
+}
+
+/**
+ * Format calendar response based on profession profile
+ */
+export function calendarResponseToTextByProfession(
+  response: FormattedCalendarResponse,
+  options?: ProfessionFormatOptions
+): string {
+  const profile = getActiveProfessionProfile(options);
+
+  // No profile - use standard formatting
+  if (!profile) {
+    return calendarResponseToText(response);
+  }
+
+  const { detailLevel, languageStyle, formatPreference } = profile;
+  const lines: string[] = [];
+
+  // Header based on language style
+  const headerText =
+    languageStyle === 'formal' || languageStyle === 'professional'
+      ? '📅 CALENDAR OVERVIEW'
+      : languageStyle === 'customer-focused'
+        ? '📅 YOUR SCHEDULE'
+        : '📅 KALENDERÜBERSICHT';
+
+  lines.push(headerText);
+  lines.push('═'.repeat(60));
+
+  // Summary based on detail level
+  if (detailLevel === 'executive') {
+    // Executive: Very brief summary
+    lines.push(`• ${response.summary.totalEvents} appointments scheduled`);
+    lines.push(`• Period: ${response.summary.dateRange}`);
+
+    // Just highlight key meetings (online, high-priority, etc.)
+    const keyMeetings = response.events
+      .filter((e) => e.isOnlineMeeting || e.importance === 'high')
+      .slice(0, 5);
+
+    if (keyMeetings.length > 0) {
+      lines.push('');
+      lines.push('🔑 Key Meetings:');
+      for (const event of keyMeetings) {
+        const timeStr = event.isAllDay ? 'All Day' : event.startTimeDisplay;
+        lines.push(`  • ${event.startDate} ${timeStr}: ${event.subject}`);
+      }
+    }
+
+    // Add action items
+    const upcomingOnline = response.events.filter((e) => e.isOnlineMeeting).length;
+    if (upcomingOnline > 0) {
+      lines.push('');
+      lines.push(
+        `💡 ${upcomingOnline} online meeting${upcomingOnline > 1 ? 's' : ''} - prepare links`
+      );
+    }
+  } else if (detailLevel === 'technical') {
+    // Technical: Include IDs, structured data
+    lines.push(`📊 Total: ${response.summary.totalEvents} events`);
+    lines.push(`📆 Range: ${response.summary.dateRange}`);
+    lines.push(`🌍 TZ: ${response.summary.timezone}`);
+    lines.push('═'.repeat(60));
+    lines.push('');
+
+    // Code-like output for developers
+    if (formatPreference === 'code-examples') {
+      lines.push('```');
+      lines.push('Events:');
+      for (const event of response.events.slice(0, options?.maxItems || 20)) {
+        lines.push(`  - id: ${event.id.substring(0, 20)}...`);
+        lines.push(`    subject: "${event.subject}"`);
+        lines.push(`    start: ${event.startDateTimeUTC}`);
+        lines.push(`    end: ${event.endDateTimeUTC}`);
+        lines.push(`    duration: ${event.duration}`);
+        lines.push(`    online: ${event.isOnlineMeeting}`);
+        if (event.onlineMeetingUrl) {
+          lines.push(`    url: ${event.onlineMeetingUrl}`);
+        }
+        lines.push('');
+      }
+      lines.push('```');
+    } else {
+      // Structured technical output
+      for (const event of response.events) {
+        lines.push(`[${event.id.substring(0, 8)}] ${event.subject}`);
+        lines.push(`  ├─ Start: ${event.startDateTimeUTC}`);
+        lines.push(`  ├─ End: ${event.endDateTimeUTC}`);
+        lines.push(`  ├─ Duration: ${event.duration}`);
+        lines.push(`  ├─ Online: ${event.isOnlineMeeting ? 'Yes' : 'No'}`);
+        if (event.location) lines.push(`  ├─ Location: ${event.location}`);
+        if (event.onlineMeetingUrl) lines.push(`  └─ URL: ${event.onlineMeetingUrl}`);
+        lines.push('');
+      }
+    }
+  } else if (detailLevel === 'summary' && languageStyle === 'customer-focused') {
+    // Sales/Customer-focused: Narrative style
+    lines.push(`You have ${response.summary.totalEvents} upcoming appointments.`);
+    lines.push(`📆 Period: ${response.summary.dateRange}`);
+    lines.push('═'.repeat(60));
+    lines.push('');
+
+    // Group by importance for customer interactions
+    const customerMeetings = response.events.filter(
+      (e) =>
+        e.subject.toLowerCase().includes('customer') ||
+        e.subject.toLowerCase().includes('client') ||
+        e.subject.toLowerCase().includes('meeting') ||
+        e.subject.toLowerCase().includes('call')
+    );
+
+    if (customerMeetings.length > 0) {
+      lines.push('🤝 Customer Interactions:');
+      for (const event of customerMeetings.slice(0, 10)) {
+        const timeStr = event.isAllDay ? 'All Day' : `${event.startTime} - ${event.endTime}`;
+        lines.push(`  📅 ${event.startDate} | ${timeStr}`);
+        lines.push(`     ${event.subject}`);
+        if (event.attendees && event.attendees.length > 0) {
+          lines.push(`     👥 With: ${event.attendees.slice(0, 3).join(', ')}`);
+        }
+        lines.push('');
+      }
+    }
+
+    // Other meetings
+    const otherMeetings = response.events.filter((e) => !customerMeetings.includes(e));
+    if (otherMeetings.length > 0) {
+      lines.push('📋 Other Appointments:');
+      for (const event of otherMeetings.slice(0, 5)) {
+        lines.push(`  • ${event.startDate} ${event.startTime}: ${event.subject}`);
+      }
+    }
+  } else {
+    // Default/detailed: Standard formatting
+    return calendarResponseToText(response);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format mail response based on profession profile
+ */
+export function mailResponseToTextByProfession(
+  response: FormattedMailResponse,
+  options?: ProfessionFormatOptions
+): string {
+  const profile = getActiveProfessionProfile(options);
+
+  // No profile - use standard formatting
+  if (!profile) {
+    return mailResponseToText(response);
+  }
+
+  const { detailLevel, languageStyle, formatPreference } = profile;
+  const lines: string[] = [];
+
+  // Header
+  const headerText =
+    languageStyle === 'formal' || languageStyle === 'professional'
+      ? '📧 EMAIL OVERVIEW'
+      : languageStyle === 'customer-focused'
+        ? '📧 YOUR INBOX'
+        : '📧 E-MAIL ÜBERSICHT';
+
+  lines.push(headerText);
+  lines.push('═'.repeat(60));
+
+  if (detailLevel === 'executive') {
+    // Executive: Key metrics and action items only
+    lines.push(`• Total: ${response.summary.totalMessages} emails`);
+    lines.push(`• Unread: ${response.summary.unreadCount} require attention`);
+
+    // High priority emails
+    const highPriority = response.messages.filter((m) => m.importance === 'high');
+    const flagged = response.messages.filter((m) => m.flag?.flagStatus === 'flagged');
+    const unread = response.messages.filter((m) => !m.isRead);
+
+    if (highPriority.length > 0) {
+      lines.push('');
+      lines.push('❗ High Priority:');
+      for (const msg of highPriority.slice(0, 5)) {
+        lines.push(`  • ${msg.from.name}: ${msg.subject}`);
+      }
+    }
+
+    if (flagged.length > 0) {
+      lines.push('');
+      lines.push('🚩 Flagged for Follow-up:');
+      for (const msg of flagged.slice(0, 5)) {
+        lines.push(`  • ${msg.from.name}: ${msg.subject}`);
+      }
+    }
+
+    // Action summary
+    lines.push('');
+    lines.push('💡 Recommended Actions:');
+    if (unread.length > 5) {
+      lines.push(`  • Review ${unread.length} unread emails`);
+    }
+    if (flagged.length > 0) {
+      lines.push(`  • Address ${flagged.length} flagged item${flagged.length > 1 ? 's' : ''}`);
+    }
+  } else if (detailLevel === 'technical') {
+    // Technical: Structured data output
+    lines.push(
+      `📊 Total: ${response.summary.totalMessages} | Unread: ${response.summary.unreadCount}`
+    );
+    lines.push(`📆 Range: ${response.summary.dateRange}`);
+    lines.push(`🌍 TZ: ${response.summary.timezone}`);
+    lines.push('═'.repeat(60));
+    lines.push('');
+
+    if (formatPreference === 'code-examples') {
+      lines.push('```');
+      lines.push('Messages:');
+      for (const msg of response.messages.slice(0, options?.maxItems || 15)) {
+        lines.push(`  - id: ${msg.id.substring(0, 20)}...`);
+        lines.push(`    subject: "${msg.subject}"`);
+        lines.push(`    from: ${msg.from.email}`);
+        lines.push(`    received: ${msg.receivedDateTimeUTC}`);
+        lines.push(`    read: ${msg.isRead}`);
+        lines.push(`    hasAttachments: ${msg.hasAttachments}`);
+        if (msg.conversationId) {
+          lines.push(`    conversationId: ${msg.conversationId.substring(0, 20)}...`);
+        }
+        lines.push('');
+      }
+      lines.push('```');
+    } else {
+      // Structured output
+      for (const msg of response.messages.slice(0, 20)) {
+        const status = msg.isRead ? '📭' : '📬';
+        lines.push(`${status} [${msg.id.substring(0, 8)}] ${msg.subject}`);
+        lines.push(`  ├─ From: ${msg.from.email}`);
+        lines.push(`  ├─ Received: ${msg.receivedDateTimeUTC}`);
+        lines.push(`  ├─ Attachments: ${msg.hasAttachments}`);
+        lines.push(`  └─ Importance: ${msg.importance}`);
+        lines.push('');
+      }
+    }
+  } else if (languageStyle === 'customer-focused') {
+    // Sales: Focus on customer communications
+    lines.push(`You have ${response.summary.totalMessages} emails in your inbox.`);
+    if (response.summary.unreadCount > 0) {
+      lines.push(
+        `📬 ${response.summary.unreadCount} unread message${response.summary.unreadCount > 1 ? 's' : ''} awaiting your attention.`
+      );
+    }
+    lines.push('═'.repeat(60));
+    lines.push('');
+
+    // Prioritize unread
+    const unread = response.messages.filter((m) => !m.isRead);
+    if (unread.length > 0) {
+      lines.push('📬 Unread Messages:');
+      for (const msg of unread.slice(0, 10)) {
+        lines.push(`  📧 ${msg.receivedDate} ${msg.receivedTime}`);
+        lines.push(`     From: ${msg.from.name}`);
+        lines.push(`     Subject: ${msg.subject}`);
+        if (msg.bodyPreview) {
+          const preview = msg.bodyPreview.substring(0, 80).replace(/\n/g, ' ').trim();
+          lines.push(`     Preview: ${preview}...`);
+        }
+        lines.push('');
+      }
+    }
+
+    // Recent read messages
+    const read = response.messages.filter((m) => m.isRead).slice(0, 5);
+    if (read.length > 0) {
+      lines.push('📭 Recent Messages:');
+      for (const msg of read) {
+        lines.push(`  • ${msg.from.name}: ${msg.subject}`);
+      }
+    }
+  } else {
+    // Default: Standard formatting
+    return mailResponseToText(response);
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format any data structure based on profession profile
+ * This is a generic formatter for arbitrary data
+ */
+export function formatDataByProfession(
+  data: unknown,
+  label: string,
+  options?: ProfessionFormatOptions
+): string {
+  const profile = getActiveProfessionProfile(options);
+  const lines: string[] = [];
+
+  if (!profile || typeof data !== 'object' || data === null) {
+    return JSON.stringify(data, null, 2);
+  }
+
+  const { detailLevel, formatPreference } = profile;
+
+  if (detailLevel === 'executive') {
+    // Executive summary - extract key points only
+    lines.push(`📊 ${label} Summary`);
+    lines.push('─'.repeat(40));
+
+    if (Array.isArray(data)) {
+      lines.push(`• ${data.length} item${data.length !== 1 ? 's' : ''} found`);
+      // Show first 3 items briefly
+      for (const item of data.slice(0, 3)) {
+        if (typeof item === 'object' && item !== null) {
+          const obj = item as Record<string, unknown>;
+          const name = obj.displayName || obj.name || obj.subject || obj.title || 'Item';
+          lines.push(`  • ${name}`);
+        }
+      }
+      if (data.length > 3) {
+        lines.push(`  ... and ${data.length - 3} more`);
+      }
+    } else if (typeof data === 'object') {
+      const obj = data as Record<string, unknown>;
+      const keys = Object.keys(obj).slice(0, 5);
+      for (const key of keys) {
+        const value = obj[key];
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          lines.push(`• ${key}: ${value}`);
+        } else if (Array.isArray(value)) {
+          lines.push(`• ${key}: ${value.length} items`);
+        }
+      }
+    }
+  } else if (detailLevel === 'technical' && formatPreference === 'code-examples') {
+    // Code block format
+    lines.push(`// ${label}`);
+    lines.push('```json');
+    lines.push(JSON.stringify(data, null, 2));
+    lines.push('```');
+  } else {
+    // Default: Pretty printed JSON
+    lines.push(`📋 ${label}`);
+    lines.push('─'.repeat(40));
+    lines.push(JSON.stringify(data, null, 2));
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Get appropriate greeting/introduction based on profession
+ */
+export function getProfessionGreeting(
+  context: 'calendar' | 'mail' | 'search' | 'general',
+  options?: ProfessionFormatOptions
+): string {
+  const profile = getActiveProfessionProfile(options);
+
+  if (!profile) {
+    return '';
+  }
+
+  const { detailLevel, languageStyle } = profile;
+
+  if (languageStyle === 'formal') {
+    switch (context) {
+      case 'calendar':
+        return 'Here is your schedule overview:';
+      case 'mail':
+        return 'Here is your email summary:';
+      case 'search':
+        return 'Search results:';
+      default:
+        return 'Results:';
+    }
+  } else if (languageStyle === 'customer-focused') {
+    switch (context) {
+      case 'calendar':
+        return 'Here are your upcoming appointments - let me highlight the key ones:';
+      case 'mail':
+        return "I've organized your emails by priority:";
+      case 'search':
+        return 'I found the following information for you:';
+      default:
+        return "Here's what I found:";
+    }
+  } else if (languageStyle === 'technical') {
+    switch (context) {
+      case 'calendar':
+        return 'Calendar query results:';
+      case 'mail':
+        return 'Mail query results:';
+      case 'search':
+        return 'Query results:';
+      default:
+        return 'Data:';
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Format Graph API response with profession-based personalization
+ */
+export function formatGraphResponseByProfession(
+  response: unknown,
+  toolName?: string,
+  params?: Record<string, unknown>,
+  options?: ProfessionFormatOptions
+): {
+  formatted: unknown;
+  isFormatted: boolean;
+  type?: 'calendar' | 'mail';
+  humanReadable?: string;
+} {
+  if (typeof response !== 'object' || response === null) {
+    return { formatted: response, isFormatted: false };
+  }
+
+  const obj = response as Record<string, unknown>;
+
+  // Check for calendar responses
+  if (
+    isCalendarResponse(response) ||
+    toolName?.includes('calendar') ||
+    toolName?.includes('event')
+  ) {
+    const startDateTime = params?.startDateTime as string | undefined;
+    const endDateTime = params?.endDateTime as string | undefined;
+
+    const formatted = formatCalendarResponse(obj, startDateTime, endDateTime);
+    const textOutput = calendarResponseToTextByProfession(formatted, options);
+
+    return {
+      formatted: {
+        _humanReadable: textOutput,
+        ...formatted,
+      },
+      isFormatted: true,
+      type: 'calendar',
+      humanReadable: textOutput,
+    };
+  }
+
+  // Check for mail responses
+  if (isMailResponse(response) || toolName?.includes('mail') || toolName?.includes('message')) {
+    const formatted = formatMailResponse(obj);
+    const textOutput = mailResponseToTextByProfession(formatted, options);
+
+    return {
+      formatted: {
+        _humanReadable: textOutput,
+        ...formatted,
+      },
+      isFormatted: true,
+      type: 'mail',
+      humanReadable: textOutput,
+    };
+  }
+
+  // Return original response if no specific formatter
+  return { formatted: response, isFormatted: false };
+}
+
 export default {
   // Calendar functions
   formatCalendarEvent,
   formatCalendarResponse,
   calendarResponseToText,
+  calendarResponseToTextByProfession,
   isCalendarResponse,
   // Mail functions
   formatMailMessage,
   formatMailResponse,
   mailResponseToText,
+  mailResponseToTextByProfession,
   isMailResponse,
+  // Profession-based formatting
+  formatDataByProfession,
+  getProfessionGreeting,
+  formatGraphResponseByProfession,
   // General functions
   formatGraphResponse,
   convertToLocalTime,
