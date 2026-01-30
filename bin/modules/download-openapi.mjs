@@ -22,19 +22,39 @@ export async function downloadGraphOpenAPI(
 
   console.log(`Downloading OpenAPI specification from ${openapiUrl}`);
 
-  try {
-    const response = await fetch(openapiUrl);
+  const maxRetries = 3;
+  const retryDelay = 2000; // 2 seconds
 
-    if (!response.ok) {
-      throw new Error(`Failed to download: ${response.status} ${response.statusText}`);
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      if (attempt > 1) {
+        console.log(`Retry attempt ${attempt}/${maxRetries}...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelay * attempt));
+      }
+
+      const response = await fetch(openapiUrl);
+
+      if (!response.ok) {
+        // Retry on 5xx server errors
+        if (response.status >= 500 && attempt < maxRetries) {
+          console.warn(`Server error ${response.status} ${response.statusText}, retrying...`);
+          continue;
+        }
+        throw new Error(`Failed to download: ${response.status} ${response.statusText}`);
+      }
+
+      const content = await response.text();
+      fs.writeFileSync(targetFile, content);
+      console.log(`OpenAPI specification downloaded to ${targetFile}`);
+      return true;
+    } catch (error) {
+      // Retry on network errors or 5xx errors
+      if (attempt < maxRetries && (error.message.includes('503') || error.message.includes('50'))) {
+        console.warn(`Error downloading (attempt ${attempt}/${maxRetries}): ${error.message}`);
+        continue;
+      }
+      console.error('Error downloading OpenAPI specification:', error.message);
+      throw error;
     }
-
-    const content = await response.text();
-    fs.writeFileSync(targetFile, content);
-    console.log(`OpenAPI specification downloaded to ${targetFile}`);
-    return true;
-  } catch (error) {
-    console.error('Error downloading OpenAPI specification:', error.message);
-    throw error;
   }
 }

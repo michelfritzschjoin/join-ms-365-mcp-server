@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **discover-company:** implement balanced aggregation and keyfindings extraction ([a55ca01](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/a55ca01019669e3e826ea15abf32fe930ba383c0))
+- **discover-company:** implement balanced aggregation and keyfindings extraction ([a55ca01](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/a55ca01019669e3e826ea15abf32fe930ba383c0))
 
 ## [1.17.2](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.1...v1.17.2) (2026-01-30)
 
