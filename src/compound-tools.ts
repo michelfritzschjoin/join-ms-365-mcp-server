@@ -1094,23 +1094,66 @@ async function findMeetingsWithPerson(
 
     const emailLower = userEmail.toLowerCase();
     const nameLower = userDisplayName.toLowerCase();
+    // Split name into parts for better matching (e.g., "Max Mustermann" -> ["max", "mustermann"])
+    const nameParts = nameLower.split(/\s+/).filter((part) => part.length > 0);
 
     for (const event of events) {
-      // Check organizer
+      let isMatch = false;
+
+      // Check organizer - must be exact email match OR exact name match OR all name parts present
       const organizerEmail = event.organizer?.emailAddress?.address?.toLowerCase();
       const organizerName = event.organizer?.emailAddress?.name?.toLowerCase();
 
-      if (organizerEmail === emailLower || (organizerName && organizerName.includes(nameLower))) {
+      if (organizerEmail === emailLower) {
+        // Exact email match
+        isMatch = true;
+      } else if (organizerName) {
+        const organizerNameLower = organizerName.toLowerCase();
+        // Exact name match
+        if (organizerNameLower === nameLower) {
+          isMatch = true;
+        } else if (nameParts.length > 0) {
+          // Check if all name parts are present in organizer name (for "Max Mustermann" matching "Maximilian Mustermann")
+          const allPartsMatch = nameParts.every((part) => organizerNameLower.includes(part));
+          if (allPartsMatch) {
+            isMatch = true;
+          }
+        }
+      }
+
+      if (isMatch) {
         matchingEvents.push(event);
         continue;
       }
 
-      // Check attendees
+      // Check attendees - person must be an actual attendee
       if (event.attendees && Array.isArray(event.attendees)) {
         const hasAttendee = event.attendees.some((attendee) => {
           const attendeeEmail = attendee.emailAddress?.address?.toLowerCase();
           const attendeeName = attendee.emailAddress?.name?.toLowerCase();
-          return attendeeEmail === emailLower || (attendeeName && attendeeName.includes(nameLower));
+
+          // Exact email match
+          if (attendeeEmail === emailLower) {
+            return true;
+          }
+
+          // Exact name match
+          if (attendeeName) {
+            const attendeeNameLower = attendeeName.toLowerCase();
+            if (attendeeNameLower === nameLower) {
+              return true;
+            }
+
+            // Check if all name parts are present in attendee name
+            if (nameParts.length > 0) {
+              const allPartsMatch = nameParts.every((part) => attendeeNameLower.includes(part));
+              if (allPartsMatch) {
+                return true;
+              }
+            }
+          }
+
+          return false;
         });
 
         if (hasAttendee) {

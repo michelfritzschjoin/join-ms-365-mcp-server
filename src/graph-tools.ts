@@ -598,11 +598,12 @@ async function executeGraphTool(
           thinking.addInfo('processing', 'Response has additional pages available');
         }
 
-        // Format calendar and mail responses with structured output and local time
-        if (isCalendarTool || isMailTool) {
+        // Format calendar, mail, and files responses with structured output and local time
+        const isFilesTool = tool.alias?.includes('file') || tool.alias?.includes('drive');
+        if (isCalendarTool || isMailTool || isFilesTool) {
           thinking.startAction(
             'formatting',
-            `Formatting ${isCalendarTool ? 'calendar' : 'mail'} response`
+            `Formatting ${isCalendarTool ? 'calendar' : isMailTool ? 'mail' : 'files'} response`
           );
           const { formatted, isFormatted, type } = formatGraphResponse(
             jsonResponse,
@@ -611,11 +612,8 @@ async function executeGraphTool(
           );
           if (isFormatted) {
             response.content[0].text = JSON.stringify(formatted, null, 2);
-            logger.info(`Applied structured ${type} formatting with server local time`);
-            thinking.completeAction(
-              'formatting',
-              `Applied ${type} formatting with local time conversion`
-            );
+            logger.info(`Applied structured ${type} formatting`);
+            thinking.completeAction('formatting', `Applied ${type} formatting`);
           }
         }
       } catch {

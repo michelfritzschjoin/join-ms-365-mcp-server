@@ -2228,15 +2228,29 @@ const contactsActions = z.enum([
   'search', // Search contacts/users
 ]);
 
-const contactsSchema = z.object({
-  action: contactsActions.describe('The contacts operation to perform'),
-  // Identifiers
-  contactId: z.string().optional().describe('Contact ID'),
-  userId: z.string().optional().describe('User ID'),
-  // Filters
-  ...filterSchema,
-  ...paginationSchema,
-});
+const contactsSchema = z
+  .object({
+    action: contactsActions.describe('The contacts operation to perform'),
+    // Identifiers
+    contactId: z.string().optional().describe('Contact ID'),
+    userId: z.string().optional().describe('User ID'),
+    // Filters
+    ...filterSchema,
+    ...paginationSchema,
+  })
+  .refine(
+    (data) => {
+      // When action is 'search', search query is required
+      if (data.action === 'search' && !data.search) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message: 'search query is required when action is "search"',
+      path: ['search'],
+    }
+  );
 
 type ContactsInput = z.infer<typeof contactsSchema>;
 
@@ -4089,16 +4103,64 @@ async function handleDiscoverPerson(
     contactsResult.status === 'fulfilled' ? JSON.parse(contactsResult.value) : { value: [] };
   const chats = chatsResult.status === 'fulfilled' ? JSON.parse(chatsResult.value) : { value: [] };
 
-  // Filter events that include this person
-  const relevantEvents = (events.value || []).filter((event: Record<string, unknown>) => {
-    const attendees = event.attendees as Array<{ emailAddress?: { name?: string } }> | undefined;
-    const organizer = event.organizer as { emailAddress?: { name?: string } } | undefined;
-    const personLower = personName.toLowerCase();
+  // Filter events that include this person - person must be an actual attendee or organizer
+  const personLower = personName.toLowerCase();
+  // Split name into parts for better matching (e.g., "Max Mustermann" -> ["max", "mustermann"])
+  const nameParts = personLower.split(/\s+/).filter((part) => part.length > 0);
 
-    return (
-      attendees?.some((a) => a.emailAddress?.name?.toLowerCase().includes(personLower)) ||
-      organizer?.emailAddress?.name?.toLowerCase().includes(personLower)
-    );
+  const relevantEvents = (events.value || []).filter((event: Record<string, unknown>) => {
+    const attendees = event.attendees as
+      | Array<{ emailAddress?: { name?: string; address?: string } }>
+      | undefined;
+    const organizer = event.organizer as
+      | { emailAddress?: { name?: string; address?: string } }
+      | undefined;
+
+    // Check organizer - must be exact name match OR all name parts present
+    if (organizer?.emailAddress?.name) {
+      const organizerNameLower = organizer.emailAddress.name.toLowerCase();
+      // Exact name match
+      if (organizerNameLower === personLower) {
+        return true;
+      }
+      // Check if all name parts are present in organizer name
+      if (nameParts.length > 0) {
+        const allPartsMatch = nameParts.every((part) => organizerNameLower.includes(part));
+        if (allPartsMatch) {
+          return true;
+        }
+      }
+    }
+
+    // Check attendees - person must be an actual attendee
+    if (attendees && Array.isArray(attendees)) {
+      const hasAttendee = attendees.some((attendee) => {
+        const attendeeName = attendee.emailAddress?.name?.toLowerCase();
+        const attendeeEmail = attendee.emailAddress?.address?.toLowerCase();
+
+        // Exact email match (if we had email, but we only have name)
+        // Exact name match
+        if (attendeeName === personLower) {
+          return true;
+        }
+
+        // Check if all name parts are present in attendee name
+        if (attendeeName && nameParts.length > 0) {
+          const allPartsMatch = nameParts.every((part) => attendeeName.includes(part));
+          if (allPartsMatch) {
+            return true;
+          }
+        }
+
+        return false;
+      });
+
+      if (hasAttendee) {
+        return true;
+      }
+    }
+
+    return false;
   });
 
   // Use DataAggregator for consistent deduplication and sorting

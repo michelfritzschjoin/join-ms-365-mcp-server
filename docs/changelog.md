@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **discover-topic:** add keyfindings extraction and improve llm guidance ([ce77da8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/ce77da8c452509fb8ed2a960046ec6607047d67d))
+- **discover-topic:** add keyfindings extraction and improve llm guidance ([ce77da8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/ce77da8c452509fb8ed2a960046ec6607047d67d))
 
 ## [1.17.3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.2...v1.17.3) (2026-01-30)
 
