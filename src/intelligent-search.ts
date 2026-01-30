@@ -8,6 +8,7 @@ import EntityExtractor, { type ExtractedInfo } from './entity-extractor.js';
 import SynonymExpander from './synonym-expander.js';
 import QueryRefiner from './query-refiner.js';
 import LearningSystem, { type SearchResult } from './learning-system.js';
+import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
 
 export interface SearchContext {
   entityTypes?: string[];
@@ -113,19 +114,13 @@ export class SearchFirstStrategy {
 
       // If no specific types recommended, use comprehensive default set
       if (!recommendedEntityTypes || recommendedEntityTypes.length === 0) {
-        recommendedEntityTypes = [
-          'message',
-          'event',
-          'driveItem',
-          'site',
-          'list',
-          'listItem',
-          'chatMessage',
-          'acronym',
-          'bookmark',
-        ];
+        // Use compatible file types as default (most versatile)
+        recommendedEntityTypes = ['driveItem', 'site', 'list', 'listItem'];
         logger.debug('Using comprehensive default entity types for search');
       }
+
+      // Validate entity types to ensure compatibility
+      recommendedEntityTypes = validateEntityTypeCombinations(recommendedEntityTypes);
 
       // Build search request body
       const now = new Date();

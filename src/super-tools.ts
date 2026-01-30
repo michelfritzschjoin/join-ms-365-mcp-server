@@ -39,6 +39,7 @@ import { getUQAS } from './uqas/integration/index.js';
 import DownloadLinkGenerator from './download-link-generator.js';
 import type { AppSecrets } from './secrets.js';
 import { getRequestTokens } from './request-context.js';
+import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
@@ -2855,31 +2856,26 @@ async function handleSearch(
   const hasPersonQuery = personName !== null;
 
   // Intelligent entity type detection based on query and NLP
-  let entityTypes = input.entityTypes;
+  let entityTypes: Array<(typeof searchEntityTypes)[number]> = input.entityTypes || [];
 
-  if (!entityTypes || entityTypes.length === 0) {
-    // Default: include all common types including chatMessage
-    // Use comprehensive set for token-based search
-    const defaultComprehensiveTypes = [
-      'message',
-      'event',
-      'driveItem',
-      'site',
-      'list',
-      'listItem',
-      'chatMessage',
-      'acronym',
-      'bookmark',
-    ];
+  if (entityTypes.length === 0) {
+    // Default: Use compatible entity types
+    // File types are most versatile and commonly used, so prioritize them
+    // Note: Message types (message, chatMessage) and file types cannot be combined
+    // We'll use file types as default, but allow NLP hints to switch to message types
+    const defaultComprehensiveTypes = ['driveItem', 'site', 'list', 'listItem'];
 
     // Get available entity types based on token
     try {
-      entityTypes = await getAvailableEntityTypes(graphClient, defaultComprehensiveTypes);
+      const availableTypes = await getAvailableEntityTypes(graphClient, defaultComprehensiveTypes);
+      // Validate the returned types to ensure compatibility
+      const validatedTypes = validateEntityTypeCombinations(availableTypes);
+      entityTypes = validatedTypes as Array<(typeof searchEntityTypes)[number]>;
       thinking.push(`🔍 Using comprehensive entity types: ${entityTypes.join(', ')}`);
     } catch (error) {
-      // Fallback to standard set
-      entityTypes = ['message', 'event', 'driveItem', 'site', 'chatMessage'];
-      thinking.push('⚠️ Could not determine available entity types, using standard set');
+      // Fallback to safe compatible set (file types only)
+      entityTypes = ['driveItem', 'site', 'listItem'] as Array<(typeof searchEntityTypes)[number]>;
+      thinking.push('⚠️ Could not determine available entity types, using safe compatible set');
     }
 
     // Use NLP service hint to narrow down
@@ -2899,10 +2895,8 @@ async function handleSearch(
     }
   }
 
-  // Validate entity types - Microsoft Graph API has restrictions on combinations
-  // Rule: 'person' cannot be combined with other entity types
-  // However, we should be smart: if the query doesn't look like a person name,
-  // remove 'person' instead of removing all other types
+  // Validate entity types - Microsoft Graph API has strict restrictions on combinations
+  // Check for person queries first (special handling)
   const hasPerson = entityTypes.includes('person');
   const hasMultipleTypes = entityTypes.length > 1;
 
@@ -2929,10 +2923,25 @@ async function handleSearch(
     }
   }
 
+  // Validate entity type combinations according to Microsoft Graph API rules
+  const originalEntityTypes = [...entityTypes];
+  const validatedTypes = validateEntityTypeCombinations(entityTypes);
+  entityTypes = validatedTypes as Array<(typeof searchEntityTypes)[number]>;
+
+  if (
+    entityTypes.length !== originalEntityTypes.length ||
+    entityTypes.some((t, i) => t !== originalEntityTypes[i])
+  ) {
+    thinking.push(
+      `⚠️ Filtered incompatible entity types: ${originalEntityTypes.join(', ')} -> ${entityTypes.join(', ')}`
+    );
+  }
+
   // Rule: Ensure at least one valid entity type
   if (entityTypes.length === 0) {
-    entityTypes = ['message', 'event', 'driveItem', 'site'];
-    thinking.push('⚠️ No valid entity types - using default set');
+    // Use a safe default combination (file types are most versatile)
+    entityTypes = ['driveItem', 'site', 'listItem'] as Array<(typeof searchEntityTypes)[number]>;
+    thinking.push('⚠️ No valid entity types after validation - using safe default set');
   }
 
   thinking.push(`Searching in: ${entityTypes.join(', ')}`);
