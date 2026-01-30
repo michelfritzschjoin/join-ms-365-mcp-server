@@ -4560,20 +4560,35 @@ async function handleDiscoverCompany(
 
   thinking.push(`📊 Customer 360 discovery for: ${companyName}`);
 
-  // Use Microsoft Search API for comprehensive search (like handleDiscoverTopic)
-  // Include listItem to search SharePoint list items and pages
-  const searchRequest = {
-    requests: [
-      {
-        entityTypes: ['message', 'event', 'driveItem', 'site', 'person', 'listItem'],
-        query: {
-          queryString: companyName,
-        },
-        from: 0,
-        size: limit * 2, // Get more results to filter
-      },
-    ],
-  };
+  // Microsoft Search API has strict rules about entity type combinations
+  // Split into compatible groups to avoid "Invalid entity type combination" errors
+  // Group 1: File types (can combine with each other)
+  const fileTypes = validateEntityTypeCombinations(['driveItem', 'site', 'listItem']);
+  // Group 2: Message types (can combine with each other)
+  const messageTypes = validateEntityTypeCombinations(['message']);
+  // Group 3: Standalone types (must be searched separately)
+  // Note: 'event' and 'person' cannot be combined with other types
+
+  // Build separate search requests for compatible groups
+  const searchRequests = [];
+
+  if (fileTypes.length > 0) {
+    searchRequests.push({
+      entityTypes: fileTypes,
+      query: { queryString: companyName },
+      from: 0,
+      size: limit * 2,
+    });
+  }
+
+  if (messageTypes.length > 0) {
+    searchRequests.push({
+      entityTypes: messageTypes,
+      query: { queryString: companyName },
+      from: 0,
+      size: limit * 2,
+    });
+  }
 
   // Generate search variants for better coverage (e.g., "DZBANK", "DZ Bank", "DZ-Bank")
   const searchVariants = [
@@ -4583,123 +4598,23 @@ async function handleDiscoverCompany(
   ].filter((v, i, arr) => arr.indexOf(v) === i); // Remove duplicates
 
   thinking.push(`🔍 Using search variants: ${searchVariants.join(', ')}`);
-
-  // Try multiple search approaches for better coverage
-  // 1. Microsoft Search API (unified search)
-  // 2. Direct API searches with variants
-  // 3. Multiple field-specific searches
-
-  // Parallel API calls for comprehensive company discovery
-  const searchPromises = [
-    // Microsoft Search API (unified search) - primary method
-    callGraph(graphClient, 'POST', '/search/query', undefined, searchRequest),
-  ];
-
-  // Add direct searches for each variant
-  for (const variant of searchVariants) {
-    // Email searches - try multiple approaches
-    searchPromises.push(
-      // Simple text search (searches all email fields)
-      callGraph(graphClient, 'GET', '/me/messages', {
-        $search: formatSearchQuery(variant, 'displayName', 'email'),
-        $top: String(limit),
-      }).catch((err) => {
-        logger.debug(`Email search variant "${variant}" failed: ${err.message}`);
-        return JSON.stringify({ value: [] });
-      }),
-      // Also try searching in specific fields
-      callGraph(graphClient, 'GET', '/me/messages', {
-        $search: `"from:${variant}"`,
-        $top: String(Math.floor(limit / 2)),
-      }).catch(() => JSON.stringify({ value: [] })),
-      callGraph(graphClient, 'GET', '/me/messages', {
-        $search: `"subject:${variant}"`,
-        $top: String(Math.floor(limit / 2)),
-      }).catch(() => JSON.stringify({ value: [] }))
-    );
-
-    // Event searches
-    searchPromises.push(
-      callGraph(graphClient, 'GET', '/me/events', {
-        $search: formatSearchQuery(variant, 'displayName', 'event'),
-        $top: String(limit),
-      }).catch((err) => {
-        logger.debug(`Event search variant "${variant}" failed: ${err.message}`);
-        return JSON.stringify({ value: [] });
-      })
-    );
-  }
-
-  // Single searches for files, contacts, sites (don't need variants)
-  searchPromises.push(
-    // Files related to this company
-    callGraph(
-      graphClient,
-      'GET',
-      `/me/drive/root/search(q='${encodeURIComponent(companyName)}')`
-    ).catch((err) => {
-      logger.warn(`File search failed for "${companyName}": ${err.message}`);
-      return JSON.stringify({ value: [] });
-    }),
-    // Contacts from this company
-    callGraph(graphClient, 'GET', '/me/contacts', {
-      $search: formatSearchQuery(companyName, 'companyName', 'contact'),
-      $top: '50',
-    }).catch((err) => {
-      logger.warn(`Contact search failed for "${companyName}": ${err.message}`);
-      return JSON.stringify({ value: [] });
-    }),
-    // SharePoint sites
-    callGraph(graphClient, 'GET', '/sites', {
-      search: companyName,
-      $top: '10',
-    }).catch((err) => {
-      logger.warn(`Site search failed for "${companyName}": ${err.message}`);
-      return JSON.stringify({ value: [] });
-    })
+  thinking.push(
+    `📋 Split entity types into compatible groups: fileTypes=[${fileTypes.join(', ')}], messageTypes=[${messageTypes.join(', ')}]`
   );
 
-  const allResults = await Promise.allSettled(searchPromises);
-  const [searchResult, ...otherResults] = allResults;
+  // Try multiple search approaches for better coverage
+  // 1. Microsoft Search API (unified search) - split by compatible groups
+  // 2. Direct API searches with variants (throttled)
+  // 3. Event searches (fetch and filter client-side, no $search support)
 
-  // Calculate indices: for each variant we have 3 email searches + 1 event search = 4 searches per variant
-  const searchesPerVariant = 4; // 3 email + 1 event
-  const totalVariantSearches = searchVariants.length * searchesPerVariant;
-
-  // Extract results by type
-  const emailsResults: PromiseSettledResult<string>[] = [];
-  const eventsResults: PromiseSettledResult<string>[] = [];
-
-  // Extract email and event results from variants
-  for (let i = 0; i < searchVariants.length; i++) {
-    const baseIndex = i * searchesPerVariant;
-    // 3 email searches per variant
-    emailsResults.push(
-      otherResults[baseIndex],
-      otherResults[baseIndex + 1],
-      otherResults[baseIndex + 2]
-    );
-    // 1 event search per variant
-    eventsResults.push(otherResults[baseIndex + 3]);
-  }
-
-  // Files, contacts, sites are at the end
-  const filesResult = otherResults[totalVariantSearches];
-  const contactsResult = otherResults[totalVariantSearches + 1];
-  const sitesResult = otherResults[totalVariantSearches + 2];
-
-  // Process Microsoft Search API results
-  let searchItems: unknown[] = [];
-  let searchEmails: unknown[] = [];
-  let searchEvents: unknown[] = [];
-  let searchFiles: unknown[] = [];
-  let searchContacts: unknown[] = [];
-  let searchSites: unknown[] = [];
-  let searchListItems: unknown[] = [];
-
-  if (searchResult.status === 'fulfilled') {
+  // Execute Microsoft Search API first (if we have requests)
+  let searchApiResults: unknown[] = [];
+  if (searchRequests.length > 0) {
     try {
-      const parsed = JSON.parse(searchResult.value);
+      const searchApiResponse = await callGraph(graphClient, 'POST', '/search/query', undefined, {
+        requests: searchRequests,
+      });
+      const parsed = JSON.parse(searchApiResponse);
       if (parsed.value && Array.isArray(parsed.value)) {
         for (const response of parsed.value) {
           if (response.hitsContainers && Array.isArray(response.hitsContainers)) {
@@ -4707,22 +4622,7 @@ async function handleDiscoverCompany(
               if (container.hits) {
                 for (const hit of container.hits) {
                   if (hit.resource) {
-                    const resource = hit.resource as Record<string, unknown>;
-                    const odataType = resource['@odata.type'] as string | undefined;
-                    if (odataType?.includes('message')) {
-                      searchEmails.push(resource);
-                    } else if (odataType?.includes('event')) {
-                      searchEvents.push(resource);
-                    } else if (odataType?.includes('driveItem')) {
-                      searchFiles.push(resource);
-                    } else if (odataType?.includes('person')) {
-                      searchContacts.push(resource);
-                    } else if (odataType?.includes('site')) {
-                      searchSites.push(resource);
-                    } else if (odataType?.includes('listItem')) {
-                      searchListItems.push(resource);
-                    }
-                    searchItems.push(resource);
+                    searchApiResults.push(hit.resource);
                   }
                 }
               }
@@ -4731,10 +4631,155 @@ async function handleDiscoverCompany(
         }
       }
     } catch (err) {
-      logger.warn(`Failed to parse search results for "${companyName}": ${err}`);
+      logger.warn(`Microsoft Search API failed for "${companyName}": ${err}`);
     }
-  } else {
-    logger.warn(`Microsoft Search API failed for "${companyName}": ${searchResult.reason}`);
+  }
+
+  // Throttle direct searches to avoid rate limits
+  // Process variants sequentially with small delays instead of all at once
+  const emailResults: unknown[] = [];
+  const eventResults: unknown[] = [];
+
+  for (const variant of searchVariants) {
+    // Email searches - try multiple approaches with throttling
+    try {
+      const emailResponse1 = await callGraph(graphClient, 'GET', '/me/messages', {
+        $search: formatSearchQuery(variant, 'displayName', 'email'),
+        $top: String(limit),
+      });
+      const emails1 = JSON.parse(emailResponse1);
+      if (emails1.value) emailResults.push(...emails1.value);
+    } catch (err) {
+      logger.debug(`Email search variant "${variant}" failed: ${err}`);
+    }
+
+    // Small delay to avoid rate limits
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    try {
+      const emailResponse2 = await callGraph(graphClient, 'GET', '/me/messages', {
+        $search: `"from:${variant}"`,
+        $top: String(Math.floor(limit / 2)),
+      });
+      const emails2 = JSON.parse(emailResponse2);
+      if (emails2.value) emailResults.push(...emails2.value);
+    } catch (err) {
+      logger.debug(`Email from search variant "${variant}" failed: ${err}`);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    try {
+      const emailResponse3 = await callGraph(graphClient, 'GET', '/me/messages', {
+        $search: `"subject:${variant}"`,
+        $top: String(Math.floor(limit / 2)),
+      });
+      const emails3 = JSON.parse(emailResponse3);
+      if (emails3.value) emailResults.push(...emails3.value);
+    } catch (err) {
+      logger.debug(`Email subject search variant "${variant}" failed: ${err}`);
+    }
+
+    // Event searches - fetch events once and filter for all variants (more efficient)
+    // Only fetch once for the first variant, then reuse for others
+    if (variant === searchVariants[0]) {
+      try {
+        const eventsResponse = await callGraph(graphClient, 'GET', '/me/events', {
+          $top: String(limit * 3), // Get more to filter for all variants
+          $orderby: 'start/dateTime desc',
+          $select: 'subject,body,organizer,attendees,start,end,location',
+        });
+        const events = JSON.parse(eventsResponse);
+        if (events.value && Array.isArray(events.value)) {
+          // Filter events that contain any variant
+          const allVariantsLower = searchVariants.map((v) => v.toLowerCase());
+          const filtered = events.value.filter((event: Record<string, unknown>) => {
+            const subject = ((event.subject as string) || '').toLowerCase();
+            const bodyObj = event.body as Record<string, unknown> | undefined;
+            const body = ((bodyObj?.content as string) || '').toLowerCase();
+            const locationObj = event.location as Record<string, unknown> | undefined;
+            const location = ((locationObj?.displayName as string) || '').toLowerCase();
+            return allVariantsLower.some(
+              (variantLower) =>
+                subject.includes(variantLower) ||
+                body.includes(variantLower) ||
+                location.includes(variantLower)
+            );
+          });
+          eventResults.push(...filtered.slice(0, limit));
+        }
+      } catch (err) {
+        logger.debug(`Event search failed: ${err}`);
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  // Single searches for files, contacts, sites (don't need variants)
+  let filesResults: unknown[] = [];
+  let contactsResults: unknown[] = [];
+  let sitesResults: unknown[] = [];
+
+  try {
+    const filesResponse = await callGraph(
+      graphClient,
+      'GET',
+      `/me/drive/root/search(q='${encodeURIComponent(companyName)}')`
+    );
+    const files = JSON.parse(filesResponse);
+    if (files.value) filesResults = files.value;
+  } catch (err) {
+    logger.warn(`File search failed for "${companyName}": ${err}`);
+  }
+
+  try {
+    const contactsResponse = await callGraph(graphClient, 'GET', '/me/contacts', {
+      $search: formatSearchQuery(companyName, 'companyName', 'contact'),
+      $top: '50',
+    });
+    const contacts = JSON.parse(contactsResponse);
+    if (contacts.value) contactsResults = contacts.value;
+  } catch (err) {
+    logger.warn(`Contact search failed for "${companyName}": ${err}`);
+  }
+
+  try {
+    const sitesResponse = await callGraph(graphClient, 'GET', '/sites', {
+      search: companyName,
+      $top: '10',
+    });
+    const sites = JSON.parse(sitesResponse);
+    if (sites.value) sitesResults = sites.value;
+  } catch (err) {
+    logger.warn(`Site search failed for "${companyName}": ${err}`);
+  }
+
+  // Process Microsoft Search API results
+  const searchEmails: unknown[] = [];
+  const searchEvents: unknown[] = [];
+  const searchFiles: unknown[] = [];
+  const searchContacts: unknown[] = [];
+  const searchSites: unknown[] = [];
+  const searchListItems: unknown[] = [];
+
+  // Categorize search API results
+  for (const resource of searchApiResults) {
+    const resourceObj = resource as Record<string, unknown>;
+    const odataType = resourceObj['@odata.type'] as string | undefined;
+    if (odataType?.includes('message')) {
+      searchEmails.push(resourceObj);
+    } else if (odataType?.includes('event')) {
+      searchEvents.push(resourceObj);
+    } else if (odataType?.includes('driveItem')) {
+      searchFiles.push(resourceObj);
+    } else if (odataType?.includes('person')) {
+      searchContacts.push(resourceObj);
+    } else if (odataType?.includes('site')) {
+      searchSites.push(resourceObj);
+    } else if (odataType?.includes('listItem')) {
+      searchListItems.push(resourceObj);
+    }
   }
 
   // Search SharePoint list items for found sites
@@ -4836,66 +4881,9 @@ async function handleDiscoverCompany(
   const filesWithContent = documentContents.filter((dc) => dc.content !== null);
   thinking.push(`✅ Extracted content from ${filesWithContent.length} documents`);
 
-  // Process direct API results (combine all variants)
-  const allEmailsFromDirect: unknown[] = [];
-  const allEventsFromDirect: unknown[] = [];
-
-  // Combine all email results from variants
-  for (const emailResult of emailsResults) {
-    if (emailResult.status === 'fulfilled') {
-      try {
-        const parsed = JSON.parse(emailResult.value);
-        if (parsed.value && Array.isArray(parsed.value)) {
-          allEmailsFromDirect.push(...parsed.value);
-        }
-      } catch (err) {
-        logger.debug(`Failed to parse email variant result: ${err}`);
-      }
-    }
-  }
-
-  // Combine all event results from variants
-  for (const eventResult of eventsResults) {
-    if (eventResult.status === 'fulfilled') {
-      try {
-        const parsed = JSON.parse(eventResult.value);
-        if (parsed.value && Array.isArray(parsed.value)) {
-          allEventsFromDirect.push(...parsed.value);
-        }
-      } catch (err) {
-        logger.debug(`Failed to parse event variant result: ${err}`);
-      }
-    }
-  }
-
-  // Process files, contacts, sites
-  let files: { value: unknown[] } = { value: [] };
-  let contacts: { value: unknown[] } = { value: [] };
-  let sites: { value: unknown[] } = { value: [] };
-
-  if (filesResult && filesResult.status === 'fulfilled') {
-    try {
-      files = JSON.parse(filesResult.value);
-    } catch (err) {
-      logger.warn(`Failed to parse file results: ${err}`);
-    }
-  }
-
-  if (contactsResult && contactsResult.status === 'fulfilled') {
-    try {
-      contacts = JSON.parse(contactsResult.value);
-    } catch (err) {
-      logger.warn(`Failed to parse contact results: ${err}`);
-    }
-  }
-
-  if (sitesResult && sitesResult.status === 'fulfilled') {
-    try {
-      sites = JSON.parse(sitesResult.value);
-    } catch (err) {
-      logger.warn(`Failed to parse site results: ${err}`);
-    }
-  }
+  // Combine all results (search API + direct searches)
+  const allEmailsFromDirect = emailResults;
+  const allEventsFromDirect = eventResults;
 
   // Combine search API results with direct API results (deduplicate by ID)
   const emailMap = new Map<string, unknown>();
@@ -4927,9 +4915,9 @@ async function handleDiscoverCompany(
 
   const allEmails = Array.from(emailMap.values());
   const allEvents = Array.from(eventMap.values());
-  const allFiles = [...searchFiles, ...(files.value || [])];
-  const allContacts = [...searchContacts, ...(contacts.value || [])];
-  const allSites = [...searchSites, ...(sites.value || [])];
+  const allFiles = [...searchFiles, ...filesResults];
+  const allContacts = [...searchContacts, ...contactsResults];
+  const allSites = [...searchSites, ...sitesResults];
   const allListItems = searchListItems; // SharePoint list items
 
   // Store raw counts BEFORE aggregation for accurate statistics
@@ -4998,7 +4986,7 @@ async function handleDiscoverCompany(
 
   // Log search statistics for debugging
   thinking.push(`🔍 Search statistics:`);
-  thinking.push(`   Microsoft Search API: ${searchItems.length} items found`);
+  thinking.push(`   Microsoft Search API: ${searchApiResults.length} items found`);
   thinking.push(
     `   Direct API calls: ${rawCounts.emails} emails, ${rawCounts.events} events, ${rawCounts.files} files, ${rawCounts.contacts} contacts, ${rawCounts.sites} sites`
   );

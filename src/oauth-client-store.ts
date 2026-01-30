@@ -134,7 +134,12 @@ export class OAuthClientStore {
   }
 
   /**
-   * Validate redirect URIs according to RFC 7591
+   * Validate redirect URIs according to RFC 7591 and RFC 8252 (OAuth 2.0 for Native Apps)
+   *
+   * Allows:
+   * - HTTPS URLs (required in production unless localhost)
+   * - HTTP URLs for localhost/127.0.0.1 (development)
+   * - Custom URI schemes (e.g., cursor://, vscode://) for desktop OAuth flows
    */
   private validateRedirectUris(redirectUris: string[]): { valid: boolean; error?: string } {
     if (!redirectUris || redirectUris.length === 0) {
@@ -145,6 +150,18 @@ export class OAuthClientStore {
       try {
         const parsed = new URL(uri);
 
+        // Allow custom URI schemes (e.g., cursor://, vscode://) for desktop OAuth flows
+        // These are valid per RFC 8252 (OAuth 2.0 for Native Apps)
+        const isCustomScheme = parsed.protocol !== 'http:' && parsed.protocol !== 'https:';
+        if (isCustomScheme) {
+          // Custom schemes are allowed, but disallow fragments
+          if (parsed.hash) {
+            return { valid: false, error: `redirect_uri must not contain a fragment: ${uri}` };
+          }
+          continue; // Valid custom scheme URI
+        }
+
+        // For HTTP/HTTPS URLs, apply standard validation
         // Allow localhost and 127.0.0.1 for development
         const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1';
 
