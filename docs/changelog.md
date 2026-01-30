@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.2](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.1...v1.17.2) (2026-01-30)
+
+### Bug Fixes
+
+* **discover-company:** implement balanced aggregation and keyfindings extraction ([617a762](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/617a76289136a3a0a5682b370388fb4e37e80474))
+
 ## [1.17.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.0...v1.17.1) (2026-01-30)
 
 ### Bug Fixes
