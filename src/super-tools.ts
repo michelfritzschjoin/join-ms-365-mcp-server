@@ -3901,6 +3901,13 @@ async function handleAssistant(
       // Route to best discovery action based on NLP analysis
       const primaryEntity = decomposed.entities[0];
 
+      // Check for company/bank patterns (e.g., "DZ Bank", "Bank", "AG", "GmbH", etc.)
+      const companyPatterns = /\b(bank|ag|gmbh|inc|corp|company|ltd|llc|gmbh|kg)\b/i;
+      const isLikelyCompany =
+        primaryEntity?.type === 'organization' ||
+        companyPatterns.test(queryText) ||
+        queryText.split(/\s+/).length <= 3; // Short queries are often company names
+
       if (primaryEntity?.type === 'person' || decomposed.intent.type === 'who') {
         thinking.push(`🎯 Routing to: discover-person (detected person entity)`);
         return handleDiscoverPerson(
@@ -3909,8 +3916,10 @@ async function handleAssistant(
           decomposed,
           thinking
         );
-      } else if (primaryEntity?.type === 'organization') {
-        thinking.push(`🎯 Routing to: discover-company (detected organization entity)`);
+      } else if (primaryEntity?.type === 'organization' || isLikelyCompany) {
+        thinking.push(
+          `🎯 Routing to: discover-company (detected organization entity or company pattern)`
+        );
         return handleDiscoverCompany(
           { ...input, target: primaryEntity?.value || queryText },
           graphClient,
@@ -4339,6 +4348,105 @@ async function handleDiscoverProject(
 }
 
 /**
+ * Extract key findings from topic discovery results
+ */
+function extractTopicKeyFindings(
+  topicName: string,
+  categorizedResults: Record<string, unknown[]>
+): {
+  importantFiles?: Array<{ name?: string; webUrl?: string; lastModified?: string }>;
+  recentTopics?: string[];
+  keyContacts?: Array<{ name?: string; email?: string }>;
+  sites?: Array<{ name?: string; webUrl?: string }>;
+} {
+  const keyFindings: {
+    importantFiles?: Array<{ name?: string; webUrl?: string; lastModified?: string }>;
+    recentTopics?: string[];
+    keyContacts?: Array<{ name?: string; email?: string }>;
+    sites?: Array<{ name?: string; webUrl?: string }>;
+  } = {};
+
+  // Extract important files
+  const importantFiles: Array<{ name?: string; webUrl?: string; lastModified?: string }> = [];
+  for (const file of categorizedResults.files.slice(0, 10)) {
+    const fileObj = file as Record<string, unknown>;
+    const name = fileObj.name as string | undefined;
+    const webUrl = fileObj.webUrl as string | undefined;
+    const lastModified = fileObj.lastModifiedDateTime as string | undefined;
+
+    if (name) {
+      importantFiles.push({
+        name,
+        webUrl,
+        lastModified,
+      });
+    }
+  }
+  if (importantFiles.length > 0) {
+    keyFindings.importantFiles = importantFiles;
+  }
+
+  // Extract recent topics from email subjects
+  const topicsSet = new Set<string>();
+  for (const email of categorizedResults.emails.slice(0, 15)) {
+    const emailObj = email as Record<string, unknown>;
+    const subject = emailObj.subject as string | undefined;
+    if (subject && subject.length > 0) {
+      // Remove common prefixes
+      const cleanSubject = subject.replace(/^(RE:|AW:|FWD:|FW:)\s*/i, '').trim();
+      if (cleanSubject.length > 5 && cleanSubject.length < 100) {
+        topicsSet.add(cleanSubject);
+      }
+    }
+  }
+  if (topicsSet.size > 0) {
+    keyFindings.recentTopics = Array.from(topicsSet).slice(0, 10);
+  }
+
+  // Extract key contacts from emails
+  const contactsMap = new Map<string, { name?: string; email?: string }>();
+  for (const email of categorizedResults.emails.slice(0, 20)) {
+    const emailObj = email as Record<string, unknown>;
+    const from = emailObj.from as Record<string, unknown> | undefined;
+
+    if (from) {
+      const emailAddress = from.emailAddress as Record<string, unknown> | undefined;
+      const email = emailAddress?.address as string | undefined;
+      const name = emailAddress?.name as string | undefined;
+      if (email && !contactsMap.has(email)) {
+        contactsMap.set(email, {
+          name: name || email.split('@')[0],
+          email,
+        });
+      }
+    }
+  }
+  if (contactsMap.size > 0) {
+    keyFindings.keyContacts = Array.from(contactsMap.values()).slice(0, 10);
+  }
+
+  // Extract sites
+  const siteFindings: Array<{ name?: string; webUrl?: string }> = [];
+  for (const site of categorizedResults.sites) {
+    const siteObj = site as Record<string, unknown>;
+    const name = siteObj.displayName as string | undefined;
+    const webUrl = siteObj.webUrl as string | undefined;
+
+    if (name || webUrl) {
+      siteFindings.push({
+        name: name || webUrl,
+        webUrl,
+      });
+    }
+  }
+  if (siteFindings.length > 0) {
+    keyFindings.sites = siteFindings;
+  }
+
+  return Object.keys(keyFindings).length > 0 ? keyFindings : {};
+}
+
+/**
  * Discover comprehensive information about a topic
  */
 async function handleDiscoverTopic(
@@ -4411,6 +4519,36 @@ async function handleDiscoverTopic(
       searchResources.push(hit.resource);
     }
   }
+
+  // Store raw counts BEFORE aggregation for accurate statistics
+  const searchEmails = searchResources.filter((r: unknown) => {
+    const res = r as Record<string, unknown>;
+    return (res['@odata.type'] as string)?.includes('message');
+  });
+  const searchFiles = searchResources.filter((r: unknown) => {
+    const res = r as Record<string, unknown>;
+    return (res['@odata.type'] as string)?.includes('driveItem');
+  });
+  const searchMeetings = searchResources.filter((r: unknown) => {
+    const res = r as Record<string, unknown>;
+    return (res['@odata.type'] as string)?.includes('event');
+  });
+  const searchChats = searchResources.filter((r: unknown) => {
+    const res = r as Record<string, unknown>;
+    return (res['@odata.type'] as string)?.includes('chatMessage');
+  });
+  const searchSites = searchResources.filter((r: unknown) => {
+    const res = r as Record<string, unknown>;
+    return (res['@odata.type'] as string)?.includes('site');
+  });
+
+  const rawCounts = {
+    emails: searchEmails.length + (events.value?.length || 0), // Include calendar events that might be emails
+    files: searchFiles.length + (files.value?.length || 0),
+    meetings: searchMeetings.length + (events.value?.length || 0),
+    chats: searchChats.length,
+    sites: searchSites.length,
+  };
 
   // Use DataAggregator for consistent deduplication and sorting
   const aggregated = dataAggregator.aggregate(
@@ -4508,7 +4646,8 @@ async function handleDiscoverTopic(
       ],
     },
     summary: {
-      totalItems: aggregated.uniqueItems,
+      totalItems:
+        rawCounts.emails + rawCounts.files + rawCounts.meetings + rawCounts.chats + rawCounts.sites,
       sources: aggregated.sources || [],
       timeRange: `Last ${days} days`,
     },
@@ -4520,24 +4659,30 @@ async function handleDiscoverTopic(
       sites: categorizedResults.sites.slice(0, limit),
     },
     insights: {
-      recentActivity: `Found ${aggregated.uniqueItems} unique items across Microsoft 365 (${totalHits} total hits)`,
+      recentActivity: `Found ${rawCounts.emails} emails, ${rawCounts.files} files, ${rawCounts.meetings} meetings, ${rawCounts.chats} chats, ${rawCounts.sites} sites related to ${topicName}`,
       recommendations: [
-        `📧 ${categorizedResults.emails.length} emails found`,
-        `📁 ${categorizedResults.files.length} files found`,
-        `📅 ${categorizedResults.meetings.length} calendar items found`,
-        `💬 ${categorizedResults.chats.length} chat messages found`,
-        `🌐 ${categorizedResults.sites.length} sites found`,
+        `📧 ${rawCounts.emails} emails found`,
+        `📁 ${rawCounts.files} files found`,
+        `📅 ${rawCounts.meetings} calendar items found`,
+        `💬 ${rawCounts.chats} chat messages found`,
+        `🌐 ${rawCounts.sites} sites found`,
       ],
+      dataSummary: `IMPORTANT: Found ${rawCounts.emails} emails, ${rawCounts.files} files, ${rawCounts.meetings} meetings, ${rawCounts.chats} chats, and ${rawCounts.sites} sites related to "${topicName}". Use the data in 'results' and 'keyFindings' sections to answer questions. Do NOT say you found nothing - use the provided data.`,
     },
+    keyFindings: extractTopicKeyFindings(topicName, categorizedResults),
   };
 
   thinking.push(`✅ Topic discovery complete:`);
   thinking.push(`   📊 Total hits: ${totalHits}, Unique items: ${aggregated.uniqueItems}`);
-  thinking.push(`   📧 Emails: ${categorizedResults.emails.length}`);
-  thinking.push(`   📁 Files: ${categorizedResults.files.length}`);
-  thinking.push(`   📅 Meetings: ${categorizedResults.meetings.length}`);
-  thinking.push(`   💬 Chats: ${categorizedResults.chats.length}`);
-  thinking.push(`   🌐 Sites: ${categorizedResults.sites.length}`);
+  thinking.push(
+    `   📧 Emails: ${rawCounts.emails} (${categorizedResults.emails.length} in results)`
+  );
+  thinking.push(`   📁 Files: ${rawCounts.files} (${categorizedResults.files.length} in results)`);
+  thinking.push(
+    `   📅 Meetings: ${rawCounts.meetings} (${categorizedResults.meetings.length} in results)`
+  );
+  thinking.push(`   💬 Chats: ${rawCounts.chats} (${categorizedResults.chats.length} in results)`);
+  thinking.push(`   🌐 Sites: ${rawCounts.sites} (${categorizedResults.sites.length} in results)`);
 
   return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
 }
