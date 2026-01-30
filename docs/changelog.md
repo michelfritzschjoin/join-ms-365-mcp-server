@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **search:** add sources/links to documents and comprehensive search across all m365 products ([5777844](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/57778440ffd88f788cbd5d4aaf3c22604e3329d8))
+- **search:** add sources/links to documents and comprehensive search across all m365 products ([5777844](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/57778440ffd88f788cbd5d4aaf3c22604e3329d8))
 
 ## [1.15.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.14.1...v1.15.0) (2026-01-29)
 

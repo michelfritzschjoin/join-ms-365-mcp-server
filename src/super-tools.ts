@@ -58,11 +58,18 @@ const uqas = getUQAS();
  * @returns Formatted search query in property:value format, wrapped in double quotes
  */
 function formatSearchQuery(
-  searchValue: string,
+  searchValue: string | undefined | null,
   defaultProperty = 'displayName',
   searchType: 'email' | 'event' | 'contact' | 'general' = 'general'
 ): string {
+  // Handle null, undefined, or non-string values
   if (!searchValue) return '';
+  if (typeof searchValue !== 'string') {
+    // Convert to string if possible, otherwise return empty
+    const stringValue = String(searchValue);
+    if (stringValue === 'null' || stringValue === 'undefined') return '';
+    searchValue = stringValue;
+  }
 
   // Check if search already contains a property prefix (e.g., "displayName:John")
   const propertyValuePattern = /^[a-zA-Z]+:/i;
@@ -1019,8 +1026,8 @@ function optimizeQueryWithNLP(query: string): {
 
   // Optimize query string (remove stopwords, expand synonyms)
   const normalized = nlpEnhancer.normalizeQuery(query);
-  if (normalized !== query) {
-    optimizedQuery = normalized;
+  if (normalized.normalized !== query) {
+    optimizedQuery = normalized.normalized;
   }
 
   const nlpAnalysis: NLPAnalysis = {
