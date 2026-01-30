@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.16.0...v1.17.0) (2026-01-30)
+
+### Features
+
+* enhance discover-company with sharepoint list items and document content extraction ([7abe6f0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/7abe6f006c2a09731991eb1624cc0f890f402cfe))
+
 ## [1.16.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.15.0...v1.16.0) (2026-01-29)
 
 ### Features
