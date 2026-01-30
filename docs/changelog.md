@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.0...v1.17.1) (2026-01-30)
+
+### Bug Fixes
+
+* handle non-string values in formatsearchquery and normalizequery result ([d8496fc](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d8496fca50c74911f0695b28d9b2618323470dd8))
+
 ## [1.17.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.16.0...v1.17.0) (2026-01-30)
 
 ### Features
