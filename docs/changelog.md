@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **uqas:** add bilingual support system (de/en) ([bdb4d55](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bdb4d5589ebd3b9a2615a230ef3ffde2be6260ff))
+- **uqas:** add bilingual support system (de/en) ([bdb4d55](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bdb4d5589ebd3b9a2615a230ef3ffde2be6260ff))
 
 ## [1.14.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.14.0...v1.14.1) (2026-01-28)
 

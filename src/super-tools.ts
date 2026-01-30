@@ -53,17 +53,43 @@ const uqas = getUQAS();
  * Format search query for Microsoft Graph API endpoints that require property:value format
  * @param searchValue - The search query string
  * @param defaultProperty - The default property to use if not already specified (e.g., 'displayName')
+ * @param searchType - Type of search: 'email', 'event', 'contact', or 'general'
  * @returns Formatted search query in property:value format, wrapped in double quotes
  */
-function formatSearchQuery(searchValue: string, defaultProperty = 'displayName'): string {
+function formatSearchQuery(
+  searchValue: string,
+  defaultProperty = 'displayName',
+  searchType: 'email' | 'event' | 'contact' | 'general' = 'general'
+): string {
   if (!searchValue) return '';
 
   // Check if search already contains a property prefix (e.g., "displayName:John")
   const propertyValuePattern = /^[a-zA-Z]+:/i;
   const trimmedValue = searchValue.trim();
-  const formattedSearch = propertyValuePattern.test(trimmedValue)
-    ? trimmedValue
-    : `${defaultProperty}:${trimmedValue}`;
+
+  // If already has property prefix, use as-is
+  if (propertyValuePattern.test(trimmedValue)) {
+    return `"${trimmedValue}"`;
+  }
+
+  // Format based on search type
+  // Note: Microsoft Graph $search searches across all fields by default when no property is specified
+  // For better results, we can use simple text search or specific properties
+  let formattedSearch: string;
+  if (searchType === 'email') {
+    // For emails, use simple text search (searches in subject, body, from, to, etc.)
+    // Or use specific property if needed: subject:, body:, from:, to:
+    formattedSearch = trimmedValue; // Simple text search searches all email fields
+  } else if (searchType === 'event') {
+    // For events, use simple text search (searches in subject, body, attendees, etc.)
+    formattedSearch = trimmedValue; // Simple text search searches all event fields
+  } else if (searchType === 'contact') {
+    // For contacts, search in companyName specifically
+    formattedSearch = `companyName:${trimmedValue}`;
+  } else {
+    // General search with default property
+    formattedSearch = `${defaultProperty}:${trimmedValue}`;
+  }
 
   return `"${formattedSearch}"`;
 }
@@ -3385,6 +3411,8 @@ interface DiscoveryResponse {
     tasks?: unknown[];
     contacts?: unknown[];
     sites?: unknown[];
+    listItems?: unknown[];
+    documentsWithContent?: Array<{ file: unknown; contentPreview: string | null }>;
   };
   insights?: {
     relationshipScore?: number;
@@ -4465,56 +4493,387 @@ async function handleDiscoverCompany(
 
   thinking.push(`📊 Customer 360 discovery for: ${companyName}`);
 
-  // Parallel API calls for comprehensive company discovery
-  const [emailsResult, eventsResult, filesResult, contactsResult, sitesResult] =
-    await Promise.allSettled([
-      // Emails with this company
-      callGraph(graphClient, 'GET', '/me/messages', {
-        $search: `"${companyName}"`,
-        $top: String(limit),
-        $orderby: 'receivedDateTime desc',
-      }),
-      // Meetings with company contacts
-      callGraph(graphClient, 'GET', '/me/events', {
-        $search: `"${companyName}"`,
-        $top: String(limit),
-      }),
-      // Files related to this company
-      callGraph(
-        graphClient,
-        'GET',
-        `/me/drive/root/search(q='${encodeURIComponent(companyName)}')`
-      ),
-      // Contacts from this company
-      callGraph(graphClient, 'GET', '/me/contacts', {
-        $search: `"${companyName}"`,
-        $top: '50',
-      }),
-      // SharePoint sites
-      callGraph(graphClient, 'GET', '/sites', {
-        search: companyName,
-        $top: '10',
-      }),
-    ]);
+  // Use Microsoft Search API for comprehensive search (like handleDiscoverTopic)
+  // Include listItem to search SharePoint list items and pages
+  const searchRequest = {
+    requests: [
+      {
+        entityTypes: ['message', 'event', 'driveItem', 'site', 'person', 'listItem'],
+        query: {
+          queryString: companyName,
+        },
+        from: 0,
+        size: limit * 2, // Get more results to filter
+      },
+    ],
+  };
 
-  // Process results
-  const emails =
-    emailsResult.status === 'fulfilled' ? JSON.parse(emailsResult.value) : { value: [] };
-  const events =
-    eventsResult.status === 'fulfilled' ? JSON.parse(eventsResult.value) : { value: [] };
-  const files = filesResult.status === 'fulfilled' ? JSON.parse(filesResult.value) : { value: [] };
-  const contacts =
-    contactsResult.status === 'fulfilled' ? JSON.parse(contactsResult.value) : { value: [] };
-  const sites = sitesResult.status === 'fulfilled' ? JSON.parse(sitesResult.value) : { value: [] };
+  // Generate search variants for better coverage (e.g., "DZBANK", "DZ Bank", "DZ-Bank")
+  const searchVariants = [
+    companyName,
+    companyName.replace(/([A-Z])([A-Z])/g, '$1 $2'), // "DZBANK" -> "DZ BANK"
+    companyName.replace(/([A-Z])([A-Z])/g, '$1-$2'), // "DZBANK" -> "DZ-BANK"
+  ].filter((v, i, arr) => arr.indexOf(v) === i); // Remove duplicates
+
+  thinking.push(`🔍 Using search variants: ${searchVariants.join(', ')}`);
+
+  // Try multiple search approaches for better coverage
+  // 1. Microsoft Search API (unified search)
+  // 2. Direct API searches with variants
+  // 3. Multiple field-specific searches
+
+  // Parallel API calls for comprehensive company discovery
+  const searchPromises = [
+    // Microsoft Search API (unified search) - primary method
+    callGraph(graphClient, 'POST', '/search/query', undefined, searchRequest),
+  ];
+
+  // Add direct searches for each variant
+  for (const variant of searchVariants) {
+    // Email searches - try multiple approaches
+    searchPromises.push(
+      // Simple text search (searches all email fields)
+      callGraph(graphClient, 'GET', '/me/messages', {
+        $search: formatSearchQuery(variant, 'displayName', 'email'),
+        $top: String(limit),
+      }).catch((err) => {
+        logger.debug(`Email search variant "${variant}" failed: ${err.message}`);
+        return JSON.stringify({ value: [] });
+      }),
+      // Also try searching in specific fields
+      callGraph(graphClient, 'GET', '/me/messages', {
+        $search: `"from:${variant}"`,
+        $top: String(Math.floor(limit / 2)),
+      }).catch(() => JSON.stringify({ value: [] })),
+      callGraph(graphClient, 'GET', '/me/messages', {
+        $search: `"subject:${variant}"`,
+        $top: String(Math.floor(limit / 2)),
+      }).catch(() => JSON.stringify({ value: [] }))
+    );
+
+    // Event searches
+    searchPromises.push(
+      callGraph(graphClient, 'GET', '/me/events', {
+        $search: formatSearchQuery(variant, 'displayName', 'event'),
+        $top: String(limit),
+      }).catch((err) => {
+        logger.debug(`Event search variant "${variant}" failed: ${err.message}`);
+        return JSON.stringify({ value: [] });
+      })
+    );
+  }
+
+  // Single searches for files, contacts, sites (don't need variants)
+  searchPromises.push(
+    // Files related to this company
+    callGraph(
+      graphClient,
+      'GET',
+      `/me/drive/root/search(q='${encodeURIComponent(companyName)}')`
+    ).catch((err) => {
+      logger.warn(`File search failed for "${companyName}": ${err.message}`);
+      return JSON.stringify({ value: [] });
+    }),
+    // Contacts from this company
+    callGraph(graphClient, 'GET', '/me/contacts', {
+      $search: formatSearchQuery(companyName, 'companyName', 'contact'),
+      $top: '50',
+    }).catch((err) => {
+      logger.warn(`Contact search failed for "${companyName}": ${err.message}`);
+      return JSON.stringify({ value: [] });
+    }),
+    // SharePoint sites
+    callGraph(graphClient, 'GET', '/sites', {
+      search: companyName,
+      $top: '10',
+    }).catch((err) => {
+      logger.warn(`Site search failed for "${companyName}": ${err.message}`);
+      return JSON.stringify({ value: [] });
+    })
+  );
+
+  const allResults = await Promise.allSettled(searchPromises);
+  const [searchResult, ...otherResults] = allResults;
+
+  // Calculate indices: for each variant we have 3 email searches + 1 event search = 4 searches per variant
+  const searchesPerVariant = 4; // 3 email + 1 event
+  const totalVariantSearches = searchVariants.length * searchesPerVariant;
+
+  // Extract results by type
+  const emailsResults: PromiseSettledResult<string>[] = [];
+  const eventsResults: PromiseSettledResult<string>[] = [];
+
+  // Extract email and event results from variants
+  for (let i = 0; i < searchVariants.length; i++) {
+    const baseIndex = i * searchesPerVariant;
+    // 3 email searches per variant
+    emailsResults.push(
+      otherResults[baseIndex],
+      otherResults[baseIndex + 1],
+      otherResults[baseIndex + 2]
+    );
+    // 1 event search per variant
+    eventsResults.push(otherResults[baseIndex + 3]);
+  }
+
+  // Files, contacts, sites are at the end
+  const filesResult = otherResults[totalVariantSearches];
+  const contactsResult = otherResults[totalVariantSearches + 1];
+  const sitesResult = otherResults[totalVariantSearches + 2];
+
+  // Process Microsoft Search API results
+  let searchItems: unknown[] = [];
+  let searchEmails: unknown[] = [];
+  let searchEvents: unknown[] = [];
+  let searchFiles: unknown[] = [];
+  let searchContacts: unknown[] = [];
+  let searchSites: unknown[] = [];
+  let searchListItems: unknown[] = [];
+
+  if (searchResult.status === 'fulfilled') {
+    try {
+      const parsed = JSON.parse(searchResult.value);
+      if (parsed.value && Array.isArray(parsed.value)) {
+        for (const response of parsed.value) {
+          if (response.hitsContainers && Array.isArray(response.hitsContainers)) {
+            for (const container of response.hitsContainers) {
+              if (container.hits) {
+                for (const hit of container.hits) {
+                  if (hit.resource) {
+                    const resource = hit.resource as Record<string, unknown>;
+                    const odataType = resource['@odata.type'] as string | undefined;
+                    if (odataType?.includes('message')) {
+                      searchEmails.push(resource);
+                    } else if (odataType?.includes('event')) {
+                      searchEvents.push(resource);
+                    } else if (odataType?.includes('driveItem')) {
+                      searchFiles.push(resource);
+                    } else if (odataType?.includes('person')) {
+                      searchContacts.push(resource);
+                    } else if (odataType?.includes('site')) {
+                      searchSites.push(resource);
+                    } else if (odataType?.includes('listItem')) {
+                      searchListItems.push(resource);
+                    }
+                    searchItems.push(resource);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn(`Failed to parse search results for "${companyName}": ${err}`);
+    }
+  } else {
+    logger.warn(`Microsoft Search API failed for "${companyName}": ${searchResult.reason}`);
+  }
+
+  // Search SharePoint list items for found sites
+  thinking.push(`🔍 Searching SharePoint list items for ${searchSites.length} sites`);
+  const siteListItemsPromises = searchSites.slice(0, 5).map(async (site) => {
+    // Limit to first 5 sites to avoid too many API calls
+    const siteObj = site as Record<string, unknown>;
+    const siteId = siteObj.id as string | undefined;
+    if (!siteId) return [];
+
+    try {
+      // Get lists for this site
+      const listsResponse = await callGraph(graphClient, 'GET', `/sites/${siteId}/lists`, {
+        $top: '10',
+      }).catch(() => JSON.stringify({ value: [] }));
+
+      const lists = JSON.parse(listsResponse);
+      if (!lists.value || !Array.isArray(lists.value)) return [];
+
+      // Search list items for each list
+      const listItemPromises = lists.value
+        .slice(0, 5)
+        .map(async (list: Record<string, unknown>) => {
+          const listId = list.id as string | undefined;
+          if (!listId) return [];
+
+          try {
+            const itemsResponse = await callGraph(
+              graphClient,
+              'GET',
+              `/sites/${siteId}/lists/${listId}/items`,
+              {
+                $search: formatSearchQuery(companyName, 'displayName', 'general'),
+                $top: '20',
+                $expand: 'fields',
+              }
+            ).catch(() => JSON.stringify({ value: [] }));
+
+            const items = JSON.parse(itemsResponse);
+            return items.value || [];
+          } catch (err) {
+            logger.debug(`Failed to get list items for list ${listId}: ${err}`);
+            return [];
+          }
+        });
+
+      const allItems = await Promise.all(listItemPromises);
+      return allItems.flat();
+    } catch (err) {
+      logger.debug(`Failed to get lists for site ${siteId}: ${err}`);
+      return [];
+    }
+  });
+
+  const allSiteListItems = await Promise.all(siteListItemsPromises);
+  const siteListItems = allSiteListItems.flat();
+  searchListItems.push(...siteListItems);
+  thinking.push(`📄 Found ${siteListItems.length} SharePoint list items`);
+
+  // Extract document content for found files (limited to avoid too many API calls)
+  thinking.push(`📄 Extracting content from ${Math.min(searchFiles.length, 10)} documents`);
+  const documentContentPromises = searchFiles.slice(0, 10).map(async (file) => {
+    // Limit to first 10 files
+    const fileObj = file as Record<string, unknown>;
+    const fileId = fileObj.id as string | undefined;
+    const driveId = fileObj.parentReference?.driveId as string | undefined;
+    const fileName = (fileObj.name as string) || 'unknown';
+    const fileType = fileName.split('.').pop()?.toLowerCase() || '';
+
+    // Only try to extract content from text-based documents
+    const textFileTypes = ['txt', 'md', 'csv', 'json', 'xml', 'html', 'htm'];
+    if (!fileId || !textFileTypes.includes(fileType)) {
+      return { file, content: null };
+    }
+
+    try {
+      const endpoint = driveId
+        ? `/drives/${driveId}/items/${fileId}/content`
+        : `/me/drive/items/${fileId}/content`;
+      const content = await callGraph(graphClient, 'GET', endpoint).catch(() => null);
+
+      if (content && typeof content === 'string') {
+        // Limit content length to avoid huge responses
+        const maxContentLength = 5000;
+        const truncatedContent =
+          content.length > maxContentLength
+            ? content.substring(0, maxContentLength) + '...'
+            : content;
+        return { file, content: truncatedContent };
+      }
+    } catch (err) {
+      logger.debug(`Failed to extract content from file ${fileName}: ${err}`);
+    }
+
+    return { file, content: null };
+  });
+
+  const documentContents = await Promise.all(documentContentPromises);
+  const filesWithContent = documentContents.filter((dc) => dc.content !== null);
+  thinking.push(`✅ Extracted content from ${filesWithContent.length} documents`);
+
+  // Process direct API results (combine all variants)
+  const allEmailsFromDirect: unknown[] = [];
+  const allEventsFromDirect: unknown[] = [];
+
+  // Combine all email results from variants
+  for (const emailResult of emailsResults) {
+    if (emailResult.status === 'fulfilled') {
+      try {
+        const parsed = JSON.parse(emailResult.value);
+        if (parsed.value && Array.isArray(parsed.value)) {
+          allEmailsFromDirect.push(...parsed.value);
+        }
+      } catch (err) {
+        logger.debug(`Failed to parse email variant result: ${err}`);
+      }
+    }
+  }
+
+  // Combine all event results from variants
+  for (const eventResult of eventsResults) {
+    if (eventResult.status === 'fulfilled') {
+      try {
+        const parsed = JSON.parse(eventResult.value);
+        if (parsed.value && Array.isArray(parsed.value)) {
+          allEventsFromDirect.push(...parsed.value);
+        }
+      } catch (err) {
+        logger.debug(`Failed to parse event variant result: ${err}`);
+      }
+    }
+  }
+
+  // Process files, contacts, sites
+  let files: { value: unknown[] } = { value: [] };
+  let contacts: { value: unknown[] } = { value: [] };
+  let sites: { value: unknown[] } = { value: [] };
+
+  if (filesResult && filesResult.status === 'fulfilled') {
+    try {
+      files = JSON.parse(filesResult.value);
+    } catch (err) {
+      logger.warn(`Failed to parse file results: ${err}`);
+    }
+  }
+
+  if (contactsResult && contactsResult.status === 'fulfilled') {
+    try {
+      contacts = JSON.parse(contactsResult.value);
+    } catch (err) {
+      logger.warn(`Failed to parse contact results: ${err}`);
+    }
+  }
+
+  if (sitesResult && sitesResult.status === 'fulfilled') {
+    try {
+      sites = JSON.parse(sitesResult.value);
+    } catch (err) {
+      logger.warn(`Failed to parse site results: ${err}`);
+    }
+  }
+
+  // Combine search API results with direct API results (deduplicate by ID)
+  const emailMap = new Map<string, unknown>();
+  const eventMap = new Map<string, unknown>();
+
+  // Add search API results
+  for (const email of searchEmails) {
+    const emailObj = email as Record<string, unknown>;
+    const id = emailObj.id as string;
+    if (id) emailMap.set(id, email);
+  }
+  for (const event of searchEvents) {
+    const eventObj = event as Record<string, unknown>;
+    const id = eventObj.id as string;
+    if (id) eventMap.set(id, event);
+  }
+
+  // Add direct API results (will overwrite duplicates)
+  for (const email of allEmailsFromDirect) {
+    const emailObj = email as Record<string, unknown>;
+    const id = emailObj.id as string;
+    if (id) emailMap.set(id, email);
+  }
+  for (const event of allEventsFromDirect) {
+    const eventObj = event as Record<string, unknown>;
+    const id = eventObj.id as string;
+    if (id) eventMap.set(id, event);
+  }
+
+  const allEmails = Array.from(emailMap.values());
+  const allEvents = Array.from(eventMap.values());
+  const allFiles = [...searchFiles, ...(files.value || [])];
+  const allContacts = [...searchContacts, ...(contacts.value || [])];
+  const allSites = [...searchSites, ...(sites.value || [])];
+  const allListItems = searchListItems; // SharePoint list items
 
   // Use DataAggregator for consistent deduplication and sorting
   const aggregated = dataAggregator.aggregate(
     [
-      { source: 'emails', items: emails.value || [] },
-      { source: 'calendar', items: events.value || [] },
-      { source: 'files', items: files.value || [] },
-      { source: 'contacts', items: contacts.value || [] },
-      { source: 'sites', items: sites.value || [] },
+      { source: 'emails', items: allEmails },
+      { source: 'calendar', items: allEvents },
+      { source: 'files', items: allFiles },
+      { source: 'contacts', items: allContacts },
+      { source: 'sites', items: allSites },
+      { source: 'listItems', items: allListItems },
     ],
     {
       sortBy: 'timestamp',
@@ -4524,6 +4883,13 @@ async function handleDiscoverCompany(
     }
   );
 
+  // Log search statistics for debugging
+  thinking.push(`🔍 Search statistics:`);
+  thinking.push(`   Microsoft Search API: ${searchItems.length} items found`);
+  thinking.push(
+    `   Direct API calls: ${allEmails.length} emails, ${allEvents.length} events, ${allFiles.length} files, ${allContacts.length} contacts, ${allSites.length} sites`
+  );
+
   // Categorize aggregated items by source
   const categorizedResults: Record<string, unknown[]> = {
     emails: [],
@@ -4531,7 +4897,18 @@ async function handleDiscoverCompany(
     files: [],
     contacts: [],
     sites: [],
+    listItems: [],
   };
+
+  // Create a map of files with content
+  const fileContentMap = new Map<string, string>();
+  for (const dc of documentContents) {
+    const fileObj = dc.file as Record<string, unknown>;
+    const fileId = fileObj.id as string | undefined;
+    if (fileId && dc.content) {
+      fileContentMap.set(fileId, dc.content);
+    }
+  }
 
   for (const item of aggregated.items) {
     const data = item.data as Record<string, unknown>;
@@ -4540,11 +4917,18 @@ async function handleDiscoverCompany(
     } else if (item.source === 'calendar') {
       categorizedResults.meetings.push(data);
     } else if (item.source === 'files') {
+      // Add content if available
+      const fileId = data.id as string | undefined;
+      if (fileId && fileContentMap.has(fileId)) {
+        (data as Record<string, unknown>).extractedContent = fileContentMap.get(fileId);
+      }
       categorizedResults.files.push(data);
     } else if (item.source === 'contacts') {
       categorizedResults.contacts.push(data);
     } else if (item.source === 'sites') {
       categorizedResults.sites.push(data);
+    } else if (item.source === 'listItems') {
+      categorizedResults.listItems.push(data);
     }
   }
 
@@ -4553,10 +4937,15 @@ async function handleDiscoverCompany(
   const meetingCount = categorizedResults.meetings.length;
   const contactCount = categorizedResults.contacts.length;
   const fileCount = categorizedResults.files.length;
+  const listItemCount = categorizedResults.listItems.length;
 
   const relationshipScore = Math.min(
     100,
-    Math.round(((emailCount * 2 + meetingCount * 5 + contactCount * 3 + fileCount * 1) / days) * 10)
+    Math.round(
+      ((emailCount * 2 + meetingCount * 5 + contactCount * 3 + fileCount * 1 + listItemCount * 2) /
+        days) *
+        10
+    )
   );
 
   // Build discovery response
@@ -4589,6 +4978,11 @@ async function handleDiscoverCompany(
       files: categorizedResults.files.slice(0, limit),
       contacts: categorizedResults.contacts,
       sites: categorizedResults.sites,
+      listItems: categorizedResults.listItems.slice(0, limit),
+      documentsWithContent: filesWithContent.map((dc) => ({
+        file: dc.file,
+        contentPreview: dc.content,
+      })),
     },
     insights: {
       relationshipScore,
@@ -4612,6 +5006,8 @@ async function handleDiscoverCompany(
   thinking.push(`   📁 Files: ${fileCount}`);
   thinking.push(`   👥 Contacts: ${contactCount}`);
   thinking.push(`   🌐 Sites: ${categorizedResults.sites.length}`);
+  thinking.push(`   📄 SharePoint List Items: ${listItemCount}`);
+  thinking.push(`   📄 Documents with extracted content: ${filesWithContent.length}`);
   thinking.push(`   💯 Relationship Score: ${relationshipScore}/100`);
 
   return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
