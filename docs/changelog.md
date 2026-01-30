@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.18.0...v1.19.0) (2026-01-30)
+
+### Features
+
+* implement intelligent query decomposition and user-specific pattern learning ([bbd1167](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bbd1167b729e3a5efecb4352555941926e6514ee))
+
 ## [1.18.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.5...v1.18.0) (2026-01-30)
 
 ### Features
