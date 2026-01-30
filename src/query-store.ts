@@ -81,24 +81,85 @@ export interface QueryFilter {
 }
 
 /**
+ * Query pattern for learning from user history
+ */
+export interface QueryPattern {
+  /** Normalized query pattern */
+  pattern: string;
+  /** Number of times this pattern was used */
+  count: number;
+  /** Success rate (0.0 - 1.0) */
+  successRate: number;
+  /** Optimal entity types learned from this pattern */
+  optimalEntityTypes: string[];
+  /** Average duration in milliseconds */
+  avgDuration: number;
+  /** Last used timestamp */
+  lastUsed: string;
+}
+
+/**
+ * Entity type recommendation based on user history
+ */
+export interface EntityTypeRecommendation {
+  /** Recommended entity types */
+  entityTypes: string[];
+  /** Confidence score (0.0 - 1.0) */
+  confidence: number;
+  /** Reason for recommendation */
+  reason: string;
+}
+
+/**
+ * Stored query pattern for persistent learning
+ */
+interface StoredQueryPattern {
+  /** Normalized query pattern */
+  pattern: string;
+  /** User ID hash for isolation */
+  userIdHash: string;
+  /** Entity types used */
+  entityTypes: string[];
+  /** Success count */
+  successCount: number;
+  /** Failure count */
+  failureCount: number;
+  /** Total duration in milliseconds */
+  totalDuration: number;
+  /** Query count */
+  queryCount: number;
+  /** Last used timestamp */
+  lastUsed: string;
+  /** First used timestamp */
+  firstUsed: string;
+}
+
+/**
  * Query Store class - manages persistent query storage
  */
 export class QueryStore {
   private dataDir: string;
   private queriesFile: string;
+  private patternsFile: string;
   private queries: StoredQuery[] = [];
+  private patterns: StoredQueryPattern[] = [];
   private maxQueries: number;
   private retentionDays: number;
   private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private patternSaveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly minPatternCount: number;
 
   constructor() {
     this.dataDir = process.env.QUERY_STORE_DIR || path.join(__dirname, '..', 'data');
     this.queriesFile = path.join(this.dataDir, 'queries.json');
+    this.patternsFile = path.join(this.dataDir, 'query-patterns.json');
     this.maxQueries = parseInt(process.env.QUERY_STORE_MAX_QUERIES || '100000', 10);
     this.retentionDays = parseInt(process.env.QUERY_STORE_RETENTION_DAYS || '90', 10);
+    this.minPatternCount = parseInt(process.env.MS365_MCP_PATTERN_MIN_COUNT || '3', 10);
 
     this.ensureDataDir();
     this.loadQueries();
+    this.loadPatterns();
     this.startRetentionCleanup();
   }
 
@@ -132,6 +193,25 @@ export class QueryStore {
   }
 
   /**
+   * Load query patterns from disk
+   */
+  private loadPatterns(): void {
+    try {
+      if (fs.existsSync(this.patternsFile)) {
+        const data = fs.readFileSync(this.patternsFile, 'utf-8');
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) {
+          this.patterns = parsed;
+          logger.info('Query patterns loaded', { count: this.patterns.length });
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to load query patterns:', error);
+      this.patterns = [];
+    }
+  }
+
+  /**
    * Save queries to disk (debounced)
    */
   private saveQueries(): void {
@@ -145,6 +225,24 @@ export class QueryStore {
         logger.debug('Query store saved', { count: this.queries.length });
       } catch (error) {
         logger.error('Failed to save query store:', error);
+      }
+    }, 1000); // Debounce for 1 second
+  }
+
+  /**
+   * Save query patterns to disk (debounced)
+   */
+  private savePatterns(): void {
+    if (this.patternSaveDebounceTimer) {
+      clearTimeout(this.patternSaveDebounceTimer);
+    }
+
+    this.patternSaveDebounceTimer = setTimeout(() => {
+      try {
+        fs.writeFileSync(this.patternsFile, JSON.stringify(this.patterns, null, 2), 'utf-8');
+        logger.debug('Query patterns saved', { count: this.patterns.length });
+      } catch (error) {
+        logger.error('Failed to save query patterns:', error);
       }
     }, 1000); // Debounce for 1 second
   }
@@ -439,6 +537,271 @@ export class QueryStore {
     this.queries = [];
     this.saveQueries();
     logger.warn('All queries cleared from store');
+  }
+
+  // =========================================================================
+  // QUERY PATTERN LEARNING (USER-SPECIFIC)
+  // =========================================================================
+
+  /**
+   * Normalize a query to a pattern for matching
+   * Removes specific values but keeps structure
+   */
+  public normalizeQueryPattern(query: string): string {
+    return (
+      query
+        .toLowerCase()
+        .trim()
+        // Normalize whitespace
+        .replace(/\s+/g, ' ')
+        // Remove specific dates/times but keep temporal markers
+        .replace(/\d{1,2}[./-]\d{1,2}[./-]\d{2,4}/g, '<DATE>')
+        .replace(/\d{1,2}:\d{2}(:\d{2})?/g, '<TIME>')
+        // Remove specific numbers but keep numeric placeholders
+        .replace(/\b\d{4,}\b/g, '<NUM>')
+        // Remove email addresses
+        .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/gi, '<EMAIL>')
+        // Normalize common stop words
+        .replace(/\b(der|die|das|ein|eine|für|von|mit|zu|and|the|a|for|with|to)\b/gi, '')
+        // Collapse multiple spaces
+        .replace(/\s+/g, ' ')
+        .trim()
+    );
+  }
+
+  /**
+   * Record a query pattern for learning (USER-SPECIFIC)
+   * @param userIdHash - Hashed user ID for isolation
+   * @param query - Original query string
+   * @param entityTypes - Entity types used in the search
+   * @param success - Whether the query was successful (found results)
+   * @param duration - Query duration in milliseconds
+   */
+  public recordQueryPattern(
+    userIdHash: string,
+    query: string,
+    entityTypes: string[],
+    success: boolean,
+    duration: number
+  ): void {
+    if (!userIdHash || !query || entityTypes.length === 0) {
+      return;
+    }
+
+    const pattern = this.normalizeQueryPattern(query);
+    if (!pattern) {
+      return;
+    }
+
+    const now = new Date().toISOString();
+
+    // Find existing pattern for this user
+    const existingIndex = this.patterns.findIndex(
+      (p) => p.userIdHash === userIdHash && p.pattern === pattern
+    );
+
+    if (existingIndex >= 0) {
+      // Update existing pattern
+      const existing = this.patterns[existingIndex];
+      existing.queryCount++;
+      if (success) {
+        existing.successCount++;
+      } else {
+        existing.failureCount++;
+      }
+      existing.totalDuration += duration;
+      existing.lastUsed = now;
+
+      // Update entity types if this was a successful query
+      if (success) {
+        // Merge entity types, keeping most frequent ones
+        const allTypes = [...existing.entityTypes, ...entityTypes];
+        const typeCounts = new Map<string, number>();
+        for (const t of allTypes) {
+          typeCounts.set(t, (typeCounts.get(t) || 0) + 1);
+        }
+        existing.entityTypes = [...typeCounts.entries()]
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 5)
+          .map(([type]) => type);
+      }
+    } else {
+      // Create new pattern
+      const newPattern: StoredQueryPattern = {
+        pattern,
+        userIdHash,
+        entityTypes: [...new Set(entityTypes)].slice(0, 5),
+        successCount: success ? 1 : 0,
+        failureCount: success ? 0 : 1,
+        totalDuration: duration,
+        queryCount: 1,
+        lastUsed: now,
+        firstUsed: now,
+      };
+      this.patterns.push(newPattern);
+    }
+
+    this.savePatterns();
+
+    logger.debug('Query pattern recorded', {
+      pattern,
+      userIdHash: userIdHash.substring(0, 8) + '...',
+      success,
+      entityTypes,
+    });
+  }
+
+  /**
+   * Get query patterns for a user (USER-SPECIFIC)
+   * @param userIdHash - Hashed user ID
+   * @param limit - Maximum number of patterns to return
+   * @returns Array of query patterns sorted by frequency
+   */
+  public getQueryPatterns(userIdHash: string, limit = 20): QueryPattern[] {
+    if (!userIdHash) {
+      return [];
+    }
+
+    // Filter patterns for this user with minimum count
+    const userPatterns = this.patterns.filter(
+      (p) => p.userIdHash === userIdHash && p.queryCount >= this.minPatternCount
+    );
+
+    // Convert to QueryPattern format and sort by count
+    return userPatterns
+      .map((p) => ({
+        pattern: p.pattern,
+        count: p.queryCount,
+        successRate: p.queryCount > 0 ? p.successCount / p.queryCount : 0,
+        optimalEntityTypes: p.entityTypes,
+        avgDuration: p.queryCount > 0 ? Math.round(p.totalDuration / p.queryCount) : 0,
+        lastUsed: p.lastUsed,
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
+  }
+
+  /**
+   * Get optimal entity types for a query based on user history (USER-SPECIFIC)
+   * @param query - Query string to find recommendations for
+   * @param userIdHash - Hashed user ID for isolation
+   * @returns Entity type recommendation or null if no match found
+   */
+  public getOptimalEntityTypes(query: string, userIdHash: string): EntityTypeRecommendation | null {
+    if (!query || !userIdHash) {
+      return null;
+    }
+
+    const pattern = this.normalizeQueryPattern(query);
+    if (!pattern) {
+      return null;
+    }
+
+    // Find exact pattern match for this user
+    const exactMatch = this.patterns.find(
+      (p) =>
+        p.userIdHash === userIdHash && p.pattern === pattern && p.queryCount >= this.minPatternCount
+    );
+
+    if (exactMatch && exactMatch.entityTypes.length > 0) {
+      const successRate =
+        exactMatch.queryCount > 0 ? exactMatch.successCount / exactMatch.queryCount : 0;
+
+      // Only recommend if success rate is above 50%
+      if (successRate >= 0.5) {
+        return {
+          entityTypes: exactMatch.entityTypes,
+          confidence: Math.min(0.95, successRate * (exactMatch.queryCount / 10)),
+          reason: `Based on ${exactMatch.queryCount} similar queries (${Math.round(successRate * 100)}% success rate)`,
+        };
+      }
+    }
+
+    // Try partial matching - find patterns that share significant words
+    const patternWords = pattern.split(' ').filter((w) => w.length > 3);
+    if (patternWords.length === 0) {
+      return null;
+    }
+
+    // Find patterns with overlapping words
+    const matchingPatterns = this.patterns.filter((p) => {
+      if (p.userIdHash !== userIdHash || p.queryCount < this.minPatternCount) {
+        return false;
+      }
+      const pWords = p.pattern.split(' ').filter((w) => w.length > 3);
+      const overlap = patternWords.filter((w) => pWords.includes(w)).length;
+      return overlap >= Math.min(2, Math.ceil(patternWords.length * 0.5));
+    });
+
+    if (matchingPatterns.length === 0) {
+      return null;
+    }
+
+    // Calculate weighted entity types from matching patterns
+    const entityTypeScores = new Map<string, number>();
+    let totalWeight = 0;
+
+    for (const match of matchingPatterns) {
+      const successRate = match.queryCount > 0 ? match.successCount / match.queryCount : 0;
+      const weight = match.queryCount * successRate;
+      totalWeight += weight;
+
+      for (const et of match.entityTypes) {
+        entityTypeScores.set(et, (entityTypeScores.get(et) || 0) + weight);
+      }
+    }
+
+    if (entityTypeScores.size === 0 || totalWeight === 0) {
+      return null;
+    }
+
+    // Sort by score and take top entity types
+    const sortedTypes = [...entityTypeScores.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([type]) => type);
+
+    // Calculate confidence based on match quality
+    const avgScore = totalWeight / matchingPatterns.length;
+    const confidence = Math.min(0.8, avgScore / 5); // Cap at 0.8 for partial matches
+
+    if (confidence < 0.3) {
+      return null; // Too low confidence
+    }
+
+    return {
+      entityTypes: sortedTypes,
+      confidence,
+      reason: `Based on ${matchingPatterns.length} similar patterns with ${Math.round(confidence * 100)}% confidence`,
+    };
+  }
+
+  /**
+   * Clear patterns for a user (GDPR Right to Erasure)
+   */
+  public deleteUserPatterns(userIdHash: string): number {
+    const beforeCount = this.patterns.length;
+    this.patterns = this.patterns.filter((p) => p.userIdHash !== userIdHash);
+    const deleted = beforeCount - this.patterns.length;
+
+    if (deleted > 0) {
+      this.savePatterns();
+      logger.info('User patterns deleted (GDPR erasure)', {
+        userIdHash,
+        deleted,
+      });
+    }
+
+    return deleted;
+  }
+
+  /**
+   * Clear all patterns (admin function)
+   */
+  public clearAllPatterns(): void {
+    this.patterns = [];
+    this.savePatterns();
+    logger.warn('All query patterns cleared from store');
   }
 }
 

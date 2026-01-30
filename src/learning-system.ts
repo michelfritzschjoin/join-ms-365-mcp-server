@@ -7,6 +7,7 @@ import KnowledgeBase, { type KnowledgeBaseData } from './knowledge-base.js';
 import SynonymExpander from './synonym-expander.js';
 import type { RepairHistoryEntry } from './graph-api-repair.js';
 import LearningAnalytics, { type PerformanceMetrics } from './learning-analytics.js';
+import { getQueryStore, type QueryPattern as StoredQueryPattern } from './query-store.js';
 
 export interface SearchResult {
   items: unknown[];
@@ -529,6 +530,135 @@ export class LearningSystem {
    */
   getRecommendedToolCombinations(toolName: string, limit: number = 5): string[] {
     return this.knowledgeBase.getRecommendedToolCombinations(toolName, limit);
+  }
+
+  // =========================================================================
+  // QUERY HISTORY LEARNING (USER-SPECIFIC)
+  // =========================================================================
+
+  /**
+   * Learn from query history for a specific user
+   * Analyzes stored queries to improve future recommendations
+   * @param userIdHash - Hashed user ID for isolation
+   * @returns Summary of learned patterns
+   */
+  async learnFromQueryHistory(userIdHash: string): Promise<{
+    patternsAnalyzed: number;
+    newPatternsLearned: number;
+    recommendations: string[];
+  }> {
+    if (!this.learningEnabled || !userIdHash) {
+      return { patternsAnalyzed: 0, newPatternsLearned: 0, recommendations: [] };
+    }
+
+    try {
+      const queryStore = getQueryStore();
+      const patterns = queryStore.getQueryPatterns(userIdHash, 50);
+      const recommendations: string[] = [];
+      let newPatternsLearned = 0;
+
+      // Analyze patterns and transfer to knowledge base
+      for (const pattern of patterns) {
+        // Skip patterns with low success rate
+        if (pattern.successRate < 0.3) {
+          continue;
+        }
+
+        // Record in knowledge base for cross-pattern learning
+        if (pattern.optimalEntityTypes.length > 0) {
+          this.knowledgeBase.recordQueryPattern(
+            pattern.pattern,
+            pattern.optimalEntityTypes,
+            pattern.successRate >= 0.5,
+            `user-history:${userIdHash.substring(0, 8)}`
+          );
+          newPatternsLearned++;
+        }
+
+        // Generate recommendations based on patterns
+        if (pattern.successRate >= 0.8 && pattern.count >= 5) {
+          recommendations.push(
+            `Pattern "${pattern.pattern}" has ${Math.round(pattern.successRate * 100)}% success rate with entity types: ${pattern.optimalEntityTypes.join(', ')}`
+          );
+        }
+
+        // Learn from slow queries
+        if (pattern.avgDuration > 3000 && pattern.count >= 3) {
+          recommendations.push(
+            `Pattern "${pattern.pattern}" is slow (avg ${pattern.avgDuration}ms). Consider optimizing entity types.`
+          );
+        }
+      }
+
+      // Persist learned data
+      await this.knowledgeBase.save();
+
+      logger.debug('Learned from query history', {
+        userIdHash: userIdHash.substring(0, 8) + '...',
+        patternsAnalyzed: patterns.length,
+        newPatternsLearned,
+        recommendations: recommendations.length,
+      });
+
+      return {
+        patternsAnalyzed: patterns.length,
+        newPatternsLearned,
+        recommendations: recommendations.slice(0, 10),
+      };
+    } catch (error) {
+      logger.warn(`Failed to learn from query history: ${error}`);
+      return { patternsAnalyzed: 0, newPatternsLearned: 0, recommendations: [] };
+    }
+  }
+
+  /**
+   * Get recommended entity types based on user history
+   * @param query - Query string
+   * @param userIdHash - Hashed user ID for isolation
+   * @returns Recommended entity types or null
+   */
+  getHistoryBasedEntityTypes(
+    query: string,
+    userIdHash: string
+  ): { entityTypes: string[]; confidence: number; reason: string } | null {
+    if (!this.learningEnabled || !userIdHash || !query) {
+      return null;
+    }
+
+    try {
+      const queryStore = getQueryStore();
+      return queryStore.getOptimalEntityTypes(query, userIdHash);
+    } catch (error) {
+      logger.warn(`Failed to get history-based entity types: ${error}`);
+      return null;
+    }
+  }
+
+  /**
+   * Record a search query for future learning
+   * @param userIdHash - Hashed user ID
+   * @param query - Query string
+   * @param entityTypes - Entity types used
+   * @param success - Whether results were found
+   * @param duration - Duration in milliseconds
+   */
+  recordSearchForLearning(
+    userIdHash: string,
+    query: string,
+    entityTypes: string[],
+    success: boolean,
+    duration: number
+  ): void {
+    if (!this.learningEnabled || !userIdHash || !query) {
+      return;
+    }
+
+    try {
+      const queryStore = getQueryStore();
+      queryStore.recordQueryPattern(userIdHash, query, entityTypes, success, duration);
+    } catch (error) {
+      logger.warn(`Failed to record search for learning: ${error}`);
+    }
   }
 }
 

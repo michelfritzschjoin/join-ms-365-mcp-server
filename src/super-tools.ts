@@ -19,6 +19,7 @@ import logger from './logger.js';
 import { addThinkingToResponse, isThinkingEnabled } from './thinking-process.js';
 import {
   formatCalendarResponse,
+  formatCalendarEvent,
   calendarResponseToText,
   formatMailResponse,
   mailResponseToText,
@@ -38,8 +39,15 @@ import {
 import { getUQAS } from './uqas/integration/index.js';
 import DownloadLinkGenerator from './download-link-generator.js';
 import type { AppSecrets } from './secrets.js';
-import { getRequestTokens, getProfessionProfile, getUserProfile } from './request-context.js';
+import {
+  getRequestTokens,
+  getProfessionProfile,
+  getUserProfile,
+  getUserId,
+} from './request-context.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
+// Query Pattern Learning
+import { getQueryStore } from './query-store.js';
 import type { ProfessionProfile } from './user-profile.js';
 import {
   calendarResponseToTextByProfession,
@@ -2752,12 +2760,676 @@ const NON_PERSON_WORDS = new Set([
   'recent',
 ]);
 
+// ============================================================================
+// INTELLIGENT QUERY DECOMPOSITION
+// ============================================================================
+
+/**
+ * Sub-query with context for multi-query execution
+ */
+interface SubQueryWithContext {
+  query: string;
+  entityTypes: string[];
+  priority: number;
+  reason: string;
+  expectedResultType: 'primary' | 'complementary' | 'fallback';
+}
+
+/**
+ * Result from executing multiple sub-queries
+ */
+interface MultiQueryResult {
+  results: Array<{
+    subQuery: SubQueryWithContext;
+    searchResult: SearchHit[] | null;
+    error: string | null;
+    durationMs: number;
+  }>;
+  totalDurationMs: number;
+  successCount: number;
+}
+
+/**
+ * Search hit from Graph API
+ */
+interface SearchHit {
+  hitId: string;
+  rank: number;
+  summary?: string;
+  resource: Record<string, unknown>;
+}
+
+/**
+ * Merged search result
+ */
+interface MergedSearchResult {
+  results: Record<string, MergedHit[]>;
+  totalHits: number;
+  uniqueHits: number;
+  multiMatchHits: number;
+  queryBreakdown: Array<{
+    query: string;
+    hitCount: number;
+    contributedUniqueHits: number;
+    filteredCount?: number;
+  }>;
+}
+
+/**
+ * Merged hit with combined ranking
+ */
+interface MergedHit {
+  id: string;
+  resource: unknown;
+  combinedRank: number;
+  matchedQueries: string[];
+  matchCount: number;
+  primaryMatch: boolean;
+  relevanceScore?: number;
+}
+
+/**
+ * Relevance score for a search hit
+ */
+interface RelevanceScore {
+  score: number;
+  confidence: number;
+  matchedFields: string[];
+  queryTermsFound: number;
+  isRelevant: boolean;
+}
+
+/**
+ * Check if a query should be decomposed into sub-queries
+ * @param decomposed - Decomposed query from NLP
+ * @param originalQuery - Original query string
+ * @returns true if query should be decomposed
+ */
+function shouldDecomposeQuery(decomposed: DecomposedQuery, originalQuery: string): boolean {
+  const wordCount = originalQuery.trim().split(/\s+/).length;
+  const entityCount = decomposed.entities.length;
+  const uniqueEntityTypes = new Set(decomposed.entities.map((e) => e.type)).size;
+
+  // Don't decompose if:
+  // - Query is short and simple (< 3 words, 0-1 entity)
+  // - Confidence is very high (> 0.9) - query is clearly understood
+  if (wordCount < 3 && entityCount <= 1 && decomposed.confidence > 0.85) {
+    return false;
+  }
+
+  // Don't decompose very short queries
+  if (wordCount < 2) {
+    return false;
+  }
+
+  // Decompose if:
+  return (
+    entityCount >= 2 || // Multiple entities
+    wordCount >= 5 || // Long query
+    decomposed.confidence < 0.7 || // Unclear intent
+    decomposed.subQueries.length > 3 || // Many sub-queries generated
+    uniqueEntityTypes >= 2 || // Different entity types
+    decomposed.compoundParts.length > 1 // Compound word
+  );
+}
+
+/**
+ * Extract main context words from a query
+ * (e.g., "RathausGPT" from "Angebot für RathausGPT Empfänger extern")
+ */
+function extractMainContextWords(query: string): string[] {
+  const words = query.split(/\s+/);
+  // Filter stop words and short words
+  const stopWords = new Set([
+    'für',
+    'von',
+    'mit',
+    'an',
+    'in',
+    'auf',
+    'zu',
+    'der',
+    'die',
+    'das',
+    'und',
+    'oder',
+    'für',
+    'the',
+    'a',
+    'an',
+    'and',
+    'or',
+    'with',
+    'in',
+    'on',
+    'at',
+    'to',
+    'for',
+    'of',
+  ]);
+  return words.filter((w) => w.length > 3 && !stopWords.has(w.toLowerCase())).slice(0, 2);
+}
+
+/**
+ * Get entity types based on entity type
+ */
+function getEntityTypesForEntityType(
+  entityType: string
+): Array<(typeof searchEntityTypes)[number]> {
+  const mapping: Record<string, Array<(typeof searchEntityTypes)[number]>> = {
+    person: ['message', 'chatMessage', 'event'],
+    organization: ['message', 'driveItem', 'site'],
+    project: ['driveItem', 'site', 'listItem'],
+    file: ['driveItem'],
+    event: ['event'],
+    email: ['message'],
+    task: ['message', 'listItem'],
+    product: ['message', 'driveItem'],
+    location: ['event', 'site'],
+    date: ['event', 'message'],
+    time: ['event'],
+    food: ['driveItem', 'listItem'],
+    unknown: ['driveItem', 'site', 'message'],
+  };
+  return mapping[entityType] || ['driveItem', 'site', 'message'];
+}
+
+/**
+ * Select the best sub-queries from decomposed query WITH CONTEXT PRESERVATION
+ * @param decomposed - Decomposed query from NLP
+ * @param userIdHash - User ID hash for history-based optimization
+ * @param maxQueries - Maximum number of sub-queries
+ * @returns Array of sub-queries with context
+ */
+function selectBestSubQueries(
+  decomposed: DecomposedQuery,
+  userIdHash: string,
+  maxQueries = 4
+): SubQueryWithContext[] {
+  const selected: SubQueryWithContext[] = [];
+
+  // Identify main entity (most important context)
+  const mainEntity = decomposed.entity || decomposed.entities[0]?.value || '';
+  const mainEntityWords = mainEntity.split(/\s+/).filter((w) => w.length > 3);
+  const mainEntityValue = mainEntityWords[0] || ''; // First important word (e.g., "RathausGPT")
+
+  // Get user-specific optimal entity types if available
+  let primaryEntityTypes: Array<(typeof searchEntityTypes)[number]> = ['message', 'driveItem'];
+  if (decomposed.ms365Context?.searchScopes) {
+    primaryEntityTypes = decomposed.ms365Context.searchScopes as Array<
+      (typeof searchEntityTypes)[number]
+    >;
+  }
+
+  // Try to get from user history
+  if (userIdHash) {
+    try {
+      const queryStore = getQueryStore();
+      const historyRec = queryStore.getOptimalEntityTypes(decomposed.original, userIdHash);
+      if (historyRec && historyRec.confidence > 0.6) {
+        primaryEntityTypes = historyRec.entityTypes as Array<(typeof searchEntityTypes)[number]>;
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // 1. Primary Query (always included) - keeps original context
+  selected.push({
+    query: decomposed.entity || decomposed.original,
+    entityTypes: validateEntityTypeCombinations(primaryEntityTypes),
+    priority: 1,
+    reason: 'Primary entity-focused query',
+    expectedResultType: 'primary',
+  });
+
+  // 2. Entity-specific queries (max 2) - WITH CONTEXT PRESERVATION
+  const entityQueries = decomposed.entities
+    .filter(
+      (e) => e.value !== decomposed.entity && !mainEntityWords.includes(e.value.split(/\s+/)[0])
+    )
+    .slice(0, 2)
+    .map((entity) => {
+      // CRITICAL: Combine entity with main context to not lose context
+      const queryWithContext = mainEntityValue
+        ? `${mainEntityValue} ${entity.value}`.trim()
+        : entity.value;
+
+      return {
+        query: queryWithContext,
+        entityTypes: validateEntityTypeCombinations(getEntityTypesForEntityType(entity.type)),
+        priority: 2,
+        reason: `Entity: ${entity.type} + context`,
+        expectedResultType: 'complementary' as const,
+      };
+    });
+  selected.push(...entityQueries);
+
+  // 3. Intent-specific query (if space) - WITH CONTEXT
+  if (selected.length < maxQueries && decomposed.intent.type !== 'unknown') {
+    let intentQuery = '';
+    let intentEntityTypes: Array<(typeof searchEntityTypes)[number]> = ['message'];
+
+    switch (decomposed.intent.type) {
+      case 'who':
+        intentQuery = mainEntityValue ? `${mainEntityValue} Empfänger` : decomposed.original;
+        intentEntityTypes = ['message', 'chatMessage'];
+        break;
+      case 'when':
+      case 'last_occurrence':
+        intentQuery = mainEntityValue ? `${mainEntityValue} letzte` : decomposed.original;
+        intentEntityTypes = ['message', 'event'];
+        break;
+      case 'where':
+        intentQuery = mainEntityValue ? `${mainEntityValue} Ort` : decomposed.original;
+        intentEntityTypes = ['event', 'site'];
+        break;
+      default:
+        intentQuery = '';
+    }
+
+    if (intentQuery && intentQuery !== selected[0]?.query) {
+      selected.push({
+        query: intentQuery,
+        entityTypes: validateEntityTypeCombinations(intentEntityTypes),
+        priority: 3,
+        reason: `Intent: ${decomposed.intent.type} + context`,
+        expectedResultType: 'complementary',
+      });
+    }
+  }
+
+  // 4. Fallback query (if space) - WITH MAIN CONTEXT
+  if (selected.length < maxQueries && mainEntityValue) {
+    selected.push({
+      query: mainEntityValue,
+      entityTypes: validateEntityTypeCombinations(['driveItem', 'site', 'listItem']),
+      priority: 4,
+      reason: 'Fallback broad search with main context',
+      expectedResultType: 'fallback',
+    });
+  }
+
+  return selected.slice(0, maxQueries);
+}
+
+/**
+ * Validate relevance of a search hit against the original query
+ * CRITICAL: Validates against ORIGINAL query, not just sub-query!
+ */
+function validateRelevance(
+  hit: SearchHit,
+  originalQuery: string,
+  subQuery: string
+): RelevanceScore {
+  // Extract important context words from original query (e.g., "RathausGPT")
+  const originalWords = originalQuery
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 3);
+  const subQueryWords = subQuery
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 3);
+
+  // Identify main context words (in original but not in sub-query)
+  const contextWords = originalWords.filter((w) => !subQueryWords.includes(w));
+
+  // Combine: sub-query terms + important context words
+  const allRelevantTerms = [...new Set([...subQueryWords, ...contextWords])].filter(
+    (t) => t.length > 2
+  );
+
+  const resource = hit.resource || {};
+
+  // Key fields for matching
+  const keyFields: Record<string, string> = {
+    subject: ((resource.subject as string) || '').toLowerCase(),
+    name: ((resource.name as string) || '').toLowerCase(),
+    displayName: ((resource.displayName as string) || '').toLowerCase(),
+    bodyPreview: ((resource.bodyPreview as string) || '').toLowerCase(),
+    summary: (hit.summary || '').toLowerCase(),
+    content: ((resource.content as string) || '').toLowerCase(),
+  };
+
+  const matchedFields: string[] = [];
+  let queryTermsFound = 0;
+  let contextTermsFound = 0;
+  let totalMatches = 0;
+
+  // Check each relevant term in each field
+  for (const term of allRelevantTerms) {
+    let termFound = false;
+    const isContextWord = contextWords.includes(term);
+
+    for (const [field, content] of Object.entries(keyFields)) {
+      if (content.includes(term)) {
+        if (!matchedFields.includes(field)) {
+          matchedFields.push(field);
+        }
+        termFound = true;
+        totalMatches++;
+      }
+    }
+    if (termFound) {
+      if (isContextWord) {
+        contextTermsFound++;
+      } else {
+        queryTermsFound++;
+      }
+    }
+  }
+
+  // CRITICAL: If important context words are missing, result is less relevant
+  const contextMatchRatio = contextWords.length > 0 ? contextTermsFound / contextWords.length : 1.0;
+
+  // Calculate relevance score
+  const termMatchRatio =
+    allRelevantTerms.length > 0
+      ? (queryTermsFound + contextTermsFound) / allRelevantTerms.length
+      : 0;
+  const fieldMatchRatio =
+    Object.keys(keyFields).length > 0 ? matchedFields.length / Object.keys(keyFields).length : 0;
+  const matchDensity = totalMatches / Math.max(1, allRelevantTerms.length);
+
+  // Combined score
+  let score = termMatchRatio * 0.4 + fieldMatchRatio * 0.3 + Math.min(matchDensity, 1) * 0.2;
+
+  // CRITICAL: Penalty if important context words are missing
+  if (contextWords.length > 0 && contextMatchRatio < 0.5) {
+    score *= 0.5; // 50% penalty
+  }
+
+  // Confidence based on match quality
+  let confidence = score;
+
+  // Boost for exact matches in important fields
+  if (
+    keyFields.subject.includes(originalQuery.toLowerCase()) ||
+    keyFields.name.includes(originalQuery.toLowerCase())
+  ) {
+    confidence = Math.min(1.0, confidence + 0.2);
+  }
+
+  // Penalty for very low rank (late results are less relevant)
+  const rankPenalty = hit.rank > 50 ? 0.3 : hit.rank > 25 ? 0.1 : 0;
+  confidence = Math.max(0, confidence - rankPenalty);
+
+  // Threshold:
+  // - At least 30% of query terms must be found
+  // - If context words are present, at least 50% must be found
+  const isRelevant =
+    termMatchRatio >= 0.3 &&
+    confidence >= 0.3 &&
+    (contextWords.length === 0 || contextMatchRatio >= 0.5);
+
+  return {
+    score,
+    confidence,
+    matchedFields,
+    queryTermsFound: queryTermsFound + contextTermsFound,
+    isRelevant,
+  };
+}
+
+/**
+ * Filter irrelevant results from search hits
+ */
+function filterIrrelevantResults(
+  hits: SearchHit[],
+  originalQuery: string,
+  minRelevance = 0.3
+): SearchHit[] {
+  return hits
+    .map((hit) => ({
+      hit,
+      relevance: validateRelevance(hit, originalQuery, ''),
+    }))
+    .filter(({ relevance }) => relevance.isRelevant && relevance.confidence >= minRelevance)
+    .sort((a, b) => b.relevance.confidence - a.relevance.confidence)
+    .map(({ hit }) => hit);
+}
+
+/**
+ * Merge search results from multiple sub-queries
+ * Includes deduplication, multi-match boost, and relevance validation
+ */
+function mergeSearchResults(
+  multiQueryResult: MultiQueryResult,
+  originalQuery: string
+): MergedSearchResult {
+  const hitMap = new Map<string, MergedHit>();
+  const queryBreakdown: MergedSearchResult['queryBreakdown'] = [];
+  const minRelevance = parseFloat(process.env.MS365_MCP_MIN_RELEVANCE || '0.3');
+  const mainContextWords = extractMainContextWords(originalQuery);
+
+  for (const { subQuery, searchResult } of multiQueryResult.results) {
+    if (!searchResult) continue;
+
+    // CRITICAL: Filter irrelevant results BEFORE merging
+    const relevantHits = filterIrrelevantResults(searchResult, originalQuery, minRelevance);
+
+    let hitCount = 0;
+    let contributedUnique = 0;
+    let filteredCount = searchResult.length - relevantHits.length;
+
+    for (const hit of relevantHits) {
+      hitCount++;
+      const id = hit.resource?.id as string;
+      if (!id) continue;
+
+      // Additional validation: Check relevance against ORIGINAL query
+      const relevance = validateRelevance(hit, originalQuery, subQuery.query);
+      if (!relevance.isRelevant) {
+        filteredCount++;
+        continue;
+      }
+
+      // ADDITIONALLY: Check if result contains important context
+      if (mainContextWords.length > 0) {
+        const resourceText = JSON.stringify(hit.resource || {}).toLowerCase();
+        const hasContext = mainContextWords.some((word) =>
+          resourceText.includes(word.toLowerCase())
+        );
+        if (!hasContext) {
+          filteredCount++;
+          continue;
+        }
+      }
+
+      if (hitMap.has(id)) {
+        // Multi-match: Boost existing result
+        const existing = hitMap.get(id)!;
+        existing.matchCount++;
+        existing.matchedQueries.push(subQuery.query);
+
+        // Rank combination: Weighted average with boost for multi-match
+        const priorityWeight = 5 - subQuery.priority;
+        existing.combinedRank = (existing.combinedRank + hit.rank * priorityWeight) / 2;
+
+        // Combine relevance score (highest score)
+        existing.relevanceScore = Math.max(existing.relevanceScore || 0, relevance.confidence);
+
+        // Primary match flag
+        if (subQuery.expectedResultType === 'primary') {
+          existing.primaryMatch = true;
+        }
+      } else {
+        // New result
+        contributedUnique++;
+        const priorityWeight = 5 - subQuery.priority;
+        hitMap.set(id, {
+          id,
+          resource: hit.resource,
+          combinedRank: hit.rank * priorityWeight,
+          matchedQueries: [subQuery.query],
+          matchCount: 1,
+          primaryMatch: subQuery.expectedResultType === 'primary',
+          relevanceScore: relevance.confidence,
+        });
+      }
+    }
+
+    queryBreakdown.push({
+      query: subQuery.query,
+      hitCount,
+      contributedUniqueHits: contributedUnique,
+      filteredCount,
+    });
+  }
+
+  // Apply multi-match boost
+  for (const hit of hitMap.values()) {
+    if (hit.matchCount > 1) {
+      // Boost: 20% per additional match
+      hit.combinedRank *= 1 + 0.2 * (hit.matchCount - 1);
+    }
+    if (hit.primaryMatch) {
+      // Primary match boost: 30%
+      hit.combinedRank *= 1.3;
+    }
+
+    // Relevance boost: Higher relevance = higher rank
+    if (hit.relevanceScore && hit.relevanceScore > 0.7) {
+      hit.combinedRank *= 1.2;
+    }
+  }
+
+  // Group by entity type and sort
+  const results: Record<string, MergedHit[]> = {};
+  const allHits = Array.from(hitMap.values());
+
+  for (const hit of allHits) {
+    const entityType =
+      ((hit.resource as Record<string, unknown>)?.['@odata.type'] as string) || 'unknown';
+    if (!results[entityType]) {
+      results[entityType] = [];
+    }
+    results[entityType].push(hit);
+  }
+
+  // Sort by combinedRank (higher = better)
+  for (const entityType of Object.keys(results)) {
+    results[entityType].sort((a, b) => b.combinedRank - a.combinedRank);
+  }
+
+  return {
+    results,
+    totalHits: allHits.reduce((sum, h) => sum + h.matchCount, 0),
+    uniqueHits: allHits.length,
+    multiMatchHits: allHits.filter((h) => h.matchCount > 1).length,
+    queryBreakdown,
+  };
+}
+
+/**
+ * Execute a single search query against Graph API
+ */
+async function executeSingleSearch(
+  graphClient: GraphClient,
+  query: string,
+  entityTypes: string[],
+  size = 25
+): Promise<SearchHit[]> {
+  try {
+    const searchBody = {
+      requests: [
+        {
+          entityTypes: validateEntityTypeCombinations(entityTypes),
+          query: { queryString: query },
+          from: 0,
+          size,
+        },
+      ],
+    };
+
+    const response = await callGraph(graphClient, 'POST', '/search/query', undefined, searchBody);
+
+    const parsed = JSON.parse(response);
+    const hits: SearchHit[] = [];
+
+    if (parsed.value?.[0]?.hitsContainers?.[0]?.hits) {
+      for (const hit of parsed.value[0].hitsContainers[0].hits) {
+        hits.push({
+          hitId: hit.hitId || hit.resource?.id || '',
+          rank: hit.rank || 0,
+          summary: hit.summary,
+          resource: hit.resource || {},
+        });
+      }
+    }
+
+    return hits;
+  } catch (error) {
+    logger.warn(`Search failed for query "${query}": ${error}`);
+    return [];
+  }
+}
+
+/**
+ * Execute multiple sub-queries in parallel
+ */
+async function executeMultiQuery(
+  subQueries: SubQueryWithContext[],
+  graphClient: GraphClient,
+  timeoutMs = 10000
+): Promise<MultiQueryResult> {
+  const startTime = Date.now();
+  const timeoutPerQuery = Math.floor(timeoutMs / Math.max(1, subQueries.length));
+
+  const promises = subQueries.map(async (subQuery) => {
+    const queryStart = Date.now();
+    try {
+      const result = await Promise.race([
+        executeSingleSearch(graphClient, subQuery.query, subQuery.entityTypes),
+        new Promise<SearchHit[]>((_, reject) =>
+          setTimeout(() => reject(new Error('Query timeout')), timeoutPerQuery)
+        ),
+      ]);
+
+      return {
+        subQuery,
+        searchResult: result,
+        error: null,
+        durationMs: Date.now() - queryStart,
+      };
+    } catch (error) {
+      return {
+        subQuery,
+        searchResult: null,
+        error: error instanceof Error ? error.message : 'Unknown error',
+        durationMs: Date.now() - queryStart,
+      };
+    }
+  });
+
+  const results = await Promise.allSettled(promises);
+
+  const processedResults = results.map((r) =>
+    r.status === 'fulfilled'
+      ? r.value
+      : {
+          subQuery: subQueries[0],
+          searchResult: null,
+          error: 'Promise rejected',
+          durationMs: 0,
+        }
+  );
+
+  return {
+    results: processedResults,
+    totalDurationMs: Date.now() - startTime,
+    successCount: processedResults.filter((r) => r.searchResult !== null).length,
+  };
+}
+
 async function handleSearch(
   input: SearchInput,
   graphClient: GraphClient,
   _readOnly: boolean
 ): Promise<string> {
   const thinking: string[] = [];
+  const searchStartTime = Date.now();
 
   thinking.push(`🔍 Microsoft 365 Search: "${input.query}"`);
 
@@ -2848,6 +3520,12 @@ async function handleSearch(
         toolSuggestions.push('💡 Use "assistant" tool with action "my-day" for today\'s summary');
       }
 
+      // Format events with local timezone conversion (no raw UTC)
+      const rawEvents = events.value || [];
+      const formattedEvents = rawEvents.map((event: Record<string, unknown>) =>
+        formatCalendarEvent(event)
+      );
+
       const output = {
         query: input.query,
         language: {
@@ -2868,7 +3546,7 @@ async function handleSearch(
           direction: isPastQuery ? 'past' : 'future',
         },
         results: {
-          '#microsoft.graph.event': events.value || [],
+          '#microsoft.graph.event': formattedEvents,
         },
         suggestions: toolSuggestions,
       };
@@ -2921,6 +3599,44 @@ async function handleSearch(
 
   // Intelligent entity type detection based on query and NLP
   let entityTypes: Array<(typeof searchEntityTypes)[number]> = input.entityTypes || [];
+
+  // =========================================================================
+  // HISTORY-BASED ENTITY TYPE RECOMMENDATION (USER-SPECIFIC)
+  // =========================================================================
+  const patternLearningEnabled = process.env.MS365_MCP_PATTERN_LEARNING_ENABLED !== 'false';
+  let historyRecommendationUsed = false;
+
+  if (entityTypes.length === 0 && patternLearningEnabled) {
+    // Try to get entity types from user history
+    try {
+      const currentUserId = getUserId();
+      if (currentUserId) {
+        const queryStore = getQueryStore();
+        const userIdHash = queryStore.hashUserId(currentUserId);
+        const historyRecommendation = queryStore.getOptimalEntityTypes(input.query, userIdHash);
+
+        if (historyRecommendation && historyRecommendation.confidence > 0.7) {
+          // High confidence recommendation from history
+          entityTypes = historyRecommendation.entityTypes as Array<
+            (typeof searchEntityTypes)[number]
+          >;
+          historyRecommendationUsed = true;
+          thinking.push(
+            `💡 History-based entity types: ${entityTypes.join(', ')} (${Math.round(historyRecommendation.confidence * 100)}% confidence)`
+          );
+          thinking.push(`   ${historyRecommendation.reason}`);
+        } else if (historyRecommendation && historyRecommendation.confidence > 0.5) {
+          // Medium confidence - log but don't use directly, let NLP enhance
+          thinking.push(
+            `📊 History hint: ${historyRecommendation.entityTypes.join(', ')} (${Math.round(historyRecommendation.confidence * 100)}% confidence - using NLP instead)`
+          );
+        }
+      }
+    } catch (error) {
+      // Silently ignore errors - history recommendation is optional
+      logger.debug('History-based entity type lookup failed', { error });
+    }
+  }
 
   if (entityTypes.length === 0) {
     // Default: Use compatible entity types
@@ -3009,6 +3725,90 @@ async function handleSearch(
   }
 
   thinking.push(`Searching in: ${entityTypes.join(', ')}`);
+
+  // =========================================================================
+  // INTELLIGENT QUERY DECOMPOSITION (MULTI-QUERY STRATEGY)
+  // =========================================================================
+  const queryDecompositionEnabled =
+    process.env.MS365_MCP_QUERY_DECOMPOSITION_ENABLED !== 'false' && patternLearningEnabled;
+
+  const useMultiQuery = queryDecompositionEnabled && shouldDecomposeQuery(decomposed, input.query);
+
+  if (useMultiQuery) {
+    thinking.push(`🔀 Complex query detected - using multi-query strategy`);
+
+    try {
+      const currentUserId = getUserId();
+      const userIdHash = currentUserId ? getQueryStore().hashUserId(currentUserId) : 'anonymous';
+      const subQueries = selectBestSubQueries(decomposed, userIdHash, 4);
+
+      thinking.push(
+        `📋 Sub-queries: ${subQueries.map((q) => `"${q.query}" (${q.reason})`).join(', ')}`
+      );
+
+      const multiQueryTimeout = parseInt(process.env.MS365_MCP_MULTIQUERY_TIMEOUT || '10000', 10);
+      const multiResult = await executeMultiQuery(subQueries, graphClient, multiQueryTimeout);
+
+      thinking.push(
+        `⏱️ Multi-query completed in ${multiResult.totalDurationMs}ms (${multiResult.successCount}/${subQueries.length} successful)`
+      );
+
+      const merged = mergeSearchResults(multiResult, input.query);
+
+      thinking.push(
+        `✅ Found ${merged.uniqueHits} unique results (${merged.multiMatchHits} multi-match)`
+      );
+
+      // Record pattern for learning
+      if (patternLearningEnabled && currentUserId) {
+        try {
+          const queryStore = getQueryStore();
+          const success = merged.uniqueHits > 0;
+          const duration = Date.now() - searchStartTime;
+          queryStore.recordQueryPattern(userIdHash, input.query, entityTypes, success, duration);
+        } catch {
+          // Ignore errors
+        }
+      }
+
+      // Format output for multi-query result
+      const multiQueryOutput = {
+        query: input.query,
+        strategy: 'multi-query',
+        language: {
+          detected: detectedLang,
+          confidence: Math.round(uqasAnalysis.languageConfidence * 100),
+          crossLangSearch: searchVariants.crossLangVariants.length > 0,
+        },
+        nlpAnalysis: {
+          intent: nlpIntent,
+          service: nlpService || 'general',
+          entities: nlpEntities.map((e) => ({ value: e.value, type: e.type })),
+          temporal: decomposed.temporal,
+          confidence: decomposed.confidence,
+        },
+        subQueries: merged.queryBreakdown,
+        totalHits: merged.totalHits,
+        uniqueHits: merged.uniqueHits,
+        multiMatchHits: merged.multiMatchHits,
+        entityTypes: Object.keys(merged.results),
+        results: merged.results,
+        suggestions: [
+          '💡 Multi-query strategy found cross-referenced results',
+          merged.multiMatchHits > 0
+            ? `💡 ${merged.multiMatchHits} results appeared in multiple sub-queries (higher relevance)`
+            : null,
+        ].filter(Boolean),
+      };
+
+      return addThinkingToResponse(JSON.stringify(multiQueryOutput, null, 2), thinking);
+    } catch (error) {
+      thinking.push(
+        `⚠️ Multi-query failed, falling back to single query: ${error instanceof Error ? error.message : String(error)}`
+      );
+      // Fall through to single query
+    }
+  }
 
   // Improve query for better search results
   // Simplify query for Teams/person searches to just the person name
@@ -3398,6 +4198,31 @@ async function handleSearch(
       .slice(0, 10);
 
     importantDocuments.push(...sortedSources);
+
+    // =========================================================================
+    // RECORD QUERY PATTERN FOR LEARNING (USER-SPECIFIC)
+    // =========================================================================
+    if (patternLearningEnabled) {
+      try {
+        const currentUserId = getUserId();
+        if (currentUserId) {
+          const queryStore = getQueryStore();
+          const userIdHash = queryStore.hashUserId(currentUserId);
+          const success = totalHits > 0;
+          const duration = Date.now() - searchStartTime;
+
+          // Record pattern for future learning
+          queryStore.recordQueryPattern(userIdHash, input.query, entityTypes, success, duration);
+
+          if (success && !historyRecommendationUsed) {
+            thinking.push(`📚 Recorded successful pattern for future learning`);
+          }
+        }
+      } catch (error) {
+        // Silently ignore errors - pattern recording is optional
+        logger.debug('Failed to record query pattern', { error });
+      }
+    }
 
     const output: Record<string, unknown> = {
       query: input.query,
