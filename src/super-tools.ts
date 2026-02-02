@@ -1148,6 +1148,7 @@ const emailActionsRead = [
   'list', // List messages from inbox or folder
   'get', // Get a specific message
   'folders', // List mail folders
+  'child-folders', // List child folders of a mail folder
   'attachments', // List/get attachments
   'search', // Search messages
 ] as const;
@@ -1172,6 +1173,7 @@ const emailActions = z.enum([
   'list',
   'get',
   'folders',
+  'child-folders',
   'attachments',
   'search',
   // Write operations (blocked in read-only mode)
@@ -1183,7 +1185,7 @@ const emailActions = z.enum([
 
 const emailSchema = z.object({
   action: emailActions.describe(
-    'The email operation: list, get, folders, attachments, search (read) | send, reply, delete, move (write)'
+    'The email operation: list, get, folders, child-folders, attachments, search (read) | send, reply, delete, move (write)'
   ),
   // Identifiers
   messageId: z
@@ -1284,6 +1286,19 @@ async function handleEmail(
       thinking.push('Listing mail folders');
       const params: Record<string, string> = { $top: String(input.top || 50) };
       const result = await callGraph(graphClient, 'GET', '/me/mailFolders', params);
+      return addThinkingToResponse(result, thinking);
+    }
+
+    case 'child-folders': {
+      if (!input.folderId) throw new Error('folderId is required for action "child-folders"');
+      thinking.push(`Listing child folders of folder: ${input.folderId}`);
+      const params: Record<string, string> = { $top: String(input.top || 50) };
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/mailFolders/${input.folderId}/childFolders`,
+        params
+      );
       return addThinkingToResponse(result, thinking);
     }
 
@@ -6449,7 +6464,7 @@ export function registerSuperTools(
   // 1. Email
   server.tool(
     'email',
-    `Unified email operations: list, get, folders, attachments, search${readOnly ? '' : ' | send, reply, delete, move (write)'}`,
+    `Unified email operations: list, get, folders, child-folders, attachments, search${readOnly ? '' : ' | send, reply, delete, move (write)'}`,
     emailSchema.shape,
     async (input: EmailInput) => {
       try {
