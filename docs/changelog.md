@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.19.0...v1.20.0) (2026-02-02)
+
+### Features
+
+* **notes:** add search-pages action and support search parameter for pages action ([7dc970c](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/7dc970c74b88fd6940f09b713779ef71463bf514))
+
 ## [1.19.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.18.0...v1.19.0) (2026-01-30)
 
 ### Features

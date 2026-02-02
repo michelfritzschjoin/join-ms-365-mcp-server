@@ -1,6 +1,6 @@
 {
   "name": "join-ms-365-mcp-server",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": " A Model Context Protocol (MCP) server for interacting with Microsoft 365 and Office services through the Graph API",
   "type": "module",
   "main": "dist/index.js",
