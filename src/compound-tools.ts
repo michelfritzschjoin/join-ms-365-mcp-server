@@ -23,6 +23,7 @@ import {
   mailResponseToText,
 } from './response-formatter.js';
 import { createThinkingProcess } from './thinking-process.js';
+import { isLoopFile, detectLoopFile, parseLoopContent } from './utils/loop-detector.js';
 
 /**
  * SECURITY: Properly sanitize HTML content to prevent XSS
@@ -5340,17 +5341,32 @@ Use this when someone asks "What files did [person] share with me?" or "Find doc
       // Step 2: Find files
       const files = await findFilesFromPerson(graphClient, userEmail, user.displayName, limit);
 
-      const formattedFiles = files.map((file) => ({
-        id: file.id,
-        name: file.name,
-        webUrl: file.webUrl,
-        size: file.size,
-        type: file.file?.mimeType || (file.folder ? 'folder' : 'unknown'),
-        createdDateTime: file.createdDateTime,
-        lastModifiedDateTime: file.lastModifiedDateTime,
-        sharedBy: file.shared?.sharedBy?.user?.displayName,
-        sharedDate: file.shared?.sharedDateTime,
-      }));
+      // Detect Loop files in the results
+      let loopFileCount = 0;
+      const formattedFiles = files.map((file) => {
+        const loopDetection = detectLoopFile(file as Record<string, unknown>);
+        if (loopDetection.isLoopFile) {
+          loopFileCount++;
+        }
+        return {
+          id: file.id,
+          name: file.name,
+          webUrl: file.webUrl,
+          size: file.size,
+          type: file.file?.mimeType || (file.folder ? 'folder' : 'unknown'),
+          createdDateTime: file.createdDateTime,
+          lastModifiedDateTime: file.lastModifiedDateTime,
+          sharedBy: file.shared?.sharedBy?.user?.displayName,
+          sharedDate: file.shared?.sharedDateTime,
+          isLoopFile: loopDetection.isLoopFile,
+          loopDetection: loopDetection.isLoopFile
+            ? {
+                method: loopDetection.detectionMethod,
+                confidence: loopDetection.confidence,
+              }
+            : undefined,
+        };
+      });
 
       return {
         content: [
@@ -5365,6 +5381,7 @@ Use this when someone asks "What files did [person] share with me?" or "Find doc
                   id: user.id,
                 },
                 filesFound: formattedFiles.length,
+                loopFilesFound: loopFileCount,
                 files: formattedFiles,
               },
               null,
@@ -5529,13 +5546,19 @@ This is the ultimate tool for "Tell me everything about my interactions with [pe
         promises.push(
           (async () => {
             const files = await findFilesFromPerson(graphClient, userEmail, user.displayName, 10);
+            const loopFiles = files.filter((f) => isLoopFile(f as Record<string, unknown>));
             summary.sharedFiles = {
               count: files.length,
-              files: files.slice(0, 5).map((f) => ({
-                name: f.name,
-                webUrl: f.webUrl,
-                sharedDate: f.shared?.sharedDateTime,
-              })),
+              loopFileCount: loopFiles.length,
+              files: files.slice(0, 5).map((f) => {
+                const loopDetection = detectLoopFile(f as Record<string, unknown>);
+                return {
+                  name: f.name,
+                  webUrl: f.webUrl,
+                  sharedDate: f.shared?.sharedDateTime,
+                  isLoopFile: loopDetection.isLoopFile,
+                };
+              }),
             };
           })()
         );
@@ -16178,6 +16201,170 @@ Use this for "How can we collaborate better?", "Suggest improvements to our work
           },
         ],
       };
+    }
+  );
+  registeredCount++;
+
+  // ==========================================================================
+  // READ-LOOP-FILE - Read and parse Microsoft Loop files
+  // ==========================================================================
+  server.tool(
+    'read-loop-file',
+    {
+      title: 'Read Loop File',
+      description:
+        'Read and parse a Microsoft Loop file. Loop files are collaborative documents that can contain notes, lists, tables, and other content. ' +
+        'This tool detects Loop files, downloads their content, and extracts readable text from the Fluid format. ' +
+        'Use this when you need to read the content of a Loop component or Loop page.',
+      inputSchema: z.object({
+        itemId: z.string().describe('The ID of the Loop file (DriveItem ID)'),
+        driveId: z
+          .string()
+          .optional()
+          .describe("The Drive ID. If not provided, uses the user's OneDrive"),
+        includeRawContent: z
+          .boolean()
+          .optional()
+          .default(false)
+          .describe('Include the raw file content in addition to parsed text'),
+      }),
+      annotations: {
+        audience: ['user', 'assistant'],
+        readOnlyHint: true,
+        openWorldHint: true,
+      },
+    },
+    async ({ itemId, driveId, includeRawContent = false }) => {
+      logger.info(`Reading Loop file: ${itemId}`);
+
+      try {
+        // Step 1: Get file metadata
+        const metadataEndpoint = driveId
+          ? `/drives/${driveId}/items/${itemId}`
+          : `/me/drive/items/${itemId}`;
+
+        const metadataResponse = await graphClient.makeRequest(metadataEndpoint, {
+          method: 'GET',
+        });
+
+        if (!metadataResponse || typeof metadataResponse !== 'object') {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({
+                  error: 'File not found',
+                  message: `Could not find file with ID "${itemId}".`,
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const metadata = metadataResponse as Record<string, unknown>;
+        const fileName = (metadata.name as string) || 'Unknown';
+        const webUrl = (metadata.webUrl as string) || '';
+        const size = (metadata.size as number) || 0;
+        const lastModified = (metadata.lastModifiedDateTime as string) || '';
+
+        // Step 2: Detect if it's a Loop file
+        const loopDetection = detectLoopFile(metadata);
+
+        // Step 3: Download file content
+        const contentEndpoint = driveId
+          ? `/drives/${driveId}/items/${itemId}/content`
+          : `/me/drive/items/${itemId}/content`;
+
+        let content: string | null = null;
+        try {
+          const contentResponse = await graphClient.makeRequest(contentEndpoint, {
+            method: 'GET',
+          });
+          if (typeof contentResponse === 'string') {
+            content = contentResponse;
+          } else if (contentResponse && typeof contentResponse === 'object') {
+            content = JSON.stringify(contentResponse);
+          }
+        } catch (err) {
+          logger.warn(`Failed to download Loop file content: ${err}`);
+        }
+
+        // Step 4: Parse Loop content
+        let parsedContent = null;
+        if (content) {
+          parsedContent = parseLoopContent(content);
+        }
+
+        // Build response
+        const response: Record<string, unknown> = {
+          success: true,
+          file: {
+            id: itemId,
+            name: fileName,
+            webUrl,
+            size,
+            lastModified,
+          },
+          isLoopFile: loopDetection.isLoopFile,
+          loopDetection: loopDetection.isLoopFile
+            ? {
+                method: loopDetection.detectionMethod,
+                confidence: loopDetection.confidence,
+                matchedPattern: loopDetection.matchedPattern,
+              }
+            : null,
+        };
+
+        if (parsedContent) {
+          response.contentType = parsedContent.contentType;
+          response.textContent = parsedContent.textContent || null;
+          response.metadata = parsedContent.metadata || null;
+
+          if (includeRawContent && parsedContent.rawContent) {
+            // Limit raw content size
+            const maxRawLength = 20000;
+            response.rawContent =
+              parsedContent.rawContent.length > maxRawLength
+                ? parsedContent.rawContent.substring(0, maxRawLength) + '... (truncated)'
+                : parsedContent.rawContent;
+          }
+
+          response.rawContentLength = parsedContent.rawContent?.length || 0;
+        }
+
+        if (!loopDetection.isLoopFile) {
+          response.note =
+            'This file was not detected as a Loop file. It may still contain valid content, ' +
+            'but Loop-specific parsing may not apply.';
+        }
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(response, null, 2),
+            },
+          ],
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error(`Error reading Loop file: ${errorMessage}`);
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({
+                error: 'Failed to read Loop file',
+                message: errorMessage,
+                itemId,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
     }
   );
   registeredCount++;

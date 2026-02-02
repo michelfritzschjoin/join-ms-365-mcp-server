@@ -46,6 +46,12 @@ import {
   getUserId,
 } from './request-context.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
+import {
+  isLoopFile,
+  detectLoopFile,
+  parseLoopContent,
+  formatLoopFileInfo,
+} from './utils/loop-detector.js';
 // Query Pattern Learning
 import { getQueryStore } from './query-store.js';
 import type { ProfessionProfile } from './user-profile.js';
@@ -1109,6 +1115,19 @@ const filterSchema = {
   orderby: z.string().optional().describe('OData orderby expression'),
 };
 
+// Date helper functions for calendar queries
+function setStartOfDay(date: Date): Date {
+  const result = new Date(date);
+  result.setHours(0, 0, 0, 0);
+  return result;
+}
+
+function setEndOfDay(date: Date): Date {
+  const result = new Date(date);
+  result.setHours(23, 59, 59, 999);
+  return result;
+}
+
 // Read-only mode check helper
 function checkReadOnly(readOnly: boolean, action: string): void {
   if (readOnly) {
@@ -1994,6 +2013,32 @@ async function handleFiles(
           : `/drives/${driveId}/items/${itemId}/children`;
       const params: Record<string, string> = { $top: String(input.top || 50) };
       const result = await callGraph(graphClient, 'GET', endpoint, params);
+
+      // Check for Loop files in the listing and mark them
+      try {
+        const parsedResult = JSON.parse(result);
+        if (parsedResult.value && Array.isArray(parsedResult.value)) {
+          let loopFileCount = 0;
+          for (const item of parsedResult.value) {
+            const detection = detectLoopFile(item);
+            if (detection.isLoopFile) {
+              item.isLoopFile = true;
+              item.loopDetection = {
+                method: detection.detectionMethod,
+                confidence: detection.confidence,
+              };
+              loopFileCount++;
+            }
+          }
+          if (loopFileCount > 0) {
+            thinking.push(`📋 Found ${loopFileCount} Loop file(s) in listing`);
+          }
+          return addThinkingToResponse(JSON.stringify(parsedResult, null, 2), thinking);
+        }
+      } catch {
+        // If parsing fails, just return the original result
+      }
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -2006,6 +2051,23 @@ async function handleFiles(
           ? `/me/drive/items/${input.itemId}`
           : `/drives/${driveId}/items/${input.itemId}`;
       const result = await callGraph(graphClient, 'GET', endpoint);
+
+      // Check if this is a Loop file and add detection info
+      try {
+        const parsedResult = JSON.parse(result);
+        const loopDetection = detectLoopFile(parsedResult);
+        if (loopDetection.isLoopFile) {
+          thinking.push(
+            `📋 Loop file detected (${loopDetection.detectionMethod}, ${loopDetection.confidence} confidence)`
+          );
+          parsedResult.isLoopFile = true;
+          parsedResult.loopDetection = loopDetection;
+          return addThinkingToResponse(JSON.stringify(parsedResult, null, 2), thinking);
+        }
+      } catch {
+        // If parsing fails, just return the original result
+      }
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -2013,11 +2075,65 @@ async function handleFiles(
       if (!input.itemId) throw new Error('itemId is required for download');
       const driveId = input.driveId || 'me';
       thinking.push(`Downloading file: ${input.itemId}`);
-      const endpoint =
+
+      // First, get file metadata to check if it's a Loop file
+      const metadataEndpoint =
+        driveId === 'me'
+          ? `/me/drive/items/${input.itemId}`
+          : `/drives/${driveId}/items/${input.itemId}`;
+
+      let isLoopDetected = false;
+      let loopDetectionResult = null;
+      try {
+        const metadataResult = await callGraph(graphClient, 'GET', metadataEndpoint);
+        const metadata = JSON.parse(metadataResult);
+        const detection = detectLoopFile(metadata);
+        if (detection.isLoopFile) {
+          isLoopDetected = true;
+          loopDetectionResult = detection;
+          thinking.push(
+            `📋 Loop file detected (${detection.detectionMethod}, ${detection.confidence} confidence)`
+          );
+        }
+      } catch {
+        // Continue with download even if metadata fails
+      }
+
+      const contentEndpoint =
         driveId === 'me'
           ? `/me/drive/items/${input.itemId}/content`
           : `/drives/${driveId}/items/${input.itemId}/content`;
-      const result = await callGraph(graphClient, 'GET', endpoint);
+      const result = await callGraph(graphClient, 'GET', contentEndpoint);
+
+      // If this is a Loop file, try to parse and extract content
+      if (isLoopDetected && typeof result === 'string') {
+        thinking.push('📖 Parsing Loop file content');
+        const parsedContent = parseLoopContent(result);
+
+        if (parsedContent.success) {
+          const response = {
+            isLoopFile: true,
+            loopDetection: loopDetectionResult,
+            contentType: parsedContent.contentType,
+            textContent: parsedContent.textContent || null,
+            metadata: parsedContent.metadata || null,
+            rawContentLength: parsedContent.rawContent.length,
+            rawContent:
+              parsedContent.rawContent.length <= 10000
+                ? parsedContent.rawContent
+                : parsedContent.rawContent.substring(0, 10000) + '... (truncated)',
+          };
+
+          if (parsedContent.textContent) {
+            thinking.push(
+              `✅ Extracted ${parsedContent.textContent.length} characters of text content`
+            );
+          }
+
+          return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
+        }
+      }
+
       return addThinkingToResponse(result, thinking);
     }
 
@@ -3534,13 +3650,15 @@ async function handleSearch(
       // Past events
       startDate = new Date(now);
       startDate.setDate(startDate.getDate() - Math.abs(days));
-      endDate = now;
+      startDate = setStartOfDay(startDate);
+      endDate = setEndOfDay(now);
       thinking.push(`📅 Looking for past ${Math.abs(days)} days of events`);
     } else {
       // Future events (default)
-      startDate = now;
+      startDate = setStartOfDay(now);
       endDate = new Date(now);
       endDate.setDate(endDate.getDate() + days);
+      endDate = setEndOfDay(endDate);
       thinking.push(`📅 Looking for next ${days} days of events`);
     }
 
@@ -4552,19 +4670,18 @@ async function handleAssistant(
     case 'my-day': {
       const startTime = Date.now();
       thinking.push("Getting today's summary");
-      const today = new Date();
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      const today = setStartOfDay(new Date());
+      const todayEnd = setEndOfDay(new Date());
 
       // Batch API calls with deduplication
       const batchResults = await batchAPICalls([
         {
-          key: `calendarView_${today.toISOString()}_${tomorrow.toISOString()}`,
+          key: `calendarView_${today.toISOString()}_${todayEnd.toISOString()}`,
           description: "Today's calendar events",
           operation: async () => {
             const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
               startDateTime: today.toISOString(),
-              endDateTime: tomorrow.toISOString(),
+              endDateTime: todayEnd.toISOString(),
             });
             return JSON.parse(result);
           },
@@ -4623,19 +4740,20 @@ async function handleAssistant(
     case 'my-week': {
       const startTime = Date.now();
       thinking.push('Getting week summary');
-      const today = new Date();
+      const today = setStartOfDay(new Date());
       const weekEnd = new Date(today);
       weekEnd.setDate(weekEnd.getDate() + 7);
+      const weekEndTime = setEndOfDay(weekEnd);
 
       // Batch API calls with deduplication
       const batchResults = await batchAPICalls([
         {
-          key: `calendarView_${today.toISOString()}_${weekEnd.toISOString()}`,
+          key: `calendarView_${today.toISOString()}_${weekEndTime.toISOString()}`,
           description: 'Week calendar events',
           operation: async () => {
             const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
               startDateTime: today.toISOString(),
-              endDateTime: weekEnd.toISOString(),
+              endDateTime: weekEndTime.toISOString(),
             });
             return JSON.parse(result);
           },
@@ -4738,13 +4856,12 @@ async function handleAssistant(
 
     case 'meeting-prep': {
       thinking.push('Preparing for upcoming meetings');
-      const today = new Date();
-      const tomorrow = new Date(today);
-      tomorrow.setDate(tomorrow.getDate() + 1);
+      const today = setStartOfDay(new Date());
+      const todayEnd = setEndOfDay(new Date());
 
       const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
         startDateTime: today.toISOString(),
-        endDateTime: tomorrow.toISOString(),
+        endDateTime: todayEnd.toISOString(),
       });
       results.upcomingMeetings = JSON.parse(eventsResult);
 
@@ -4929,10 +5046,12 @@ async function handleDiscoverPerson(
   const limit = Math.min(input.limit || 25, 100);
   const days = Math.min(input.days || 90, 365);
 
-  const startDate = new Date();
+  let startDate = new Date();
   startDate.setDate(startDate.getDate() - days);
-  const endDate = new Date();
+  startDate = setStartOfDay(startDate);
+  let endDate = new Date();
   endDate.setDate(endDate.getDate() + 30); // Include future meetings
+  endDate = setEndOfDay(endDate);
 
   thinking.push(`📊 Searching across multiple sources for: ${personName}`);
   thinking.push(`   Time range: last ${days} days`);
@@ -5919,19 +6038,42 @@ async function handleDiscoverCompany(
   thinking.push(`📄 Found ${siteListItems.length} SharePoint list items`);
 
   // Extract document content for found files (limited to avoid too many API calls)
+  // Also detect and handle Loop files specially
   thinking.push(`📄 Extracting content from ${Math.min(searchFiles.length, 10)} documents`);
+
+  // First, detect Loop files in the search results
+  let loopFilesFoundCount = 0;
+  for (const file of searchFiles) {
+    const fileObj = file as Record<string, unknown>;
+    const loopDetection = detectLoopFile(fileObj);
+    if (loopDetection.isLoopFile) {
+      loopFilesFoundCount++;
+      fileObj.isLoopFile = true;
+      fileObj.loopDetection = {
+        method: loopDetection.detectionMethod,
+        confidence: loopDetection.confidence,
+      };
+    }
+  }
+  if (loopFilesFoundCount > 0) {
+    thinking.push(`📋 Found ${loopFilesFoundCount} Loop file(s) in search results`);
+  }
+
   const documentContentPromises = searchFiles.slice(0, 10).map(async (file) => {
     // Limit to first 10 files
     const fileObj = file as Record<string, unknown>;
     const fileId = fileObj.id as string | undefined;
-    const driveId = fileObj.parentReference?.driveId as string | undefined;
+    const driveId = (fileObj.parentReference as Record<string, unknown> | undefined)?.driveId as
+      | string
+      | undefined;
     const fileName = (fileObj.name as string) || 'unknown';
     const fileType = fileName.split('.').pop()?.toLowerCase() || '';
+    const fileIsLoop = fileObj.isLoopFile === true;
 
-    // Only try to extract content from text-based documents
-    const textFileTypes = ['txt', 'md', 'csv', 'json', 'xml', 'html', 'htm'];
-    if (!fileId || !textFileTypes.includes(fileType)) {
-      return { file, content: null };
+    // Try to extract content from text-based documents AND Loop files
+    const textFileTypes = ['txt', 'md', 'csv', 'json', 'xml', 'html', 'htm', 'loop', 'fluid'];
+    if (!fileId || (!textFileTypes.includes(fileType) && !fileIsLoop)) {
+      return { file, content: null, isLoopFile: fileIsLoop };
     }
 
     try {
@@ -5941,24 +6083,48 @@ async function handleDiscoverCompany(
       const content = await callGraph(graphClient, 'GET', endpoint).catch(() => null);
 
       if (content && typeof content === 'string') {
+        // If it's a Loop file, try to parse and extract readable content
+        if (fileIsLoop) {
+          const parsedLoop = parseLoopContent(content);
+          if (parsedLoop.success && parsedLoop.textContent) {
+            const maxContentLength = 5000;
+            const truncatedContent =
+              parsedLoop.textContent.length > maxContentLength
+                ? parsedLoop.textContent.substring(0, maxContentLength) + '...'
+                : parsedLoop.textContent;
+            return {
+              file,
+              content: truncatedContent,
+              isLoopFile: true,
+              loopMetadata: parsedLoop.metadata,
+            };
+          }
+        }
+
         // Limit content length to avoid huge responses
         const maxContentLength = 5000;
         const truncatedContent =
           content.length > maxContentLength
             ? content.substring(0, maxContentLength) + '...'
             : content;
-        return { file, content: truncatedContent };
+        return { file, content: truncatedContent, isLoopFile: fileIsLoop };
       }
     } catch (err) {
       logger.debug(`Failed to extract content from file ${fileName}: ${err}`);
     }
 
-    return { file, content: null };
+    return { file, content: null, isLoopFile: fileIsLoop };
   });
 
   const documentContents = await Promise.all(documentContentPromises);
   const filesWithContent = documentContents.filter((dc) => dc.content !== null);
+  const loopFilesWithContent = documentContents.filter(
+    (dc) => dc.isLoopFile && dc.content !== null
+  );
   thinking.push(`✅ Extracted content from ${filesWithContent.length} documents`);
+  if (loopFilesWithContent.length > 0) {
+    thinking.push(`📋 Extracted content from ${loopFilesWithContent.length} Loop file(s)`);
+  }
 
   // Combine all results (search API + direct searches)
   const allEmailsFromDirect = emailResults;

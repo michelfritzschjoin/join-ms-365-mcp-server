@@ -17,6 +17,7 @@ import type {
   FormatPreference,
 } from './user-profile.js';
 import { getProfessionProfile } from './request-context.js';
+import { detectLoopFile, type LoopFileDetectionResult } from './utils/loop-detector.js';
 
 /**
  * Structured calendar event interface
@@ -1387,10 +1388,12 @@ export function formatFilesResponse(response: Record<string, unknown>): {
   summary: {
     totalFiles: number;
     totalFolders: number;
+    totalLoopFiles: number;
     totalSize: number;
     fileTypes: Record<string, number>;
   };
   files: Array<Record<string, unknown>>;
+  loopFiles: Array<Record<string, unknown>>;
   groupedByType: Record<string, Array<Record<string, unknown>>>;
 } {
   // Validate input
@@ -1400,10 +1403,12 @@ export function formatFilesResponse(response: Record<string, unknown>): {
       summary: {
         totalFiles: 0,
         totalFolders: 0,
+        totalLoopFiles: 0,
         totalSize: 0,
         fileTypes: {},
       },
       files: [],
+      loopFiles: [],
       groupedByType: {},
     };
   }
@@ -1413,6 +1418,7 @@ export function formatFilesResponse(response: Record<string, unknown>): {
   // Filter and categorize items
   const files: Array<Record<string, unknown>> = [];
   const folders: Array<Record<string, unknown>> = [];
+  const loopFiles: Array<Record<string, unknown>> = [];
   const fileTypes: Record<string, number> = {};
   let totalSize = 0;
 
@@ -1420,6 +1426,17 @@ export function formatFilesResponse(response: Record<string, unknown>): {
     const odataType = (item['@odata.type'] as string) || '';
     const isFolder = odataType.includes('folder') || item.folder !== undefined;
     const isFile = odataType.includes('file') || (item.file !== undefined && !isFolder);
+
+    // Detect Loop files
+    const loopDetection = detectLoopFile(item);
+    if (loopDetection.isLoopFile) {
+      item.isLoopFile = true;
+      item.loopDetection = {
+        method: loopDetection.detectionMethod,
+        confidence: loopDetection.confidence,
+      };
+      loopFiles.push(item);
+    }
 
     if (isFolder) {
       folders.push(item);
@@ -1455,10 +1472,12 @@ export function formatFilesResponse(response: Record<string, unknown>): {
     summary: {
       totalFiles: files.length,
       totalFolders: folders.length,
+      totalLoopFiles: loopFiles.length,
       totalSize,
       fileTypes,
     },
     files: [...files, ...folders], // Combine files and folders
+    loopFiles,
     groupedByType,
   };
 }
@@ -1481,10 +1500,12 @@ export function filesResponseToText(response: {
   summary: {
     totalFiles: number;
     totalFolders: number;
+    totalLoopFiles?: number;
     totalSize: number;
     fileTypes: Record<string, number>;
   };
   files: Array<Record<string, unknown>>;
+  loopFiles?: Array<Record<string, unknown>>;
   groupedByType: Record<string, Array<Record<string, unknown>>>;
 }): string {
   const lines: string[] = [];
@@ -1496,6 +1517,9 @@ export function filesResponseToText(response: {
   // Comprehensive summary at the top
   lines.push(`📊 Anzahl Dateien: ${response.summary.totalFiles}`);
   lines.push(`📂 Anzahl Ordner: ${response.summary.totalFolders}`);
+  if (response.summary.totalLoopFiles && response.summary.totalLoopFiles > 0) {
+    lines.push(`📋 Loop-Dateien: ${response.summary.totalLoopFiles}`);
+  }
   lines.push(`💾 Gesamtgröße: ${formatFileSize(response.summary.totalSize)}`);
 
   if (response.summary.totalFiles === 0 && response.summary.totalFolders === 0) {
@@ -1554,16 +1578,45 @@ export function filesResponseToText(response: {
     const name = (item.name as string) || (item.displayName as string) || 'Unbekannt';
     const odataType = (item['@odata.type'] as string) || '';
     const isFolder = odataType.includes('folder') || item.folder !== undefined;
-    const icon = isFolder ? '📂' : '📄';
+    const isLoop = item.isLoopFile === true;
+    // Use Loop icon for Loop files, folder icon for folders, otherwise file icon
+    const icon = isLoop ? '📋' : isFolder ? '📂' : '📄';
+    const loopBadge = isLoop ? ' [Loop]' : '';
     const size = isFolder ? '' : ` (${formatFileSize((item.size as number) || 0)})`;
     const webUrl = (item.webUrl as string) || '';
     const urlPart = webUrl ? ` [🔗](${webUrl})` : '';
 
-    lines.push(`${i + 1}. ${icon} ${name}${size}${urlPart}`);
+    lines.push(`${i + 1}. ${icon} ${name}${loopBadge}${size}${urlPart}`);
   }
 
   if (response.files.length > 20) {
     lines.push(`... und ${response.files.length - 20} weitere`);
+  }
+
+  // Loop files section (if any)
+  if (response.loopFiles && response.loopFiles.length > 0) {
+    lines.push('');
+    lines.push('═'.repeat(60));
+    lines.push(`📋 LOOP-DATEIEN (${response.loopFiles.length}):`);
+    lines.push('═'.repeat(60));
+    lines.push('');
+
+    for (const loopFile of response.loopFiles.slice(0, 10)) {
+      const name = (loopFile.name as string) || (loopFile.displayName as string) || 'Unbekannt';
+      const size = formatFileSize((loopFile.size as number) || 0);
+      const webUrl = (loopFile.webUrl as string) || '';
+      const urlPart = webUrl ? ` [🔗](${webUrl})` : '';
+      const detection = loopFile.loopDetection as
+        | { method?: string; confidence?: string }
+        | undefined;
+      const detectionInfo = detection ? ` (${detection.method}, ${detection.confidence})` : '';
+
+      lines.push(`   📋 ${name} (${size})${detectionInfo}${urlPart}`);
+    }
+
+    if (response.loopFiles.length > 10) {
+      lines.push(`   ... und ${response.loopFiles.length - 10} weitere Loop-Dateien`);
+    }
   }
 
   lines.push('');
