@@ -30,10 +30,10 @@ export interface FormattedCalendarEvent {
   startTime: string;
   endDate: string;
   endTime: string;
-  // UTC time (for reference)
+  // UTC time (for internal reference only)
   startDateTimeUTC: string;
   endDateTimeUTC: string;
-  // Combined display string: "10:30 (UTC: 09:30)"
+  // Display string: local time only (e.g., "10:30")
   startTimeDisplay: string;
   endTimeDisplay: string;
   duration: string;
@@ -398,16 +398,11 @@ export function formatUTCDateTime(date: Date): string {
 }
 
 /**
- * Format time with both local and UTC display
- * Example: "10:30 (UTC: 09:30)"
+ * Format time for display - only shows local time
+ * UTC display was removed as users expect local time only
  */
 export function formatTimeWithUTC(date: Date): string {
-  const localTime = formatLocalTime(date);
-  const utcTime = formatUTCTime(date);
-  if (localTime === utcTime) {
-    return localTime;
-  }
-  return `${localTime} (UTC: ${utcTime})`;
+  return formatLocalTime(date);
 }
 
 /**
@@ -577,10 +572,10 @@ export function formatCalendarEvent(event: Record<string, unknown>): FormattedCa
     startTime: formatLocalTime(startDateTime),
     endDate: formatLocalDate(endDateTime),
     endTime: formatLocalTime(endDateTime),
-    // UTC time
+    // UTC time (internal reference)
     startDateTimeUTC: formatUTCDateTime(startDateTime),
     endDateTimeUTC: formatUTCDateTime(endDateTime),
-    // Combined display: "10:30 (UTC: 09:30)"
+    // Display: local time only
     startTimeDisplay: formatTimeWithUTC(startDateTime),
     endTimeDisplay: formatTimeWithUTC(endDateTime),
     duration: calculateDuration(startDateTime, endDateTime),
