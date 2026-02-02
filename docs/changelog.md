@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.21.1...v1.22.0) (2026-02-02)
+
+### Features
+
+* add microsoft loop file detection and reading support ([8b01201](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/8b012012a6b86557b7859de1ea7fae871d542b89))
+
 ## [1.21.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.21.0...v1.21.1) (2026-02-02)
 
 ### Bug Fixes
