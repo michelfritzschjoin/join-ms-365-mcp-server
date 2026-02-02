@@ -21,6 +21,7 @@ import {
   calendarResponseToText,
   formatMailResponse,
   mailResponseToText,
+  convertToLocalTime,
 } from './response-formatter.js';
 import { createThinkingProcess } from './thinking-process.js';
 import { isLoopFile, detectLoopFile, parseLoopContent } from './utils/loop-detector.js';
@@ -1071,7 +1072,7 @@ async function findMeetingsWithPerson(
       endDateTime: futureDate.toISOString(),
       $top: '100',
       $select: 'id,subject,bodyPreview,start,end,attendees,organizer,location,webLink',
-      $orderby: 'start/dateTime desc',
+      $orderby: 'start/dateTime asc',
     };
 
     const response = await graphClient.makeRequest(
@@ -1162,6 +1163,13 @@ async function findMeetingsWithPerson(
         }
       }
     }
+
+    // Sort matching events by start time (ascending) with proper timezone handling
+    matchingEvents.sort((a, b) => {
+      const aTime = convertToLocalTime(a.start.dateTime, a.start.timeZone).getTime();
+      const bTime = convertToLocalTime(b.start.dateTime, b.start.timeZone).getTime();
+      return aTime - bTime;
+    });
 
     return matchingEvents.slice(0, limit);
   } catch (error) {
@@ -5249,19 +5257,35 @@ Use this when someone asks "What meetings do I have with [person]?" or "When did
       );
 
       const now = new Date();
-      const pastMeetings = meetings.filter((m) => new Date(m.start.dateTime) < now);
-      const upcomingMeetings = meetings.filter((m) => new Date(m.start.dateTime) >= now);
-
-      const formatMeeting = (event: GraphEvent) => ({
-        id: event.id,
-        subject: event.subject,
-        start: event.start.dateTime,
-        end: event.end.dateTime,
-        location: event.location?.displayName,
-        organizer: event.organizer?.emailAddress?.name,
-        attendeeCount: event.attendees?.length || 0,
-        webLink: event.webLink,
+      // Use convertToLocalTime to properly handle timezone from Graph API
+      const pastMeetings = meetings.filter((m) => {
+        const eventTime = convertToLocalTime(m.start.dateTime, m.start.timeZone);
+        return eventTime < now;
       });
+      const upcomingMeetings = meetings.filter((m) => {
+        const eventTime = convertToLocalTime(m.start.dateTime, m.start.timeZone);
+        return eventTime >= now;
+      });
+
+      const formatMeeting = (event: GraphEvent) => {
+        const startLocal = convertToLocalTime(event.start.dateTime, event.start.timeZone);
+        const endLocal = convertToLocalTime(event.end.dateTime, event.end.timeZone);
+        return {
+          id: event.id,
+          subject: event.subject,
+          start: startLocal.toLocaleString('de-DE', { 
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit' 
+          }),
+          end: endLocal.toLocaleString('de-DE', { 
+            hour: '2-digit', minute: '2-digit' 
+          }),
+          location: event.location?.displayName,
+          organizer: event.organizer?.emailAddress?.name,
+          attendeeCount: event.attendees?.length || 0,
+          webLink: event.webLink,
+        };
+      };
 
       return {
         content: [
