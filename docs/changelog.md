@@ -7,6 +7,12 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.20.0...v1.21.0) (2026-02-02)
+
+### Features
+
+* **email:** add child-folders action to list mail subfolders ([44182b0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/44182b0bdad2d4a6224c7e8b7b15dd7ec0df2c94))
+
 ## [1.20.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.19.0...v1.20.0) (2026-02-02)
 
 ### Features
