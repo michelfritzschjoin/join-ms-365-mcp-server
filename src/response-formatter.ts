@@ -269,8 +269,10 @@ export function convertToLocalTime(dateTimeString: string, timeZone?: string): D
     }
 
     // Adjust the UTC time by the difference
-    // If the event timezone shows an earlier time, we need to go back in UTC
-    const adjustedUTC = new Date(testUTC.getTime() - diffMinutes * 60 * 1000);
+    // If the event timezone shows a later time than desired, we need to go back in UTC
+    // Example: Event at 10:00 Berlin, testUTC is 10:00 UTC which shows as 11:00 Berlin
+    // We need 09:00 UTC to show as 10:00 Berlin, so we ADD the negative diff (-60 min)
+    const adjustedUTC = new Date(testUTC.getTime() + diffMinutes * 60 * 1000);
 
     // Verify the conversion by formatting back
     const verifyFormatter = new Intl.DateTimeFormat('en', {
