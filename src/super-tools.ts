@@ -2541,15 +2541,19 @@ async function handleSharePoint(
 const notesActions = z.enum([
   'notebooks', // List notebooks
   'sections', // List sections in notebook
-  'pages', // List pages in section
+  'pages', // List pages in section (requires sectionId) OR search all pages (with search parameter)
   'page-content', // Get page content
+  'search-pages', // Search all pages by title
 ]);
 
 const notesSchema = z.object({
   action: notesActions.describe('The OneNote operation to perform'),
   // Identifiers
   notebookId: z.string().optional().describe('Notebook ID'),
-  sectionId: z.string().optional().describe('Section ID'),
+  sectionId: z
+    .string()
+    .optional()
+    .describe('Section ID (required for pages action without search)'),
   pageId: z.string().optional().describe('Page ID'),
   // Filters
   ...filterSchema,
@@ -2585,15 +2589,43 @@ async function handleNotes(
     }
 
     case 'pages': {
-      if (!input.sectionId) throw new Error('sectionId is required');
-      thinking.push(`Listing pages in section: ${input.sectionId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
+
+      // If search parameter is provided, search across all pages
+      if (input.search) {
+        thinking.push(`Searching all OneNote pages for: "${input.search}"`);
+        // Use $filter to search by title contains
+        params.$filter = `contains(title,'${input.search.replace(/'/g, "''")}')`;
+        params.$orderby = 'lastModifiedDateTime desc';
+        const result = await callGraph(graphClient, 'GET', '/me/onenote/pages', params);
+        return addThinkingToResponse(result, thinking);
+      }
+
+      // Otherwise, require sectionId to list pages in a specific section
+      if (!input.sectionId) {
+        throw new Error(
+          'Either sectionId or search parameter is required. Use sectionId to list pages in a section, or search to find pages by title.'
+        );
+      }
+      thinking.push(`Listing pages in section: ${input.sectionId}`);
       const result = await callGraph(
         graphClient,
         'GET',
         `/me/onenote/sections/${input.sectionId}/pages`,
         params
       );
+      return addThinkingToResponse(result, thinking);
+    }
+
+    case 'search-pages': {
+      if (!input.search) throw new Error('search parameter is required for search-pages action');
+      thinking.push(`Searching all OneNote pages for: "${input.search}"`);
+      const params: Record<string, string> = {
+        $top: String(input.top || 50),
+        $filter: `contains(title,'${input.search.replace(/'/g, "''")}')`,
+        $orderby: 'lastModifiedDateTime desc',
+      };
+      const result = await callGraph(graphClient, 'GET', '/me/onenote/pages', params);
       return addThinkingToResponse(result, thinking);
     }
 

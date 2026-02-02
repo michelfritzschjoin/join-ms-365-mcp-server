@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* **response-formatter:** add comprehensive summaries and improve filtering ([17b7a0d](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/17b7a0d13b5664d2682a623d759c65999ba9622e))
+- **response-formatter:** add comprehensive summaries and improve filtering ([17b7a0d](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/17b7a0d13b5664d2682a623d759c65999ba9622e))
 
 ## [1.17.5](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.17.4...v1.17.5) (2026-01-30)
 
