@@ -71,6 +71,13 @@ class GraphClient {
     }
   }
 
+  /**
+   * Get the current output format
+   */
+  getOutputFormat(): 'json' | 'toon' {
+    return this.outputFormat;
+  }
+
   async makeRequest(
     endpoint: string,
     options: GraphRequestOptions = {},

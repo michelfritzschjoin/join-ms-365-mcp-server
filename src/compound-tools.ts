@@ -138,7 +138,7 @@ function buildGraphQueryString(params: Record<string, string>): string {
 }
 
 // Type definitions for Graph API responses
-interface GraphUser {
+export interface GraphUser {
   id: string;
   displayName: string;
   mail?: string;
@@ -150,12 +150,13 @@ interface GraphUser {
   officeLocation?: string;
 }
 
-interface GraphChat {
+export interface GraphChat {
   id: string;
   chatType: string;
   topic?: string;
   createdDateTime: string;
   lastUpdatedDateTime?: string;
+  webUrl?: string;
   members?: Array<{
     displayName?: string;
     userId?: string;
@@ -196,7 +197,21 @@ interface GraphEmail {
       address: string;
     };
   }>;
+  ccRecipients?: Array<{
+    emailAddress: {
+      name?: string;
+      address: string;
+    };
+  }>;
+  body?: {
+    content?: string;
+    contentType?: string;
+  };
+  conversationId?: string;
+  importance?: string;
+  isRead?: boolean;
   hasAttachments?: boolean;
+  attachments?: Array<{ name: string; contentId?: string }>;
   webLink?: string;
 }
 
@@ -567,7 +582,10 @@ interface GraphChannelMessage {
 /**
  * Helper function to find a user by name, email, or phone
  */
-async function findUser(graphClient: GraphClient, searchQuery: string): Promise<GraphUser | null> {
+export async function findUser(
+  graphClient: GraphClient,
+  searchQuery: string
+): Promise<GraphUser | null> {
   try {
     // Try different search approaches
     const searchStrategies = [
@@ -664,7 +682,7 @@ async function findUser(graphClient: GraphClient, searchQuery: string): Promise<
 /**
  * Find chats that include a specific user
  */
-async function findChatsWithUser(
+export async function findChatsWithUser(
   graphClient: GraphClient,
   userId: string,
   userEmail?: string,
@@ -1885,14 +1903,18 @@ async function executeCentralSearch(
 
                   // Boost relevance based on query matching in key fields
                   const queryLower = query.toLowerCase();
-                  const resource = hit.resource || {};
+                  const resource = (hit.resource || {}) as Record<string, unknown>;
                   const name = (
-                    resource.name ||
-                    resource.subject ||
-                    resource.displayName ||
+                    (resource.name as string) ||
+                    (resource.subject as string) ||
+                    (resource.displayName as string) ||
                     ''
                   ).toLowerCase();
-                  const summary = (hit.summary || resource.bodyPreview || '').toLowerCase();
+                  const summary = (
+                    hit.summary ||
+                    (resource.bodyPreview as string) ||
+                    ''
+                  ).toLowerCase();
 
                   // Exact match in name/title/subject gets highest boost
                   if (name.includes(queryLower)) {
@@ -1903,7 +1925,7 @@ async function executeCentralSearch(
                   const queryWords = queryLower.split(/\s+/).filter((w) => w.length > 2);
                   const nameWords = name.split(/\s+/);
                   const matchingWords = queryWords.filter((qw) =>
-                    nameWords.some((nw) => nw.includes(qw) || qw.includes(nw))
+                    nameWords.some((nw: string) => nw.includes(qw) || qw.includes(nw))
                   );
                   if (matchingWords.length > 0) {
                     relevanceScore += matchingWords.length * 5;
@@ -1915,15 +1937,27 @@ async function executeCentralSearch(
                   }
 
                   // Temporal relevance boost (newer items are more relevant)
-                  const timestamp = this.extractTimestampFromResource(resource);
-                  if (timestamp) {
-                    const daysSince = (Date.now() - timestamp.getTime()) / (1000 * 60 * 60 * 24);
-                    if (daysSince < 7) {
-                      relevanceScore += 15; // Very recent
-                    } else if (daysSince < 30) {
-                      relevanceScore += 10; // Recent
-                    } else if (daysSince < 90) {
-                      relevanceScore += 5; // Somewhat recent
+                  const receivedDateTime = resource.receivedDateTime as string | undefined;
+                  const startDateTime = (resource.start as { dateTime?: string } | undefined)
+                    ?.dateTime;
+                  const createdDateTime = resource.createdDateTime as string | undefined;
+                  const timestampStr = receivedDateTime || startDateTime || createdDateTime;
+                  if (timestampStr) {
+                    try {
+                      const timestamp = new Date(timestampStr);
+                      if (!isNaN(timestamp.getTime())) {
+                        const daysSince =
+                          (Date.now() - timestamp.getTime()) / (1000 * 60 * 60 * 24);
+                        if (daysSince < 7) {
+                          relevanceScore += 15; // Very recent
+                        } else if (daysSince < 30) {
+                          relevanceScore += 10; // Recent
+                        } else if (daysSince < 90) {
+                          relevanceScore += 5; // Somewhat recent
+                        }
+                      }
+                    } catch {
+                      // Ignore invalid dates
                     }
                   }
 
@@ -1932,8 +1966,9 @@ async function executeCentralSearch(
                     relevanceScore += 5; // Emails are often highly relevant
                   } else if (type.includes('event')) {
                     // Future events are more relevant than past events
-                    if (resource.start?.dateTime) {
-                      const startDate = new Date(resource.start.dateTime as string);
+                    const start = resource.start as { dateTime?: string } | undefined;
+                    if (start?.dateTime) {
+                      const startDate = new Date(start.dateTime);
                       if (startDate > new Date()) {
                         relevanceScore += 10; // Future event
                       }
@@ -5273,12 +5308,16 @@ Use this when someone asks "What meetings do I have with [person]?" or "When did
         return {
           id: event.id,
           subject: event.subject,
-          start: startLocal.toLocaleString('de-DE', { 
-            day: '2-digit', month: '2-digit', year: 'numeric',
-            hour: '2-digit', minute: '2-digit' 
+          start: startLocal.toLocaleString('de-DE', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
           }),
-          end: endLocal.toLocaleString('de-DE', { 
-            hour: '2-digit', minute: '2-digit' 
+          end: endLocal.toLocaleString('de-DE', {
+            hour: '2-digit',
+            minute: '2-digit',
           }),
           location: event.location?.displayName,
           organizer: event.organizer?.emailAddress?.name,
@@ -5368,7 +5407,7 @@ Use this when someone asks "What files did [person] share with me?" or "Find doc
       // Detect Loop files in the results
       let loopFileCount = 0;
       const formattedFiles = files.map((file) => {
-        const loopDetection = detectLoopFile(file as Record<string, unknown>);
+        const loopDetection = detectLoopFile(file as unknown as Record<string, unknown>);
         if (loopDetection.isLoopFile) {
           loopFileCount++;
         }
@@ -5570,12 +5609,14 @@ This is the ultimate tool for "Tell me everything about my interactions with [pe
         promises.push(
           (async () => {
             const files = await findFilesFromPerson(graphClient, userEmail, user.displayName, 10);
-            const loopFiles = files.filter((f) => isLoopFile(f as Record<string, unknown>));
+            const loopFiles = files.filter((f) =>
+              isLoopFile(f as unknown as Record<string, unknown>)
+            );
             summary.sharedFiles = {
               count: files.length,
               loopFileCount: loopFiles.length,
               files: files.slice(0, 5).map((f) => {
-                const loopDetection = detectLoopFile(f as Record<string, unknown>);
+                const loopDetection = detectLoopFile(f as unknown as Record<string, unknown>);
                 return {
                   name: f.name,
                   webUrl: f.webUrl,
@@ -11223,7 +11264,7 @@ Use this for "What action items do I have from recent emails?", "Extract tasks f
 
               if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
                 for (const email of emailResponse.value as GraphEmail[]) {
-                  const content = sanitizeHtml(email.bodyPreview || email.body?.content || '');
+                  const content = sanitizeHtml(email.bodyPreview || '');
                   const subject = email.subject || '';
 
                   // Extract action items from content
@@ -11705,7 +11746,7 @@ Use this for "What decisions were made about [topic]?", "Extract all decisions f
 
               if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
                 for (const email of emailResponse.value as GraphEmail[]) {
-                  const content = sanitizeHtml(email.bodyPreview || email.body?.content || '');
+                  const content = sanitizeHtml(email.bodyPreview || '');
                   const subject = email.subject || '';
 
                   // Filter by topic if specified and not already filtered by search
@@ -11742,7 +11783,7 @@ Use this for "What decisions were made about [topic]?", "Extract all decisions f
                               ...(email.toRecipients || []).map(
                                 (r) => r.emailAddress?.name || r.emailAddress?.address
                               ),
-                            ].filter(Boolean),
+                            ].filter((p): p is string => p !== undefined && p !== null),
                           });
                         }
                       }
@@ -11819,7 +11860,7 @@ Use this for "What decisions were made about [topic]?", "Extract all decisions f
                               ...(meeting.attendees || []).map(
                                 (a) => a.emailAddress?.name || a.emailAddress?.address
                               ),
-                            ].filter(Boolean),
+                            ].filter((p): p is string => p !== undefined && p !== null),
                           });
                         }
                       }
@@ -12831,12 +12872,8 @@ Use this for "Find documents related to [topic]", "Show files related to this me
               });
 
               if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
-                for (const email of emailResponse.value as GraphEmail &
-                  {
-                    hasAttachments?: boolean;
-                    attachments?: Array<{ name: string; contentId?: string }>;
-                  }[]) {
-                  const content = sanitizeHtml(email.bodyPreview || email.body?.content || '');
+                for (const email of emailResponse.value as GraphEmail[]) {
+                  const content = sanitizeHtml(email.bodyPreview || '');
 
                   // Look for file references (common patterns)
                   const filePatterns = [
@@ -12947,7 +12984,7 @@ Use this for "Find documents related to [topic]", "Show files related to this me
                                 ...(meeting.attendees || []).map(
                                   (a) => a.emailAddress?.name || a.emailAddress?.address
                                 ),
-                              ].filter(Boolean),
+                              ].filter((p): p is string => p !== undefined && p !== null),
                             });
                           }
                         }
@@ -13088,7 +13125,7 @@ Use this for "Build a knowledge graph for [topic]", "Show connections for [proje
             if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
               const topicNodeId = isPerson && topicUser ? topicUser.id : 'topic';
 
-              for (const email of emailResponse.value as GraphEmail) {
+              for (const email of emailResponse.value as GraphEmail[]) {
                 const senderEmail = email.from?.emailAddress?.address?.toLowerCase();
                 const senderName = email.from?.emailAddress?.name || senderEmail || 'Unknown';
                 const senderId = `person-${senderEmail}`;
@@ -13172,7 +13209,7 @@ Use this for "Build a knowledge graph for [topic]", "Show connections for [proje
             ) {
               const topicNodeId = isPerson && topicUser ? topicUser.id : 'topic';
 
-              for (const meeting of meetingsResponse.value as GraphEvent) {
+              for (const meeting of meetingsResponse.value as GraphEvent[]) {
                 const subject = meeting.subject || '';
                 if (!subject.toLowerCase().includes(topic.toLowerCase())) {
                   continue;
@@ -13328,7 +13365,11 @@ Use this for "Build a knowledge graph for [topic]", "Show connections for [proje
             project: nodeArray.filter((n) => n.type === 'project').length,
           },
           mostConnected: nodeArray
-            .sort((a, b) => (b.properties?.degree || 0) - (a.properties?.degree || 0))
+            .sort((a, b) => {
+              const degreeA = typeof b.properties?.degree === 'number' ? b.properties.degree : 0;
+              const degreeB = typeof a.properties?.degree === 'number' ? a.properties.degree : 0;
+              return degreeA - degreeB;
+            })
             .slice(0, 5)
             .map((n) => ({ name: n.name, connections: n.properties?.degree || 0 })),
         },
@@ -13791,7 +13832,10 @@ Use this for "What's the best way to prepare for a meeting?", "How do I get a co
       if (context) {
         for (const step of workflow.steps) {
           for (const [key, value] of Object.entries(step.parameters)) {
-            if ((typeof value === 'string' && value.includes('name')) || value.includes('topic')) {
+            if (
+              (typeof value === 'string' && value.includes('name')) ||
+              (typeof value === 'string' && value.includes('topic'))
+            ) {
               step.parameters[key] = context;
             }
           }
@@ -14217,7 +14261,7 @@ Note: This is a planning tool that returns the workflow definition. Actual persi
           z.object({
             step: z.number(),
             tool: z.string(),
-            parameters: z.record(z.unknown()),
+            parameters: z.record(z.string(), z.unknown()),
             reason: z.string(),
           })
         )
@@ -14609,8 +14653,9 @@ Use this for "Show my business intelligence dashboard", "What are the key trends
                 ) {
                   const prevEmails = prevEmailResponse.value as GraphEmail[];
                   const change = emails.length - prevEmails.length;
+                  const existingActivity = (bi.emailActivity as Record<string, unknown>) || {};
                   bi.emailActivity = {
-                    ...bi.emailActivity,
+                    ...existingActivity,
                     previousPeriod: prevEmails.length,
                     change,
                     changePercent:
@@ -14930,10 +14975,7 @@ Note: This tool analyzes and suggests categories. Actual categorization would re
               });
 
               if (emailResponse && typeof emailResponse === 'object' && 'value' in emailResponse) {
-                for (const email of emailResponse.value as GraphEmail &
-                  {
-                    categories?: string[];
-                  }[]) {
+                for (const email of emailResponse.value as GraphEmail[]) {
                   const content = sanitizeHtml(email.bodyPreview || '');
                   const subject = email.subject || '';
                   const combined = `${subject} ${content}`.toLowerCase();
@@ -16234,29 +16276,25 @@ Use this for "How can we collaborate better?", "Suggest improvements to our work
   // ==========================================================================
   server.tool(
     'read-loop-file',
+    `Read and parse a Microsoft Loop file. Loop files are collaborative documents that can contain notes, lists, tables, and other content. 
+This tool detects Loop files, downloads their content, and extracts readable text from the Fluid format. 
+Use this when you need to read the content of a Loop component or Loop page.`,
+    {
+      itemId: z.string().describe('The ID of the Loop file (DriveItem ID)'),
+      driveId: z
+        .string()
+        .optional()
+        .describe("The Drive ID. If not provided, uses the user's OneDrive"),
+      includeRawContent: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe('Include the raw file content in addition to parsed text'),
+    },
     {
       title: 'Read Loop File',
-      description:
-        'Read and parse a Microsoft Loop file. Loop files are collaborative documents that can contain notes, lists, tables, and other content. ' +
-        'This tool detects Loop files, downloads their content, and extracts readable text from the Fluid format. ' +
-        'Use this when you need to read the content of a Loop component or Loop page.',
-      inputSchema: z.object({
-        itemId: z.string().describe('The ID of the Loop file (DriveItem ID)'),
-        driveId: z
-          .string()
-          .optional()
-          .describe("The Drive ID. If not provided, uses the user's OneDrive"),
-        includeRawContent: z
-          .boolean()
-          .optional()
-          .default(false)
-          .describe('Include the raw file content in addition to parsed text'),
-      }),
-      annotations: {
-        audience: ['user', 'assistant'],
-        readOnlyHint: true,
-        openWorldHint: true,
-      },
+      readOnlyHint: true,
+      openWorldHint: true,
     },
     async ({ itemId, driveId, includeRawContent = false }) => {
       logger.info(`Reading Loop file: ${itemId}`);

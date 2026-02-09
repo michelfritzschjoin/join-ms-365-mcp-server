@@ -116,9 +116,9 @@ export class MicrosoftOAuthProvider extends ProxyOAuthServerProvider {
           };
         }
 
-        // Return null if client not found (MCP SDK will handle error)
+        // Return undefined if client not found (MCP SDK will handle error)
         logger.warn(`Client not found: ${requestedClientId}`);
-        return null;
+        return undefined;
       },
     });
 

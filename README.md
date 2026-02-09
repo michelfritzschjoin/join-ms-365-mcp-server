@@ -180,6 +180,7 @@ docker run -d \
 | **Dual Timezone Display**        | Server local time + UTC for all dates/times                     |
 | **Quick Summary Lists**          | Overview lists to ensure nothing is missed                      |
 | **Download Links**               | Generate direct download links for files                        |
+| **Microsoft Loop Support**       | Loop file detection and content extraction                      |
 | **Read-Only Mode**               | Safe exploration without write operations                       |
 | **Preset Filtering**             | Load only the tools you need                                    |
 
@@ -269,6 +270,16 @@ docker run -d \
 - Search / Suche
 
 </td>
+<td>
+
+**🔄 Microsoft Loop**
+
+- Loop file detection / Loop-Datei-Erkennung
+- Collaborative documents / Kollaborative Dokumente
+- Content extraction / Inhalts-Extraktion
+- Fluid format parsing / Fluid-Format-Parsing
+
+</td>
 </tr>
 </table>
 
@@ -323,7 +334,7 @@ docker run -d \
 | 6     | `contacts`   | 👥 Contacts & Users: list-contacts, get-contact, list-users, current-user                                                                                       |
 | 7     | `meetings`   | 🎥 Online Meetings: list-meetings, get-meeting, transcripts, recordings                                                                                         |
 | 8     | `sharepoint` | 🌐 SharePoint: search-sites, get-site, site-drives, site-lists                                                                                                  |
-| 9     | `notes`      | 📔 OneNote: notebooks, sections, pages, page-content                                                                                                            |
+| 9     | `notes`      | 📔 OneNote: notebooks, sections, pages, page-content, search-pages                                                                                              |
 | 10    | `assistant`  | 🤖 Smart operations: ask, search, my-day, my-week, person-info, project-overview, follow-ups                                                                    |
 
 ### Example Usage / Beispielverwendung
@@ -536,7 +547,7 @@ Complete email management and shared mailbox support / Vollständige E-Mail-Verw
 }
 ```
 
-**Available actions:** `list`, `get`, `folders`, `attachments`, `search`, `send`, `reply`, `delete`, `move`
+**Available actions:** `list`, `get`, `folders`, `child-folders`, `attachments`, `search`, `send`, `reply`, `delete`, `move`
 
 **Deutsch:** Vereinheitlichte E-Mail-Operationen mit aktionsbasierter Schnittstelle:
 
@@ -790,20 +801,23 @@ Der Server verfügt über eine ausgeklügelte **Search-First-Strategie** mit meh
 
 ### Environment Variables / Umgebungsvariablen
 
-| Variable                    | Description / Beschreibung                                               | Default                     |
-| --------------------------- | ------------------------------------------------------------------------ | --------------------------- |
-| `MS365_MCP_CLIENT_ID`       | Azure AD app client ID                                                   | **Required / Erforderlich** |
-| `MS365_MCP_TENANT_ID`       | Azure AD tenant ID                                                       | `common`                    |
-| `MS365_MCP_CLIENT_SECRET`   | Client secret (confidential apps) / Client-Geheimnis (vertrauliche Apps) | -                           |
-| `MS365_MCP_USE_SUPER_TOOLS` | Enable Super-Tools mode / Super-Tools-Modus aktivieren                   | `false`                     |
-| `MS365_MCP_ORG_MODE`        | Enable organization mode / Organisationsmodus aktivieren                 | `false`                     |
-| `MS365_MCP_OUTPUT_FORMAT`   | Output format (`json`/`toon`) / Ausgabeformat (`json`/`toon`)            | `json`                      |
-| `MS365_MCP_CLOUD_TYPE`      | Cloud environment / Cloud-Umgebung                                       | `global`                    |
-| `MS365_MCP_KEYVAULT_URL`    | Azure Key Vault URL                                                      | -                           |
-| `MS365_MCP_MAX_RESULTS`     | Maximum search results / Maximale Suchergebnisse                         | `500`                       |
-| `READ_ONLY`                 | Enable read-only mode / Read-Only-Modus aktivieren                       | `false`                     |
-| `LOG_LEVEL`                 | Logging level / Logging-Level                                            | `info`                      |
-| `SILENT`                    | Disable console output / Konsolenausgabe deaktivieren                    | `false`                     |
+| Variable                    | Description / Beschreibung                                                      | Default                     |
+| --------------------------- | ------------------------------------------------------------------------------- | --------------------------- |
+| `MS365_MCP_CLIENT_ID`       | Azure AD app client ID                                                          | **Required / Erforderlich** |
+| `MS365_MCP_TENANT_ID`       | Azure AD tenant ID                                                              | `common`                    |
+| `MS365_MCP_CLIENT_SECRET`   | Client secret (confidential apps) / Client-Geheimnis (vertrauliche Apps)        | -                           |
+| `MS365_MCP_USE_SUPER_TOOLS` | Enable Super-Tools mode / Super-Tools-Modus aktivieren                          | `false`                     |
+| `MS365_MCP_ORG_MODE`        | Enable organization mode / Organisationsmodus aktivieren                        | `false`                     |
+| `MS365_MCP_OUTPUT_FORMAT`   | Output format (`json`/`toon`) / Ausgabeformat (`json`/`toon`)                   | `json`                      |
+| `MS365_MCP_CLOUD_TYPE`      | Cloud environment / Cloud-Umgebung                                              | `global`                    |
+| `MS365_MCP_KEYVAULT_URL`    | Azure Key Vault URL                                                             | -                           |
+| `MS365_MCP_MAX_RESULTS`     | Maximum search results / Maximale Suchergebnisse                                | `500`                       |
+| `MS365_MCP_ANONYMIZE_PII`   | Anonymize PII in knowledge base storage / PII in Wissensdatenbank anonymisieren | `true`                      |
+| `READ_ONLY`                 | Enable read-only mode / Read-Only-Modus aktivieren                              | `false`                     |
+
+> **Security Warning / Sicherheitswarnung**: Setting `MS365_MCP_ANONYMIZE_PII=false` disables the automatic removal of personally identifiable information (email addresses, phone numbers, IDs, etc.) before storing data in the knowledge base. This is **NOT recommended in production** and may violate GDPR/DSGVO compliance. Only disable for development or debugging purposes. / Das Setzen von `MS365_MCP_ANONYMIZE_PII=false` deaktiviert die automatische Entfernung von personenbezogenen Daten (E-Mail-Adressen, Telefonnummern, IDs, etc.) vor der Speicherung in der Wissensdatenbank. Dies wird **in der Produktion NICHT empfohlen** und kann gegen DSGVO-Compliance verstoßen. Nur für Entwicklung oder Debugging deaktivieren.
+> | `LOG_LEVEL` | Logging level / Logging-Level | `info` |
+> | `SILENT` | Disable console output / Konsolenausgabe deaktivieren | `false` |
 
 ### Docker Run Examples / Docker-Run-Beispiele
 
@@ -1059,7 +1073,7 @@ docker run -p 3000:3000 ms365-mcp-server --http 3000
 
 ## 📄 License / Lizenz
 
-All Rights Reserved © 2025 Join GmbH
+All Rights Reserved © 2026 Join GmbH
 
 ---
 

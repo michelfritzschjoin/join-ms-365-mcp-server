@@ -34,7 +34,7 @@ export interface LearningInsights {
     averageResults: number;
     averageConfidence: number;
   }>;
-  clusters: Array<{
+  clusters?: Array<{
     id: string;
     patternCount: number;
     averageConfidence: number;

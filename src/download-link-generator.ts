@@ -57,13 +57,14 @@ export class DownloadLinkGenerator {
         return null;
       }
 
+      const fileInfo = metadata['file'] as Record<string, unknown> | undefined;
       return {
         fileId: itemId,
         fileName: (metadata['name'] as string) || 'unknown',
         downloadUrl,
         webUrl: (metadata['webUrl'] as string) || undefined,
         size: (metadata['size'] as number) || undefined,
-        mimeType: (metadata['file']?.['mimeType'] as string) || undefined,
+        mimeType: (fileInfo?.['mimeType'] as string) || undefined,
         expiresIn: 3600, // Default 1 hour
       };
     } catch (error) {
@@ -91,7 +92,8 @@ export class DownloadLinkGenerator {
       }
 
       const metadata = fileMetadata as Record<string, unknown>;
-      const driveId = metadata['parentReference']?.['driveId'] as string | undefined;
+      const parentRef = metadata['parentReference'] as Record<string, unknown> | undefined;
+      const driveId = parentRef?.['driveId'] as string | undefined;
 
       if (!driveId) {
         return null;
@@ -134,7 +136,8 @@ export class DownloadLinkGenerator {
 
       if (itemResponse && typeof itemResponse === 'object') {
         const item = itemResponse as Record<string, unknown>;
-        const driveId = item['parentReference']?.['driveId'] as string | undefined;
+        const parentRef = item['parentReference'] as Record<string, unknown> | undefined;
+        const driveId = parentRef?.['driveId'] as string | undefined;
         const itemId = item['id'] as string | undefined;
 
         if (driveId && itemId) {
@@ -230,7 +233,8 @@ export class DownloadLinkGenerator {
 
         if (isFile) {
           const webUrl = obj['webUrl'] as string | undefined;
-          const driveId = obj['parentReference']?.['driveId'] as string | undefined;
+          const parentRef = obj['parentReference'] as Record<string, unknown> | undefined;
+          const driveId = parentRef?.['driveId'] as string | undefined;
           const itemId = obj['id'] as string | undefined;
 
           if (webUrl || (driveId && itemId)) {
@@ -254,7 +258,7 @@ export class DownloadLinkGenerator {
       }
 
       // Not a file or couldn't generate link
-      enriched.push(result);
+      enriched.push(result as unknown & { downloadLink?: DownloadLink });
     }
 
     return enriched;

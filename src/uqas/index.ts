@@ -30,7 +30,7 @@ import { BilingualIntentRecognizer } from './i18n/intent-patterns.js';
 import { BilingualEntityRecognizer } from './i18n/entity-patterns.js';
 import { BilingualResponseBuilder, type ResponseData } from './i18n/response-templates.js';
 import { CrossLanguageSearchExpander } from './search/cross-language-expander.js';
-import { AdaptiveLayerController } from './core/adaptive-layer.js';
+import { AdaptiveLayerController, type AnalysisDepth } from './core/adaptive-layer.js';
 import { EntityGraphBuilder } from './core/entity-graph.js';
 import { TokenController } from './core/token-controller.js';
 import { CacheManager } from './core/cache-manager.js';
@@ -110,7 +110,7 @@ export class UQASPro {
     this.entityRecognizer = new BilingualEntityRecognizer();
     this.searchExpander = new CrossLanguageSearchExpander(this.thesaurus);
     this.layerController = new AdaptiveLayerController({
-      maxDepth: this.config.maxDepth,
+      maxDepth: this.config.maxDepth as AnalysisDepth,
       confidenceThreshold: this.config.confidenceThreshold,
     });
     this.entityGraph = new EntityGraphBuilder();
@@ -131,7 +131,7 @@ export class UQASPro {
     const cacheKey = this.cacheManager.generateKey(question, context);
     const cached = this.cacheManager.get(cacheKey);
     if (cached) {
-      return { ...cached, cached: true };
+      return { ...cached, cached: true } as UQASResult;
     }
 
     // Detect language

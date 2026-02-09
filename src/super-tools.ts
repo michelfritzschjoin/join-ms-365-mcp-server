@@ -62,6 +62,7 @@ import {
   getProfessionGreeting,
 } from './response-formatter.js';
 import { findUser, findChatsWithUser, type GraphUser, type GraphChat } from './compound-tools.js';
+import { encode as toonEncode } from '@toon-format/toon';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
@@ -777,7 +778,195 @@ function formatStandardResponse<T>(
     }
   }
 
-  return response;
+  // Format as Tool output and remove unnecessary information
+  return formatToolResponse<StandardResponse<T>>(response);
+}
+
+/**
+ * Format response as Tool output and remove unnecessary information
+ * Automatically removes:
+ * - OData properties (@odata.*)
+ * - Internal metadata (executionTime, cacheHit, requestId, professionProfile, etc.)
+ * - Debug information
+ * - Redundant fields
+ */
+export function formatToolResponse<T>(response: unknown): T {
+  if (response === null || response === undefined) {
+    return response as T;
+  }
+
+  // If it's already a string (JSON stringified), parse it first
+  if (typeof response === 'string') {
+    try {
+      response = JSON.parse(response);
+    } catch {
+      // Not JSON, return as is
+      return response as T;
+    }
+  }
+
+  // Deep clone to avoid mutating original
+  const clone = JSON.parse(JSON.stringify(response));
+
+  /**
+   * Remove unnecessary properties from object
+   */
+  const removeUnnecessaryProps = (obj: unknown): unknown => {
+    if (obj === null || obj === undefined) {
+      return obj;
+    }
+
+    if (Array.isArray(obj)) {
+      return obj.map(removeUnnecessaryProps);
+    }
+
+    if (typeof obj !== 'object') {
+      return obj;
+    }
+
+    const cleaned: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(obj)) {
+      // Remove OData properties
+      if (key.startsWith('@odata.')) {
+        continue;
+      }
+
+      // Remove internal metadata fields
+      if (
+        key === 'executionTime' ||
+        key === 'cacheHit' ||
+        key === 'requestId' ||
+        key === 'professionProfile' ||
+        key === '_professionGreeting' ||
+        key === '_headers' ||
+        key === '_etag' ||
+        key === '_meta'
+      ) {
+        continue;
+      }
+
+      // Remove metadata object if it only contains unnecessary fields
+      if (key === 'metadata') {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const meta = value as Record<string, unknown>;
+          const cleanedMeta: Record<string, unknown> = {};
+
+          // Keep only essential metadata
+          if (meta.timestamp) cleanedMeta.timestamp = meta.timestamp;
+          if (meta.pagination) cleanedMeta.pagination = removeUnnecessaryProps(meta.pagination);
+          if (meta.sources && Array.isArray(meta.sources) && meta.sources.length > 0) {
+            cleanedMeta.sources = meta.sources;
+          }
+
+          // Only add metadata if it has meaningful content
+          if (Object.keys(cleanedMeta).length > 0) {
+            cleaned[key] = cleanedMeta;
+          }
+        }
+        continue;
+      }
+
+      // Remove thinking process if it's empty or only contains debug info
+      if (key === 'thinking') {
+        if (Array.isArray(value) && value.length > 0) {
+          // Keep only meaningful thinking steps (filter out debug info)
+          const meaningfulThinking = (value as string[]).filter(
+            (step) =>
+              step &&
+              !step.includes('processing') &&
+              !step.includes('Response received') &&
+              !step.includes('Response contains') &&
+              !step.includes('Response has')
+          );
+          if (meaningfulThinking.length > 0) {
+            cleaned[key] = meaningfulThinking;
+          }
+        }
+        continue;
+      }
+
+      // Remove nlpAnalysis if it's too verbose
+      if (key === 'nlpAnalysis') {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const nlp = value as Record<string, unknown>;
+          const cleanedNlp: Record<string, unknown> = {};
+
+          // Keep only essential NLP info
+          if (nlp.intent) cleanedNlp.intent = nlp.intent;
+          if (nlp.confidence !== undefined) cleanedNlp.confidence = nlp.confidence;
+          if (nlp.entities && Array.isArray(nlp.entities) && nlp.entities.length > 0) {
+            cleanedNlp.entities = removeUnnecessaryProps(nlp.entities);
+          }
+
+          if (Object.keys(cleanedNlp).length > 0) {
+            cleaned[key] = cleanedNlp;
+          }
+        }
+        continue;
+      }
+
+      // Recursively clean nested objects
+      cleaned[key] = removeUnnecessaryProps(value);
+    }
+
+    return cleaned;
+  };
+
+  return removeUnnecessaryProps(clone) as T;
+}
+
+/**
+ * Get output format from environment or default to JSON
+ */
+function getOutputFormat(): 'json' | 'toon' {
+  const envFormat = process.env.MS365_MCP_OUTPUT_FORMAT;
+  return envFormat === 'toon' ? 'toon' : 'json';
+}
+
+/**
+ * Format and return response as Tool output
+ * Wrapper function that formats any response (string or object) and removes unnecessary information
+ * Uses TOON format if enabled for 30-60% token reduction
+ */
+function formatAndReturnToolResponse(response: string | unknown, thinking?: string[]): string {
+  // If response is already a string, try to parse it
+  let parsed: unknown;
+  if (typeof response === 'string') {
+    try {
+      parsed = JSON.parse(response);
+    } catch {
+      // Not JSON, return as is (but still format if it's a JSON string in text)
+      return response;
+    }
+  } else {
+    parsed = response;
+  }
+
+  // Format as Tool output
+  const formatted = formatToolResponse(parsed);
+
+  // Convert to string using TOON format if enabled, otherwise JSON
+  const outputFormat = getOutputFormat();
+  let formattedString: string;
+
+  if (outputFormat === 'toon') {
+    try {
+      formattedString = toonEncode(formatted);
+    } catch (error) {
+      logger.warn(`Failed to encode as TOON, falling back to JSON: ${error}`);
+      formattedString = JSON.stringify(formatted, null, 2);
+    }
+  } else {
+    formattedString = JSON.stringify(formatted, null, 2);
+  }
+
+  // Add thinking if provided
+  if (thinking && thinking.length > 0) {
+    return addThinkingToResponse(formattedString, thinking);
+  }
+
+  return formattedString;
 }
 
 /**
@@ -985,8 +1174,8 @@ class RequestDeduplicator {
     }
 
     // Create new request
-    let resolve: (value: T) => void;
-    let reject: (error: Error) => void;
+    let resolve!: (value: T) => void;
+    let reject!: (error: Error) => void;
     const promise = new Promise<T>((res, rej) => {
       resolve = res;
       reject = rej;
@@ -1304,7 +1493,7 @@ async function handleEmail(
           }
         );
 
-        return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+        return formatAndReturnToolResponse(responseWithMetadata, thinking);
       }
 
       // Fallback: return with metadata
@@ -1315,21 +1504,21 @@ async function handleEmail(
         pagination,
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     case 'get': {
       if (!input.messageId) throw new Error('messageId is required for action "get"');
       thinking.push(`Getting email with ID: ${input.messageId}`);
       const result = await callGraph(graphClient, 'GET', `/me/messages/${input.messageId}`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'folders': {
       thinking.push('Listing mail folders');
       const params: Record<string, string> = { $top: String(input.top || 50) };
       const result = await callGraph(graphClient, 'GET', '/me/mailFolders', params);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'child-folders': {
@@ -1342,7 +1531,7 @@ async function handleEmail(
         `/me/mailFolders/${input.folderId}/childFolders`,
         params
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'attachments': {
@@ -1352,7 +1541,7 @@ async function handleEmail(
         ? `/me/messages/${input.messageId}/attachments/${input.attachmentId}`
         : `/me/messages/${input.messageId}/attachments`;
       const result = await callGraph(graphClient, 'GET', endpoint);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'search': {
@@ -1411,10 +1600,10 @@ async function handleEmail(
           }
         );
 
-        return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+        return formatAndReturnToolResponse(responseWithMetadata, thinking);
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     // Write operations (blocked in read-only mode - check happens at function start)
@@ -1479,7 +1668,7 @@ async function handleEmail(
         undefined,
         { destinationId: input.folderId }
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     default:
@@ -1582,7 +1771,7 @@ async function handleCalendar(
           }
         );
 
-        return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+        return formatAndReturnToolResponse(responseWithMetadata, thinking);
       }
 
       // Fallback: return with metadata
@@ -1593,7 +1782,7 @@ async function handleCalendar(
         pagination,
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     case 'get': {
@@ -1607,7 +1796,7 @@ async function handleCalendar(
         undefined,
         headers
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'view': {
@@ -1643,13 +1832,13 @@ async function handleCalendar(
         return addThinkingToResponse(formattedText, thinking);
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'calendars': {
       thinking.push('Listing all calendars');
       const result = await callGraph(graphClient, 'GET', '/me/calendars');
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'specific-calendar': {
@@ -1676,7 +1865,7 @@ async function handleCalendar(
         return addThinkingToResponse(formattedText, thinking);
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     // Write operations (blocked in read-only mode - check happens at function start)
@@ -1700,7 +1889,7 @@ async function handleCalendar(
         }));
       }
       const result = await callGraph(graphClient, 'POST', '/me/events', undefined, event, headers);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'update-event': {
@@ -1722,7 +1911,7 @@ async function handleCalendar(
         updates,
         headers
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'delete-event': {
@@ -1797,21 +1986,21 @@ async function handleTeams(
     case 'list-teams': {
       thinking.push('Listing joined teams');
       const result = await callGraph(graphClient, 'GET', '/me/joinedTeams');
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'get-team': {
       if (!input.teamId) throw new Error('teamId is required');
       thinking.push(`Getting team: ${input.teamId}`);
       const result = await callGraph(graphClient, 'GET', `/teams/${input.teamId}`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'channels': {
       if (!input.teamId) throw new Error('teamId is required for channels');
       thinking.push(`Listing channels for team: ${input.teamId}`);
       const result = await callGraph(graphClient, 'GET', `/teams/${input.teamId}/channels`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'channel-messages': {
@@ -1861,7 +2050,7 @@ async function handleTeams(
         return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'chats': {
@@ -2058,7 +2247,7 @@ async function handleTeams(
         return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     default:
@@ -2103,7 +2292,7 @@ async function handleFiles(
     case 'drives': {
       thinking.push('Listing drives');
       const result = await callGraph(graphClient, 'GET', '/me/drives');
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'list': {
@@ -2142,7 +2331,7 @@ async function handleFiles(
         // If parsing fails, just return the original result
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'get': {
@@ -2171,7 +2360,7 @@ async function handleFiles(
         // If parsing fails, just return the original result
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'download': {
@@ -2233,11 +2422,11 @@ async function handleFiles(
             );
           }
 
-          return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
+          return formatAndReturnToolResponse(response, thinking);
         }
       }
 
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'root': {
@@ -2245,7 +2434,7 @@ async function handleFiles(
       thinking.push('Getting drive root');
       const endpoint = driveId === 'me' ? '/me/drive/root' : `/drives/${driveId}/root`;
       const result = await callGraph(graphClient, 'GET', endpoint);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'search': {
@@ -2287,7 +2476,7 @@ async function handleFiles(
         ],
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     default:
@@ -2350,7 +2539,7 @@ async function handleTasks(
     case 'todo-lists': {
       thinking.push('Listing To-Do task lists');
       const result = await callGraph(graphClient, 'GET', '/me/todo/lists');
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'todo-tasks': {
@@ -2364,7 +2553,7 @@ async function handleTasks(
         `/me/todo/lists/${input.taskListId}/tasks`,
         params
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'todo-get': {
@@ -2377,27 +2566,27 @@ async function handleTasks(
         'GET',
         `/me/todo/lists/${input.taskListId}/tasks/${input.taskId}`
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'planner-tasks': {
       thinking.push('Listing Planner tasks assigned to me');
       const result = await callGraph(graphClient, 'GET', '/me/planner/tasks');
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'planner-plans': {
       if (!input.planId) throw new Error('planId is required');
       thinking.push(`Getting Planner plan: ${input.planId}`);
       const result = await callGraph(graphClient, 'GET', `/planner/plans/${input.planId}`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'plan-tasks': {
       if (!input.planId) throw new Error('planId is required');
       thinking.push(`Listing tasks in plan: ${input.planId}`);
       const result = await callGraph(graphClient, 'GET', `/planner/plans/${input.planId}/tasks`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     // Write operations (blocked in read-only mode - check happens at function start)
@@ -2416,7 +2605,7 @@ async function handleTasks(
         undefined,
         task
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'update-todo': {
@@ -2436,7 +2625,7 @@ async function handleTasks(
         undefined,
         updates
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'delete-todo': {
@@ -2511,14 +2700,14 @@ async function handleContacts(
       if (input.filter) params.$filter = input.filter;
       if (input.search) params.$search = `"${input.search}"`;
       const result = await callGraph(graphClient, 'GET', '/me/contacts', params);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'get': {
       if (!input.contactId) throw new Error('contactId is required');
       thinking.push(`Getting contact: ${input.contactId}`);
       const result = await callGraph(graphClient, 'GET', `/me/contacts/${input.contactId}`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'users': {
@@ -2532,13 +2721,13 @@ async function handleContacts(
       const result = await callGraph(graphClient, 'GET', '/users', params, undefined, {
         ConsistencyLevel: 'eventual',
       });
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'current-user': {
       thinking.push('Getting current user info');
       const result = await callGraph(graphClient, 'GET', '/me');
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'search': {
@@ -2582,7 +2771,7 @@ async function handleContacts(
         ],
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     default:
@@ -2628,14 +2817,14 @@ async function handleMeetings(
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
       const result = await callGraph(graphClient, 'GET', '/me/onlineMeetings', params);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'get': {
       if (!input.meetingId) throw new Error('meetingId is required');
       thinking.push(`Getting meeting: ${input.meetingId}`);
       const result = await callGraph(graphClient, 'GET', `/me/onlineMeetings/${input.meetingId}`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'recordings': {
@@ -2645,7 +2834,7 @@ async function handleMeetings(
         ? `/me/onlineMeetings/${input.meetingId}/recordings/${input.recordingId}`
         : `/me/onlineMeetings/${input.meetingId}/recordings`;
       const result = await callGraph(graphClient, 'GET', endpoint);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'transcripts': {
@@ -2655,7 +2844,7 @@ async function handleMeetings(
         ? `/me/onlineMeetings/${input.meetingId}/transcripts/${input.transcriptId}`
         : `/me/onlineMeetings/${input.meetingId}/transcripts`;
       const result = await callGraph(graphClient, 'GET', endpoint);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'transcript-content': {
@@ -2668,7 +2857,7 @@ async function handleMeetings(
         'GET',
         `/me/onlineMeetings/${input.meetingId}/transcripts/${input.transcriptId}/content`
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     default:
@@ -2716,28 +2905,28 @@ async function handleSharePoint(
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.search) params.search = input.search;
       const result = await callGraph(graphClient, 'GET', '/sites', params);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'get-site': {
       if (!input.siteId) throw new Error('siteId is required');
       thinking.push(`Getting site: ${input.siteId}`);
       const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'site-drives': {
       if (!input.siteId) throw new Error('siteId is required');
       thinking.push(`Listing drives for site: ${input.siteId}`);
       const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/drives`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'site-lists': {
       if (!input.siteId) throw new Error('siteId is required');
       thinking.push(`Listing lists for site: ${input.siteId}`);
       const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/lists`);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'list-items': {
@@ -2753,7 +2942,7 @@ async function handleSharePoint(
         `/sites/${input.siteId}/lists/${input.listId}/items`,
         params
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'site-items': {
@@ -2761,7 +2950,7 @@ async function handleSharePoint(
       thinking.push(`Listing items in site: ${input.siteId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
       const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/items`, params);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     default:
@@ -2808,7 +2997,7 @@ async function handleNotes(
     case 'notebooks': {
       thinking.push('Listing OneNote notebooks');
       const result = await callGraph(graphClient, 'GET', '/me/onenote/notebooks');
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'sections': {
@@ -2819,7 +3008,7 @@ async function handleNotes(
         'GET',
         `/me/onenote/notebooks/${input.notebookId}/sections`
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'pages': {
@@ -2832,7 +3021,7 @@ async function handleNotes(
         params.$filter = `contains(title,'${input.search.replace(/'/g, "''")}')`;
         params.$orderby = 'lastModifiedDateTime desc';
         const result = await callGraph(graphClient, 'GET', '/me/onenote/pages', params);
-        return addThinkingToResponse(result, thinking);
+        return formatAndReturnToolResponse(result, thinking);
       }
 
       // Otherwise, require sectionId to list pages in a specific section
@@ -2848,7 +3037,7 @@ async function handleNotes(
         `/me/onenote/sections/${input.sectionId}/pages`,
         params
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'search-pages': {
@@ -2860,7 +3049,7 @@ async function handleNotes(
         $orderby: 'lastModifiedDateTime desc',
       };
       const result = await callGraph(graphClient, 'GET', '/me/onenote/pages', params);
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'page-content': {
@@ -2871,7 +3060,7 @@ async function handleNotes(
         'GET',
         `/me/onenote/pages/${input.pageId}/content`
       );
-      return addThinkingToResponse(result, thinking);
+      return formatAndReturnToolResponse(result, thinking);
     }
 
     default:
@@ -2962,6 +3151,103 @@ const searchSchema = z.object({
 });
 
 type SearchInput = z.infer<typeof searchSchema>;
+
+// ============================================================================
+// PRODUCT-BASED SEARCH SCHEMA
+// ============================================================================
+
+const productSearchActions = z.enum(['search']);
+
+const productSearchSchema = z.object({
+  action: productSearchActions,
+  query: z.string().describe('Search query string'),
+  maxResults: z.number().optional().describe('Maximum initial search results (default: 50)'),
+  topPerProduct: z
+    .number()
+    .optional()
+    .describe('Top results per product to summarize (default: 5)'),
+});
+
+type ProductSearchInput = z.infer<typeof productSearchSchema>;
+
+// Product mapping configuration
+interface ProductMapping {
+  product: string;
+  entityTypes: string[];
+  apiEndpoint?: string;
+  requiresDirectApi: boolean;
+}
+
+const PRODUCT_MAPPINGS: ProductMapping[] = [
+  {
+    product: 'Outlook',
+    entityTypes: ['message'],
+    apiEndpoint: '/me/messages',
+    requiresDirectApi: true,
+  },
+  {
+    product: 'Calendar',
+    entityTypes: ['event'],
+    apiEndpoint: '/me/calendarView',
+    requiresDirectApi: true,
+  },
+  {
+    product: 'OneDrive',
+    entityTypes: ['driveItem'],
+    apiEndpoint: '/me/drive/root/search',
+    requiresDirectApi: true,
+  },
+  {
+    product: 'SharePoint',
+    entityTypes: ['site', 'list', 'listItem'],
+    apiEndpoint: '/sites',
+    requiresDirectApi: true,
+  },
+  {
+    product: 'Teams',
+    entityTypes: ['chatMessage'],
+    apiEndpoint: '/me/chats',
+    requiresDirectApi: true,
+  },
+  {
+    product: 'OneNote',
+    entityTypes: [],
+    apiEndpoint: '/me/onenote/pages',
+    requiresDirectApi: true,
+  },
+  { product: 'Users', entityTypes: ['person'], apiEndpoint: '/users', requiresDirectApi: true },
+  { product: 'Groups', entityTypes: [], apiEndpoint: '/groups', requiresDirectApi: true },
+  {
+    product: 'Planner',
+    entityTypes: [],
+    apiEndpoint: '/me/planner/plans',
+    requiresDirectApi: true,
+  },
+  { product: 'ToDo', entityTypes: [], apiEndpoint: '/me/todo/lists', requiresDirectApi: true },
+];
+
+// Product search result interfaces
+interface ProductSearchResult {
+  product: string;
+  resultCount: number;
+  topResults: Array<{
+    title: string;
+    summary: string;
+    relevance: number;
+    webUrl?: string;
+    metadata: Record<string, unknown>;
+  }>;
+}
+
+interface ProductSearchResponse {
+  query: string;
+  initialSearchResults: {
+    totalHits: number;
+    productsDetected: string[];
+  };
+  productResults: ProductSearchResult[];
+  thinking: string[];
+}
 
 // Common German/English words that should NOT be detected as person names
 const NON_PERSON_WORDS = new Set([
@@ -4463,7 +4749,8 @@ async function handleSearch(
     const sortedSources = sourcesWithUrls
       .filter((s) => s.webUrl && (s.type.includes('driveItem') || s.type.includes('listItem')))
       .sort((a, b) => b.relevance - a.relevance)
-      .slice(0, 10);
+      .slice(0, 10)
+      .map((s) => ({ ...s, webUrl: s.webUrl! })); // Filter ensures webUrl is defined
 
     importantDocuments.push(...sortedSources);
 
@@ -4530,6 +4817,584 @@ async function handleSearch(
     thinking.push(`Search error: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
   }
+}
+
+// ============================================================================
+// PRODUCT-BASED SEARCH HANDLER
+// ============================================================================
+
+/**
+ * Detect products from search results based on entity types
+ */
+function detectProductsFromSearchResults(results: Record<string, unknown[]>): string[] {
+  const detectedProducts = new Set<string>();
+
+  // Map entity types to products
+  for (const [entityType, items] of Object.entries(results)) {
+    if (items && items.length > 0) {
+      for (const mapping of PRODUCT_MAPPINGS) {
+        if (mapping.entityTypes.includes(entityType)) {
+          detectedProducts.add(mapping.product);
+        }
+      }
+    }
+  }
+
+  // Also check for specific entity type patterns
+  const entityTypeLower = Object.keys(results).join(',').toLowerCase();
+
+  if (entityTypeLower.includes('message') && !entityTypeLower.includes('chat')) {
+    detectedProducts.add('Outlook');
+  }
+  if (entityTypeLower.includes('event')) {
+    detectedProducts.add('Calendar');
+  }
+  if (entityTypeLower.includes('driveitem')) {
+    detectedProducts.add('OneDrive');
+  }
+  if (entityTypeLower.includes('site') || entityTypeLower.includes('list')) {
+    detectedProducts.add('SharePoint');
+  }
+  if (entityTypeLower.includes('chatmessage')) {
+    detectedProducts.add('Teams');
+  }
+  if (entityTypeLower.includes('person')) {
+    detectedProducts.add('Users');
+  }
+
+  return Array.from(detectedProducts);
+}
+
+/**
+ * Search a specific product using its API endpoint
+ */
+async function searchProduct(
+  product: string,
+  query: string,
+  graphClient: GraphClient,
+  topResults: number
+): Promise<ProductSearchResult> {
+  const mapping = PRODUCT_MAPPINGS.find((m) => m.product === product);
+  if (!mapping) {
+    return {
+      product,
+      resultCount: 0,
+      topResults: [],
+    };
+  }
+
+  const topResultsList: ProductSearchResult['topResults'] = [];
+
+  try {
+    if (product === 'Outlook') {
+      // Search messages
+      const result = await callGraph(graphClient, 'GET', '/me/messages', {
+        $search: formatSearchQuery(query, 'displayName', 'email'),
+        $top: String(topResults),
+        $select: 'id,subject,from,receivedDateTime,bodyPreview,webLink,hasAttachments',
+      });
+      const messages = JSON.parse(result);
+      const items = messages.value || [];
+
+      for (const item of items.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.subject || 'No subject',
+          summary: item.bodyPreview || '',
+          relevance: 100 - topResultsList.length * 5,
+          webUrl: item.webLink,
+          metadata: {
+            from: item.from?.emailAddress?.address,
+            receivedDateTime: item.receivedDateTime,
+            hasAttachments: item.hasAttachments,
+          },
+        });
+      }
+    } else if (product === 'Calendar') {
+      // Search calendar events
+      const now = new Date();
+      const startDate = new Date(
+        now.getFullYear() - 1,
+        now.getMonth(),
+        now.getDate()
+      ).toISOString();
+      const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
+
+      const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
+        startDateTime: startDate,
+        endDateTime: endDate,
+        $top: String(topResults),
+        $select: 'id,subject,start,end,location,organizer,attendees,webLink',
+      });
+      const events = JSON.parse(result);
+      const items = events.value || [];
+
+      // Filter events that match the query
+      const queryLower = query.toLowerCase();
+      const matchingEvents = items.filter((event: Record<string, unknown>) => {
+        const subject = (event.subject || '').toString().toLowerCase();
+        const location = (
+          (event.location as { displayName?: string } | undefined)?.displayName || ''
+        )
+          .toString()
+          .toLowerCase();
+        return subject.includes(queryLower) || location.includes(queryLower);
+      });
+
+      for (const item of matchingEvents.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.subject || 'No subject',
+          summary: `Start: ${item.start?.dateTime}, Location: ${item.location?.displayName || 'N/A'}`,
+          relevance: 100 - topResultsList.length * 5,
+          webUrl: item.webLink,
+          metadata: {
+            start: item.start?.dateTime,
+            end: item.end?.dateTime,
+            location: item.location?.displayName,
+          },
+        });
+      }
+    } else if (product === 'OneDrive') {
+      // Search OneDrive files
+      const result = await callGraph(
+        graphClient,
+        'GET',
+        `/me/drive/root/search(q='${encodeURIComponent(query)}')`,
+        {
+          $top: String(topResults),
+          $select: 'id,name,webUrl,size,lastModifiedDateTime,createdBy',
+        }
+      );
+      const files = JSON.parse(result);
+      const items = files.value || [];
+
+      for (const item of items.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.name || 'Unnamed file',
+          summary: `Size: ${item.size || 0} bytes, Modified: ${item.lastModifiedDateTime || 'N/A'}`,
+          relevance: 100 - topResultsList.length * 5,
+          webUrl: item.webUrl,
+          metadata: {
+            size: item.size,
+            lastModifiedDateTime: item.lastModifiedDateTime,
+            createdBy: item.createdBy?.user?.displayName,
+          },
+        });
+      }
+    } else if (product === 'SharePoint') {
+      // Search SharePoint sites and lists using search API
+      const searchRequest = {
+        requests: [
+          {
+            entityTypes: ['site', 'list', 'listItem'],
+            query: {
+              queryString: query,
+            },
+            from: 0,
+            size: topResults,
+          },
+        ],
+      };
+
+      try {
+        const result = await callGraph(
+          graphClient,
+          'POST',
+          '/search/query',
+          undefined,
+          searchRequest
+        );
+        const parsedResult = JSON.parse(result);
+        const items: unknown[] = [];
+
+        if (parsedResult.value && Array.isArray(parsedResult.value)) {
+          for (const response of parsedResult.value) {
+            if (response.hitsContainers && Array.isArray(response.hitsContainers)) {
+              for (const container of response.hitsContainers) {
+                if (container.hits && Array.isArray(container.hits)) {
+                  for (const hit of container.hits) {
+                    items.push({
+                      ...hit.resource,
+                      summary: hit.summary,
+                      rank: hit.rank,
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        for (const item of items.slice(0, topResults)) {
+          const itemAny = item as Record<string, unknown>;
+          topResultsList.push({
+            title: (itemAny.displayName || itemAny.name || 'Unnamed site') as string,
+            summary: (itemAny.summary || `Site: ${itemAny.name || 'N/A'}`) as string,
+            relevance: (itemAny.rank as number) || 100 - topResultsList.length * 5,
+            webUrl: (itemAny.webUrl || itemAny.webLink) as string | undefined,
+            metadata: {
+              name: itemAny.name,
+              displayName: itemAny.displayName,
+              '@odata.type': itemAny['@odata.type'],
+            },
+          });
+        }
+      } catch (error) {
+        logger.debug(`SharePoint search failed, trying direct sites API: ${error}`);
+        // Fallback to direct sites API
+        const params: Record<string, string> = {
+          $top: String(topResults),
+        };
+        if (query) {
+          params.search = query;
+        }
+        const result = await callGraph(graphClient, 'GET', '/sites', params);
+        const sites = JSON.parse(result);
+        const items = sites.value || [];
+
+        for (const item of items.slice(0, topResults)) {
+          topResultsList.push({
+            title: item.displayName || item.name || 'Unnamed site',
+            summary: `Site: ${item.name || 'N/A'}`,
+            relevance: 100 - topResultsList.length * 5,
+            webUrl: item.webUrl,
+            metadata: {
+              name: item.name,
+              displayName: item.displayName,
+            },
+          });
+        }
+      }
+    } else if (product === 'Teams') {
+      // Search Teams chats
+      const result = await callGraph(graphClient, 'GET', '/me/chats', {
+        $top: String(topResults),
+        $select: 'id,topic,chatType,lastUpdatedDateTime',
+      });
+      const chats = JSON.parse(result);
+      const items = chats.value || [];
+
+      // Filter chats that match the query
+      const queryLower = query.toLowerCase();
+      const matchingChats = items.filter((chat: Record<string, unknown>) => {
+        const topic = (chat.topic || '').toString().toLowerCase();
+        return topic.includes(queryLower);
+      });
+
+      for (const item of matchingChats.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.topic || 'Untitled chat',
+          summary: `Type: ${item.chatType}, Updated: ${item.lastUpdatedDateTime || 'N/A'}`,
+          relevance: 100 - topResultsList.length * 5,
+          metadata: {
+            chatType: item.chatType,
+            lastUpdatedDateTime: item.lastUpdatedDateTime,
+          },
+        });
+      }
+    } else if (product === 'OneNote') {
+      // Search OneNote pages
+      const result = await callGraph(graphClient, 'GET', '/me/onenote/pages', {
+        $top: String(topResults),
+        $select: 'id,title,createdDateTime,lastModifiedDateTime,contentUrl',
+      });
+      const pages = JSON.parse(result);
+      const items = pages.value || [];
+
+      // Filter pages that match the query
+      const queryLower = query.toLowerCase();
+      const matchingPages = items.filter((page: Record<string, unknown>) => {
+        const title = (page.title || '').toString().toLowerCase();
+        return title.includes(queryLower);
+      });
+
+      for (const item of matchingPages.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.title || 'Untitled page',
+          summary: `Created: ${item.createdDateTime || 'N/A'}, Modified: ${item.lastModifiedDateTime || 'N/A'}`,
+          relevance: 100 - topResultsList.length * 5,
+          webUrl: item.contentUrl,
+          metadata: {
+            createdDateTime: item.createdDateTime,
+            lastModifiedDateTime: item.lastModifiedDateTime,
+          },
+        });
+      }
+    } else if (product === 'Users') {
+      // Search users - Microsoft Graph API requires property:value format for $search
+      const params: Record<string, string> = {
+        $search: formatSearchQuery(query, 'displayName'),
+        $top: String(topResults),
+        $select: 'id,displayName,mail,userPrincipalName,jobTitle,department',
+      };
+      const result = await callGraph(graphClient, 'GET', '/users', params, undefined, {
+        ConsistencyLevel: 'eventual',
+      });
+      const users = JSON.parse(result);
+      const items = users.value || [];
+
+      for (const item of items.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.displayName || 'Unknown user',
+          summary: `Email: ${item.mail || item.userPrincipalName || 'N/A'}, Title: ${item.jobTitle || 'N/A'}`,
+          relevance: 100 - topResultsList.length * 5,
+          metadata: {
+            mail: item.mail,
+            userPrincipalName: item.userPrincipalName,
+            jobTitle: item.jobTitle,
+            department: item.department,
+          },
+        });
+      }
+    } else if (product === 'Groups') {
+      // Search groups - use filter since $search may not be supported
+      const result = await callGraph(graphClient, 'GET', '/groups', {
+        $filter: `contains(displayName,'${query}') or contains(mail,'${query}') or contains(description,'${query}')`,
+        $top: String(topResults),
+        $select: 'id,displayName,mail,description',
+      });
+      const groups = JSON.parse(result);
+      const items = groups.value || [];
+
+      for (const item of items.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.displayName || 'Unnamed group',
+          summary: item.description || '',
+          relevance: 100 - topResultsList.length * 5,
+          metadata: {
+            mail: item.mail,
+            description: item.description,
+          },
+        });
+      }
+    } else if (product === 'Planner') {
+      // Search Planner plans
+      const result = await callGraph(graphClient, 'GET', '/me/planner/plans', {
+        $top: String(topResults),
+        $select: 'id,title,createdDateTime',
+      });
+      const plans = JSON.parse(result);
+      const items = plans.value || [];
+
+      // Filter plans that match the query
+      const queryLower = query.toLowerCase();
+      const matchingPlans = items.filter((plan: Record<string, unknown>) => {
+        const title = (plan.title || '').toString().toLowerCase();
+        return title.includes(queryLower);
+      });
+
+      for (const item of matchingPlans.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.title || 'Untitled plan',
+          summary: `Created: ${item.createdDateTime || 'N/A'}`,
+          relevance: 100 - topResultsList.length * 5,
+          metadata: {
+            createdDateTime: item.createdDateTime,
+          },
+        });
+      }
+    } else if (product === 'ToDo') {
+      // Search ToDo lists
+      const result = await callGraph(graphClient, 'GET', '/me/todo/lists', {
+        $top: String(topResults),
+        $select: 'id,displayName,wellknownListName',
+      });
+      const lists = JSON.parse(result);
+      const items = lists.value || [];
+
+      // Filter lists that match the query
+      const queryLower = query.toLowerCase();
+      const matchingLists = items.filter((list: Record<string, unknown>) => {
+        const displayName = (list.displayName || '').toString().toLowerCase();
+        return displayName.includes(queryLower);
+      });
+
+      for (const item of matchingLists.slice(0, topResults)) {
+        topResultsList.push({
+          title: item.displayName || 'Unnamed list',
+          summary: `List type: ${item.wellknownListName || 'custom'}`,
+          relevance: 100 - topResultsList.length * 5,
+          metadata: {
+            wellknownListName: item.wellknownListName,
+          },
+        });
+      }
+    }
+  } catch (error) {
+    logger.error(`Error searching product ${product}: ${error}`);
+    // Return empty result instead of throwing
+  }
+
+  return {
+    product,
+    resultCount: topResultsList.length,
+    topResults: topResultsList,
+  };
+}
+
+/**
+ * Handle product-based search
+ */
+async function handleProductSearch(
+  input: ProductSearchInput,
+  graphClient: GraphClient,
+  _readOnly: boolean
+): Promise<string> {
+  const thinking: string[] = [];
+  const startTime = Date.now();
+
+  thinking.push(`🔍 Product-based Search: "${input.query}"`);
+
+  const maxResults = input.maxResults || 50;
+  const topPerProduct = input.topPerProduct || 5;
+
+  // Step 1: Microsoft 365 Search - Initial search with Top 50 results
+  thinking.push(`📊 Step 1: Executing Microsoft 365 Search (max ${maxResults} results)`);
+
+  const entityTypes: Array<
+    'message' | 'event' | 'driveItem' | 'site' | 'list' | 'listItem' | 'chatMessage' | 'person'
+  > = ['message', 'event', 'driveItem', 'site', 'list', 'listItem', 'chatMessage', 'person'];
+
+  // Add time context for events
+  const now = new Date();
+  const defaultStartDate = new Date(
+    now.getFullYear() - 2,
+    now.getMonth(),
+    now.getDate()
+  ).toISOString();
+  const defaultEndDate = new Date(
+    now.getFullYear() + 1,
+    now.getMonth(),
+    now.getDate()
+  ).toISOString();
+
+  const searchRequest: Record<string, unknown> = {
+    requests: [
+      {
+        entityTypes,
+        query: {
+          queryString: input.query,
+        },
+        from: 0,
+        size: Math.min(maxResults, 500),
+        trimDuplicates: true,
+        // Add time context if events are included
+        ...(entityTypes.includes('event') && {
+          timeContext: {
+            startDateTime: defaultStartDate,
+            endDateTime: defaultEndDate,
+          },
+        }),
+      },
+    ],
+  };
+
+  let initialResults: Record<string, unknown[]> = {};
+  let totalHits = 0;
+
+  try {
+    const result = await callGraph(graphClient, 'POST', '/search/query', undefined, searchRequest);
+    const parsedResult = JSON.parse(result);
+
+    // Extract and format results
+    if (parsedResult.value && Array.isArray(parsedResult.value)) {
+      for (const response of parsedResult.value) {
+        if (response.hitsContainers && Array.isArray(response.hitsContainers)) {
+          for (const container of response.hitsContainers) {
+            totalHits += container.total || 0;
+            if (container.hits && Array.isArray(container.hits)) {
+              for (const hit of container.hits) {
+                const entityType = hit.resource?.['@odata.type'] || 'unknown';
+                if (!initialResults[entityType]) {
+                  initialResults[entityType] = [];
+                }
+                initialResults[entityType].push({
+                  id: hit.resource?.id,
+                  summary: hit.summary,
+                  rank: hit.rank,
+                  ...hit.resource,
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    thinking.push(
+      `✅ Found ${totalHits} initial results across ${Object.keys(initialResults).length} entity types`
+    );
+  } catch (error) {
+    thinking.push(
+      `⚠️ Initial search failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    thinking.push('Continuing with product-specific searches...');
+  }
+
+  // Step 2: Product Detection
+  thinking.push(`📊 Step 2: Detecting products from search results`);
+  const productsDetected = detectProductsFromSearchResults(initialResults);
+  thinking.push(
+    `✅ Detected products: ${productsDetected.length > 0 ? productsDetected.join(', ') : 'None'}`
+  );
+
+  // Step 3: Product-specific Queries
+  thinking.push(`📊 Step 3: Executing product-specific searches`);
+  const productResults: ProductSearchResult[] = [];
+
+  if (productsDetected.length === 0) {
+    thinking.push('⚠️ No products detected from initial search - trying all products');
+    // If no products detected, try searching all products
+    for (const mapping of PRODUCT_MAPPINGS) {
+      if (mapping.requiresDirectApi) {
+        try {
+          const result = await searchProduct(
+            mapping.product,
+            input.query,
+            graphClient,
+            topPerProduct
+          );
+          if (result.resultCount > 0) {
+            productResults.push(result);
+            thinking.push(`✅ ${mapping.product}: Found ${result.resultCount} results`);
+          }
+        } catch (error) {
+          thinking.push(
+            `⚠️ ${mapping.product}: Search failed - ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
+    }
+  } else {
+    // Search only detected products
+    for (const product of productsDetected) {
+      try {
+        const result = await searchProduct(product, input.query, graphClient, topPerProduct);
+        productResults.push(result);
+        thinking.push(`✅ ${product}: Found ${result.resultCount} results`);
+      } catch (error) {
+        thinking.push(
+          `⚠️ ${product}: Search failed - ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    }
+  }
+
+  // Step 4: Format Response
+  thinking.push(`📊 Step 4: Formatting response`);
+  const response: ProductSearchResponse = {
+    query: input.query,
+    initialSearchResults: {
+      totalHits,
+      productsDetected,
+    },
+    productResults,
+    thinking,
+  };
+
+  const executionTime = Date.now() - startTime;
+  thinking.push(`⏱️ Total execution time: ${executionTime}ms`);
+
+  return addThinkingToResponse(JSON.stringify(response, null, 2), thinking);
 }
 
 // ============================================================================
@@ -4701,7 +5566,7 @@ async function handleAssistant(
         ],
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     case 'search': {
@@ -4767,7 +5632,7 @@ async function handleAssistant(
         ],
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     case 'my-day': {
@@ -4837,7 +5702,7 @@ async function handleAssistant(
         ],
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     case 'my-week': {
@@ -4906,7 +5771,7 @@ async function handleAssistant(
         ],
       });
 
-      return addThinkingToResponse(JSON.stringify(responseWithMetadata, null, 2), thinking);
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     case 'person-info': {
@@ -5330,8 +6195,10 @@ async function handleDiscoverPerson(
     },
     insights: {
       lastInteraction:
-        categorizedResults.emails[0]?.['receivedDateTime'] ||
-        categorizedResults.meetings[0]?.['start']?.['dateTime'] ||
+        (categorizedResults.emails[0] as { receivedDateTime?: string } | undefined)
+          ?.receivedDateTime ||
+        (categorizedResults.meetings[0] as { start?: { dateTime?: string } } | undefined)?.start
+          ?.dateTime ||
         'Unknown',
       recentActivity: `${categorizedResults.emails.length} emails, ${categorizedResults.meetings.length} meetings`,
       recommendations: generatePersonRecommendations(
@@ -6593,8 +7460,10 @@ async function handleDiscoverCompany(
     insights: {
       relationshipScore,
       lastInteraction:
-        categorizedResults.emails[0]?.['receivedDateTime'] ||
-        categorizedResults.meetings[0]?.['start']?.['dateTime'] ||
+        (categorizedResults.emails[0] as { receivedDateTime?: string } | undefined)
+          ?.receivedDateTime ||
+        (categorizedResults.meetings[0] as { start?: { dateTime?: string } } | undefined)?.start
+          ?.dateTime ||
         'Unknown',
       recentActivity: `${emailCount} emails, ${meetingCount} meetings, ${fileCount} files, ${contactCount} contacts, ${siteCount} sites`,
       recommendations: generateCompanyRecommendations(
@@ -6710,7 +7579,7 @@ export function registerSuperTools(
   // 0. SEARCH (Microsoft 365 Unified Search - RECOMMENDED FIRST TOOL)
   server.tool(
     'search',
-    'Microsoft 365 Unified Search - USE THIS FIRST to find content across emails, calendar, files, SharePoint, Teams. Returns results and suggests which specific tools to use next.',
+    'Microsoft 365 Unified Search - USE THIS FIRST to find content across all Microsoft 365 services (emails, calendar events, files, SharePoint sites, Teams messages, people). Returns unified results from multiple sources and suggests which specific tools to use next for detailed operations. Supports natural language queries and keyword searches across entity types: message (emails), event (calendar), driveItem (files), site, list, listItem, chatMessage, person, acronym, bookmark, qna, externalItem.',
     searchSchema.shape,
     async (input: SearchInput) => {
       try {
@@ -6733,7 +7602,7 @@ export function registerSuperTools(
   // 1. Email
   server.tool(
     'email',
-    `Unified email operations: list, get, folders, child-folders, attachments, search${readOnly ? '' : ' | send, reply, delete, move (write)'}`,
+    `Unified email operations for Outlook/Exchange. Read operations: list messages (with pagination, filtering, search), get message details, list folders and subfolders, get attachments, search emails. ${readOnly ? '' : 'Write operations: send new emails, reply to messages, delete emails, move emails to folders.'} Use this tool when you need to work with email messages, folders, or attachments. Supports OData filtering, search queries, and pagination.`,
     emailSchema.shape,
     async (input: EmailInput) => {
       try {
@@ -6756,7 +7625,7 @@ export function registerSuperTools(
   // 2. Calendar
   server.tool(
     'calendar',
-    'Unified calendar operations: list events, get event, calendar view, list calendars',
+    `Unified calendar operations for Outlook Calendar. Read operations: list events (with filtering and pagination), get event details, view calendar events in date range, list available calendars. ${readOnly ? '' : 'Write operations: create new events, update existing events, delete events.'} Supports timezone handling, date range queries, attendee management, and online meeting creation. Use this tool when working with calendar events, scheduling, or meeting information.`,
     calendarSchema.shape,
     async (input: CalendarInput) => {
       try {
@@ -6960,5 +7829,28 @@ export function registerSuperTools(
     }
   );
 
-  logger.info('Registered 11 Super-Tools (search is the recommended first tool)');
+  // 11. Product Search
+  server.tool(
+    'product-search',
+    'Product-based search: First uses Microsoft 365 Search to find results, then detects affected products and provides product-specific summaries with top 3-5 results per product',
+    productSearchSchema.shape,
+    async (input: ProductSearchInput) => {
+      try {
+        const result = await handleProductSearch(input, graphClient, readOnly);
+        return { content: [{ type: 'text' as const, text: result }] };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+
+  logger.info('Registered 12 Super-Tools (search is the recommended first tool)');
 }

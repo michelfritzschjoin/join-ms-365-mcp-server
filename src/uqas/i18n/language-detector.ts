@@ -436,10 +436,12 @@ export class LanguageDetector {
       for (const category of Object.keys(LANG_INDICATORS.de) as Array<
         keyof typeof LANG_INDICATORS.de
       >) {
-        if (LANG_INDICATORS.de[category].includes(lower)) {
+        const deIndicators = LANG_INDICATORS.de[category] as readonly string[];
+        const enIndicators = LANG_INDICATORS.en[category] as readonly string[];
+        if (deIndicators.includes(lower)) {
           deScore += 1;
         }
-        if (LANG_INDICATORS.en[category].includes(lower)) {
+        if (enIndicators.includes(lower)) {
           enScore += 1;
         }
       }

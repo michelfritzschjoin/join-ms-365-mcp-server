@@ -17,31 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* display only local time in calendar events, remove UTC suffix ([4055ebf](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/4055ebfc7106842bd6b897b58d697773924a3586))
+- display only local time in calendar events, remove UTC suffix ([4055ebf](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/4055ebfc7106842bd6b897b58d697773924a3586))
 
 ## [1.22.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.21.1...v1.22.0) (2026-02-02)
 
 ### Features
 
-* add microsoft loop file detection and reading support ([8b01201](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/8b012012a6b86557b7859de1ea7fae871d542b89))
+- add microsoft loop file detection and reading support ([8b01201](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/8b012012a6b86557b7859de1ea7fae871d542b89))
 
 ## [1.21.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.21.0...v1.21.1) (2026-02-02)
 
 ### Bug Fixes
 
-* correct timezone offset calculation sign error ([3e061cd](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3e061cd5962d933b31c40409669aa36eccee04af))
+- correct timezone offset calculation sign error ([3e061cd](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3e061cd5962d933b31c40409669aa36eccee04af))
 
 ## [1.21.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.20.0...v1.21.0) (2026-02-02)
 
 ### Features
 
-* **email:** add child-folders action to list mail subfolders ([44182b0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/44182b0bdad2d4a6224c7e8b7b15dd7ec0df2c94))
+- **email:** add child-folders action to list mail subfolders ([44182b0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/44182b0bdad2d4a6224c7e8b7b15dd7ec0df2c94))
 
 ## [1.20.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.19.0...v1.20.0) (2026-02-02)
 
 ### Features
 
-* **notes:** add search-pages action and support search parameter for pages action ([7dc970c](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/7dc970c74b88fd6940f09b713779ef71463bf514))
+- **notes:** add search-pages action and support search parameter for pages action ([7dc970c](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/7dc970c74b88fd6940f09b713779ef71463bf514))
 
 ## [1.19.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.18.0...v1.19.0) (2026-01-30)
 

@@ -9,7 +9,9 @@ import { fileURLToPath } from 'url';
 import { TOOL_CATEGORIES } from './tool-categories.js';
 import type KnowledgeBase from './knowledge-base.js';
 import { formatGraphResponse } from './response-formatter.js';
+import { formatToolResponse } from './super-tools.js';
 import { createThinkingProcess } from './thinking-process.js';
+import { encode as toonEncode } from '@toon-format/toon';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -611,7 +613,25 @@ async function executeGraphTool(
             params
           );
           if (isFormatted) {
-            response.content[0].text = JSON.stringify(formatted, null, 2);
+            // Format as Tool output and remove unnecessary information
+            const toolFormatted = formatToolResponse(formatted);
+
+            // Use TOON format if enabled, otherwise JSON
+            const outputFormat = process.env.MS365_MCP_OUTPUT_FORMAT === 'toon' ? 'toon' : 'json';
+            let formattedText: string;
+
+            if (outputFormat === 'toon') {
+              try {
+                formattedText = toonEncode(toolFormatted);
+              } catch (error) {
+                logger.warn(`Failed to encode as TOON, falling back to JSON: ${error}`);
+                formattedText = JSON.stringify(toolFormatted, null, 2);
+              }
+            } else {
+              formattedText = JSON.stringify(toolFormatted, null, 2);
+            }
+
+            response.content[0].text = formattedText;
             logger.info(`Applied structured ${type} formatting`);
             thinking.completeAction('formatting', `Applied ${type} formatting`);
           }

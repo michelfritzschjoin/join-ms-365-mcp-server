@@ -39,3 +39,41 @@
 2. Der Build nach Version-Änderung ausgeführt wird (`npm run build`)
 3. Die Version-Anzeige zur Laufzeit korrekt ist
 
+---
+
+# Pre-Commit Testing Rule
+
+## Test Execution Before Git Commits
+
+**CRITICAL**: Vor jedem Git-Commit müssen Tests ausgeführt werden und alle Fehler behoben werden.
+
+### Requirements:
+
+1. **Pre-Commit Test Execution**:
+   - Vor jedem `git commit` MUSS zuerst `npm test` ausgeführt werden
+   - Alle Test-Fehler MÜSSEN behoben werden, bevor der Commit durchgeführt wird
+   - Nur wenn alle Tests erfolgreich sind, darf der Commit erstellt werden
+
+2. **Test Failure Handling**:
+   - Wenn `npm test` Fehler meldet, müssen diese SOFORT behoben werden
+   - Keine Commits mit fehlgeschlagenen Tests
+   - Test-Fehler haben Priorität vor dem Commit
+
+3. **Workflow**:
+   ```
+   1. Code-Änderungen vornehmen
+   2. `npm test` ausführen
+   3. Falls Tests fehlschlagen → Fehler beheben → zurück zu Schritt 2
+   4. Falls Tests erfolgreich → `git commit` durchführen
+   ```
+
+4. **Verification**:
+   - Stelle sicher, dass `npm test` ohne Fehler durchläuft
+   - Überprüfe Test-Output auf Warnungen und Fehler
+   - Behebe alle Test-Fehler, bevor du den Commit-Command ausführst
+
+**WICHTIG**: 
+- Niemals einen Commit erstellen, wenn `npm test` Fehler meldet
+- Test-Fehler sind Blockierer für Commits
+- Die Code-Qualität und Funktionalität haben Vorrang vor schnellen Commits
+

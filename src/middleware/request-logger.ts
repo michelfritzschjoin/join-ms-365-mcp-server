@@ -92,7 +92,7 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
       return originalJson.call(this, body);
     };
 
-    res.end = function (chunk?: unknown, encoding?: unknown) {
+    res.end = function (chunk?: unknown, encoding?: unknown, cb?: () => void) {
       try {
         if (chunk && !res.headersSent && !responseLogged) {
           logResponse(requestId, req, res, startTime, chunk);
@@ -101,7 +101,8 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
       } catch (error) {
         logger.error(`[${requestId}] Error logging response:`, error);
       }
-      return originalEnd.call(this, chunk, encoding);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (originalEnd as any).call(this, chunk, encoding, cb);
     };
 
     // Log errors
