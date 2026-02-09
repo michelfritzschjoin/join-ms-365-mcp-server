@@ -61,6 +61,7 @@ import {
   formatDataByProfession,
   getProfessionGreeting,
 } from './response-formatter.js';
+import { findUser, findChatsWithUser, type GraphUser, type GraphChat } from './compound-tools.js';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
@@ -93,12 +94,35 @@ function formatSearchQuery(
   }
 
   // Check if search already contains a property prefix (e.g., "displayName:John")
-  const propertyValuePattern = /^[a-zA-Z]+:/i;
+  const propertyValuePattern = /^([a-zA-Z]+):(.+)$/i;
   const trimmedValue = searchValue.trim();
 
-  // If already has property prefix, use as-is
-  if (propertyValuePattern.test(trimmedValue)) {
-    return `"${trimmedValue}"`;
+  // If already has property prefix, format it properly
+  const propertyMatch = trimmedValue.match(propertyValuePattern);
+  if (propertyMatch) {
+    const property = propertyMatch[1];
+    let value = propertyMatch[2];
+
+    // Remove any existing escaped quotes or regular quotes from the value
+    // Handle both \" and " formats - strip quotes from start and end
+    value = value.trim();
+    if (value.startsWith('\\"') && value.endsWith('\\"')) {
+      value = value.slice(2, -2);
+    } else if (value.startsWith('"') && value.endsWith('"')) {
+      value = value.slice(1, -1);
+    }
+
+    // If value contains spaces, quote and escape it for KQL syntax
+    // Format: property:"value with spaces" -> "property:\"value with spaces\""
+    if (value.includes(' ')) {
+      // Format as property:"value" then escape inner quotes when wrapping
+      const innerQuery = `${property}:"${value}"`;
+      // Escape the inner quotes for the outer wrapper
+      return `"${innerQuery.replace(/"/g, '\\"')}"`;
+    } else {
+      // Simple value without spaces: property:value -> "property:value"
+      return `"${property}:${value}"`;
+    }
   }
 
   // Format based on search type
@@ -1350,6 +1374,10 @@ async function handleEmail(
         $top: String(input.top || 25),
       };
 
+      // Microsoft Graph API limitation: $orderby is NOT supported with $search
+      // Search results are automatically ordered by relevance
+      // Note: input.orderby is intentionally not used here
+
       // Apply temporal filters if NLP detected them
       if (optimized.filters?.dateFilter) {
         const dateFilter = optimized.filters.dateFilter as string;
@@ -1744,6 +1772,12 @@ const teamsSchema = z.object({
     .boolean()
     .optional()
     .describe('Include last messages for each chat (default: true for chats action)'),
+  person: z
+    .string()
+    .optional()
+    .describe(
+      'Filter chats by person name or email. When provided, the system will first resolve the person, then fetch only chats with that person.'
+    ),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -1831,20 +1865,70 @@ async function handleTeams(
     }
 
     case 'chats': {
-      thinking.push('Listing chats');
-      const params: Record<string, string> = { $top: String(input.top || 25) };
-      const chatsResult = await callGraph(graphClient, 'GET', '/me/chats', params);
-      const chatsData = JSON.parse(chatsResult);
+      let chatsData: { value?: any[] };
+      let chatsToProcess: any[] = [];
+
+      // If person filter is provided, resolve the person first, then filter chats
+      if (input.person) {
+        thinking.push(`Resolving person: ${input.person}`);
+        const user = await findUser(graphClient, input.person);
+        if (!user) {
+          const errorResponse = {
+            error: 'User not found',
+            message: `Could not find a user matching "${input.person}". Try using their full name, email address, or check the spelling.`,
+            searchedFor: input.person,
+            suggestion: 'Use list-users tool with a search query to find the correct user.',
+          };
+          thinking.push(`User not found: ${input.person}`);
+          return addThinkingToResponse(JSON.stringify(errorResponse, null, 2), thinking);
+        }
+
+        thinking.push(`Found user: ${user.displayName} (${user.id})`);
+        thinking.push(`Finding chats with ${user.displayName}...`);
+
+        const matchingChats = await findChatsWithUser(
+          graphClient,
+          user.id,
+          user.mail || user.userPrincipalName,
+          user.displayName
+        );
+
+        if (matchingChats.length === 0) {
+          const noChatsResponse = {
+            success: true,
+            person: {
+              name: user.displayName,
+              email: user.mail || user.userPrincipalName,
+              id: user.id,
+            },
+            message: `No Teams chats found with ${user.displayName}. You may not have any direct chats with this person.`,
+            chatsFound: 0,
+            messagesFound: 0,
+          };
+          thinking.push(`No chats found with ${user.displayName}`);
+          return addThinkingToResponse(JSON.stringify(noChatsResponse, null, 2), thinking);
+        }
+
+        thinking.push(`Found ${matchingChats.length} chat(s) with ${user.displayName}`);
+        chatsToProcess = matchingChats;
+      } else {
+        // No person filter - list all chats
+        thinking.push('Listing chats');
+        const params: Record<string, string> = { $top: String(input.top || 25) };
+        const chatsResult = await callGraph(graphClient, 'GET', '/me/chats', params);
+        chatsData = JSON.parse(chatsResult);
+        chatsToProcess = chatsData.value || [];
+      }
 
       // Default: include messages for chats action (unless explicitly disabled)
       const includeMessages = input.includeMessages !== false;
 
-      if (includeMessages && chatsData.value && Array.isArray(chatsData.value)) {
-        thinking.push(`Fetching last messages for ${chatsData.value.length} chats...`);
+      if (includeMessages && chatsToProcess.length > 0) {
+        thinking.push(`Fetching last messages for ${chatsToProcess.length} chat(s)...`);
 
         // Fetch last messages for each chat (limit to avoid too many requests)
         const chatsWithMessages = await Promise.allSettled(
-          chatsData.value.slice(0, 10).map(async (chat: { id: string }) => {
+          chatsToProcess.slice(0, 10).map(async (chat: GraphChat | any) => {
             try {
               const messagesResult = await callGraph(
                 graphClient,
@@ -1898,10 +1982,29 @@ async function handleTeams(
           chats: formattedChats,
         };
 
-        thinking.push(`Retrieved last messages for ${formattedChats.length} chats`);
+        thinking.push(`Retrieved last messages for ${formattedChats.length} chat(s)`);
         return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
       }
 
+      // If messages are not included, return the chats list
+      if (input.person) {
+        const output = {
+          totalChats: chatsToProcess.length,
+          chats: chatsToProcess.map((chat: GraphChat) => ({
+            id: chat.id,
+            topic: chat.topic,
+            chatType: chat.chatType,
+            createdDateTime: chat.createdDateTime,
+            lastUpdatedDateTime: chat.lastUpdatedDateTime,
+            webUrl: chat.webUrl,
+          })),
+        };
+        return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
+      }
+
+      // Fallback: return raw result if no person filter and no messages
+      const params: Record<string, string> = { $top: String(input.top || 25) };
+      const chatsResult = await callGraph(graphClient, 'GET', '/me/chats', params);
       return addThinkingToResponse(chatsResult, thinking);
     }
 
