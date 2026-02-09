@@ -1071,26 +1071,34 @@ async function findEmailsWithPerson(
 
 /**
  * Find meetings/events with a specific person
+ * @param sortOrder - Sort order: 'desc' for newest first (default), 'asc' for oldest first
+ * @param onlyPast - If true, only return past meetings (default: false)
  */
 async function findMeetingsWithPerson(
   graphClient: GraphClient,
   userEmail: string,
   userDisplayName: string,
-  limit: number = 20
+  limit: number = 20,
+  sortOrder: 'asc' | 'desc' = 'desc',
+  onlyPast: boolean = false
 ): Promise<GraphEvent[]> {
   try {
     // Get calendar events and filter by attendee
     const now = new Date();
     const pastDate = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000); // 90 days ago
-    const futureDate = new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000); // 90 days future
+    // If onlyPast is true, only query up to now (no future events)
+    // Otherwise, include 90 days in the future
+    const futureDate = onlyPast ? now : new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000);
 
     // Build query string (startDateTime and endDateTime are REQUIRED for calendarView)
+    // When onlyPast is true, use desc order to get most recent past events first
+    const effectiveSortOrder = onlyPast ? 'desc' : sortOrder;
     const queryParams: Record<string, string> = {
       startDateTime: pastDate.toISOString(),
       endDateTime: futureDate.toISOString(),
       $top: '100',
       $select: 'id,subject,bodyPreview,start,end,attendees,organizer,location,webLink',
-      $orderby: 'start/dateTime asc',
+      $orderby: effectiveSortOrder === 'desc' ? 'start/dateTime desc' : 'start/dateTime asc',
     };
 
     const response = await graphClient.makeRequest(
@@ -1182,14 +1190,25 @@ async function findMeetingsWithPerson(
       }
     }
 
-    // Sort matching events by start time (ascending) with proper timezone handling
-    matchingEvents.sort((a, b) => {
+    // Filter to only past meetings if requested
+    // Note: If onlyPast=true, the Graph API query already limits to past events,
+    // but we still filter here as a safety measure in case of timezone edge cases
+    let filteredEvents = matchingEvents;
+    if (onlyPast) {
+      filteredEvents = matchingEvents.filter((event) => {
+        const eventTime = convertToLocalTime(event.start.dateTime, event.start.timeZone);
+        return eventTime < now;
+      });
+    }
+
+    // Sort matching events by start time with proper timezone handling
+    filteredEvents.sort((a, b) => {
       const aTime = convertToLocalTime(a.start.dateTime, a.start.timeZone).getTime();
       const bTime = convertToLocalTime(b.start.dateTime, b.start.timeZone).getTime();
-      return aTime - bTime;
+      return sortOrder === 'desc' ? bTime - aTime : aTime - bTime;
     });
 
-    return matchingEvents.slice(0, limit);
+    return filteredEvents.slice(0, limit);
   } catch (error) {
     logger.error(`Error finding meetings: ${error}`);
     return [];
@@ -2276,6 +2295,133 @@ async function executeUniversalSearch(
 }
 
 /**
+ * Helper function to get end of day (23:59:59.999) for a given date
+ */
+function endOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+}
+
+/**
+ * Helper function to get start of day (00:00:00) for a given date
+ */
+function startOfDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+}
+
+/**
+ * Get date range from timeframe string (e.g., 'today', 'tomorrow', 'thisWeek')
+ * Exported for testing purposes
+ */
+export function getDateRangeFromTimeframe(timeframe: string): { start: Date; end: Date } {
+  const now = new Date();
+  const today = startOfDay(now);
+  let start: Date;
+  let end: Date;
+
+  switch (timeframe) {
+    case 'today':
+      start = today;
+      end = endOfDay(today);
+      break;
+    case 'yesterday': {
+      const yesterdayDate = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+      start = startOfDay(yesterdayDate);
+      end = endOfDay(yesterdayDate);
+      break;
+    }
+    case 'tomorrow': {
+      const tomorrowDate = new Date(today.getTime() + 24 * 60 * 60 * 1000);
+      start = startOfDay(tomorrowDate);
+      end = endOfDay(tomorrowDate);
+      break;
+    }
+    case 'thisWeek': {
+      const dayOfWeek = today.getDay();
+      const weekStart = new Date(today.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
+      const weekEnd = new Date(weekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+      start = startOfDay(weekStart);
+      end = endOfDay(weekEnd);
+      break;
+    }
+    case 'lastWeek': {
+      const lastWeekStart = new Date(today.getTime() - (today.getDay() + 7) * 24 * 60 * 60 * 1000);
+      const lastWeekEnd = new Date(lastWeekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+      start = startOfDay(lastWeekStart);
+      end = endOfDay(lastWeekEnd);
+      break;
+    }
+    case 'nextWeek': {
+      const nextWeekStart = new Date(today.getTime() + (7 - today.getDay()) * 24 * 60 * 60 * 1000);
+      const nextWeekEnd = new Date(nextWeekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
+      start = startOfDay(nextWeekStart);
+      end = endOfDay(nextWeekEnd);
+      break;
+    }
+    case 'thisMonth': {
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0); // Last day of current month
+      start = startOfDay(monthStart);
+      end = endOfDay(monthEnd);
+      break;
+    }
+    case 'lastMonth': {
+      const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0); // Last day of previous month
+      start = startOfDay(lastMonthStart);
+      end = endOfDay(lastMonthEnd);
+      break;
+    }
+    case 'nextMonth': {
+      const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+      const nextMonthEnd = new Date(now.getFullYear(), now.getMonth() + 2, 0); // Last day of next month
+      start = startOfDay(nextMonthStart);
+      end = endOfDay(nextMonthEnd);
+      break;
+    }
+    case 'last7Days': {
+      const last7Start = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+      start = startOfDay(last7Start);
+      end = endOfDay(today);
+      break;
+    }
+    case 'last30Days': {
+      const last30Start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
+      start = startOfDay(last30Start);
+      end = endOfDay(today);
+      break;
+    }
+    case 'last90Days': {
+      const last90Start = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
+      start = startOfDay(last90Start);
+      end = endOfDay(today);
+      break;
+    }
+    case 'thisYear': {
+      const yearStart = new Date(now.getFullYear(), 0, 1);
+      const yearEnd = new Date(now.getFullYear(), 11, 31); // December 31st
+      start = startOfDay(yearStart);
+      end = endOfDay(yearEnd);
+      break;
+    }
+    case 'lastYear': {
+      const lastYearStart = new Date(now.getFullYear() - 1, 0, 1);
+      const lastYearEnd = new Date(now.getFullYear() - 1, 11, 31); // December 31st of last year
+      start = startOfDay(lastYearStart);
+      end = endOfDay(lastYearEnd);
+      break;
+    }
+    default: {
+      // Default to last 14 days until end of today
+      const defaultStart = new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000);
+      start = startOfDay(defaultStart);
+      end = endOfDay(today);
+    }
+  }
+
+  return { start, end };
+}
+
+/**
  * Register all compound tools
  */
 export function registerCompoundTools(
@@ -2849,133 +2995,7 @@ export function registerCompoundTools(
     },
   };
 
-  // Convert timeframe to date range
-  /**
-   * Helper function to get end of day (23:59:59.999) for a given date
-   */
-  function endOfDay(date: Date): Date {
-    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
-  }
-
-  /**
-   * Helper function to get start of day (00:00:00) for a given date
-   */
-  function startOfDay(date: Date): Date {
-    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
-  }
-
-  function getDateRangeFromTimeframe(timeframe: string): { start: Date; end: Date } {
-    const now = new Date();
-    const today = startOfDay(now);
-    let start: Date;
-    let end: Date;
-
-    switch (timeframe) {
-      case 'today':
-        start = today;
-        end = endOfDay(today);
-        break;
-      case 'yesterday': {
-        const yesterdayDate = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-        start = startOfDay(yesterdayDate);
-        end = endOfDay(yesterdayDate);
-        break;
-      }
-      case 'tomorrow': {
-        const tomorrowDate = new Date(today.getTime() + 24 * 60 * 60 * 1000);
-        start = startOfDay(tomorrowDate);
-        end = endOfDay(tomorrowDate);
-        break;
-      }
-      case 'thisWeek': {
-        const dayOfWeek = today.getDay();
-        const weekStart = new Date(today.getTime() - dayOfWeek * 24 * 60 * 60 * 1000);
-        const weekEnd = new Date(weekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
-        start = startOfDay(weekStart);
-        end = endOfDay(weekEnd);
-        break;
-      }
-      case 'lastWeek': {
-        const lastWeekStart = new Date(
-          today.getTime() - (today.getDay() + 7) * 24 * 60 * 60 * 1000
-        );
-        const lastWeekEnd = new Date(lastWeekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
-        start = startOfDay(lastWeekStart);
-        end = endOfDay(lastWeekEnd);
-        break;
-      }
-      case 'nextWeek': {
-        const nextWeekStart = new Date(
-          today.getTime() + (7 - today.getDay()) * 24 * 60 * 60 * 1000
-        );
-        const nextWeekEnd = new Date(nextWeekStart.getTime() + 6 * 24 * 60 * 60 * 1000);
-        start = startOfDay(nextWeekStart);
-        end = endOfDay(nextWeekEnd);
-        break;
-      }
-      case 'thisMonth': {
-        const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-        const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0); // Last day of current month
-        start = startOfDay(monthStart);
-        end = endOfDay(monthEnd);
-        break;
-      }
-      case 'lastMonth': {
-        const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0); // Last day of previous month
-        start = startOfDay(lastMonthStart);
-        end = endOfDay(lastMonthEnd);
-        break;
-      }
-      case 'nextMonth': {
-        const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-        const nextMonthEnd = new Date(now.getFullYear(), now.getMonth() + 2, 0); // Last day of next month
-        start = startOfDay(nextMonthStart);
-        end = endOfDay(nextMonthEnd);
-        break;
-      }
-      case 'last7Days': {
-        const last7Start = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-        start = startOfDay(last7Start);
-        end = endOfDay(today);
-        break;
-      }
-      case 'last30Days': {
-        const last30Start = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
-        start = startOfDay(last30Start);
-        end = endOfDay(today);
-        break;
-      }
-      case 'last90Days': {
-        const last90Start = new Date(today.getTime() - 90 * 24 * 60 * 60 * 1000);
-        start = startOfDay(last90Start);
-        end = endOfDay(today);
-        break;
-      }
-      case 'thisYear': {
-        const yearStart = new Date(now.getFullYear(), 0, 1);
-        const yearEnd = new Date(now.getFullYear(), 11, 31); // December 31st
-        start = startOfDay(yearStart);
-        end = endOfDay(yearEnd);
-        break;
-      }
-      case 'lastYear': {
-        const lastYearStart = new Date(now.getFullYear() - 1, 0, 1);
-        const lastYearEnd = new Date(now.getFullYear() - 1, 11, 31); // December 31st of last year
-        start = startOfDay(lastYearStart);
-        end = endOfDay(lastYearEnd);
-        break;
-      }
-      default: {
-        // Default to last 14 days until end of today
-        const defaultStart = new Date(today.getTime() - 14 * 24 * 60 * 60 * 1000);
-        start = startOfDay(defaultStart);
-        end = endOfDay(today);
-      }
-    }
-
-    return { start, end };
-  }
+  // Convert timeframe to date range - use exported function
 
   // Required scopes for each intent
   const INTENT_REQUIRED_SCOPES: Record<Intent, { scopes: string[]; workScopes: string[] }> = {
@@ -5246,11 +5266,13 @@ Use this when someone asks "Show me emails from [person]" or "Find my email conv
   server.tool(
     'find-meetings-with-person',
     `Find all calendar meetings/events with a specific person. This tool automatically:
-1. Finds the user by name or email
-2. Scans calendar events (past 90 days and future 90 days)
-3. Filters events where this person is an attendee or organizer
+1. Queries the current server time FIRST (critical for time-sensitive queries)
+2. Finds the user by name or email
+3. Scans calendar events (past 90 days and future 90 days)
+4. Filters events where this person is an attendee or organizer
+5. Returns current server time in the response for accurate "next meeting" identification
 
-Use this when someone asks "What meetings do I have with [person]?" or "When did I last meet with [person]?".`,
+Use this when someone asks "What meetings do I have with [person]?" or "When is my next meeting with [person]?". The response always includes the current server time to ensure accurate time-based filtering.`,
     {
       person: z.string().describe('Name or email of the person to find meetings with'),
       limit: z.number().optional().describe('Maximum number of meetings to return (default: 20)'),
@@ -5283,6 +5305,19 @@ Use this when someone asks "What meetings do I have with [person]?" or "When did
 
       const userEmail = user.mail || user.userPrincipalName || '';
 
+      // CRITICAL: Always query current server time first for time-sensitive queries
+      const now = new Date();
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const currentTimeFormatted = now.toLocaleString('de-DE', {
+        weekday: 'long',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: timezone,
+      });
+
       // Step 2: Find meetings
       const meetings = await findMeetingsWithPerson(
         graphClient,
@@ -5291,7 +5326,6 @@ Use this when someone asks "What meetings do I have with [person]?" or "When did
         limit
       );
 
-      const now = new Date();
       // Use convertToLocalTime to properly handle timezone from Graph API
       const pastMeetings = meetings.filter((m) => {
         const eventTime = convertToLocalTime(m.start.dateTime, m.start.timeZone);
@@ -5333,6 +5367,13 @@ Use this when someone asks "What meetings do I have with [person]?" or "When did
             text: JSON.stringify(
               {
                 success: true,
+                // CRITICAL: Always include current server time for time-sensitive queries
+                currentServerTime: {
+                  iso: now.toISOString(),
+                  local: currentTimeFormatted,
+                  timezone: timezone,
+                  timestamp: now.getTime(),
+                },
                 person: {
                   name: user.displayName,
                   email: userEmail,
@@ -5342,6 +5383,9 @@ Use this when someone asks "What meetings do I have with [person]?" or "When did
                 upcomingMeetings: {
                   count: upcomingMeetings.length,
                   events: upcomingMeetings.slice(0, 10).map(formatMeeting),
+                  // Include next meeting explicitly if available
+                  nextMeeting:
+                    upcomingMeetings.length > 0 ? formatMeeting(upcomingMeetings[0]) : null,
                 },
                 pastMeetings: {
                   count: pastMeetings.length,
@@ -6182,13 +6226,14 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
   server.tool(
     'prepare-for-meeting',
     `Prepare for a specific meeting by gathering all relevant context:
+- Queries the current server time FIRST (critical for time-sensitive queries)
 - Meeting details (time, location, attendees)
 - Previous meetings with the same attendees
 - Recent emails with attendees
 - Shared files with attendees
 - Related Teams conversations
 
-Use this when someone asks "Prepare me for my meeting with [person/topic]" or "What should I know before my next meeting?".`,
+Use this when someone asks "Prepare me for my meeting with [person/topic]" or "What should I know before my next meeting?". The response always includes the current server time to ensure accurate time-based filtering.`,
     {
       meetingSubject: z.string().optional().describe('Subject or keyword in meeting title'),
       attendeeName: z.string().optional().describe('Name of a meeting attendee to focus on'),
@@ -6202,7 +6247,18 @@ Use this when someone asks "Prepare me for my meeting with [person/topic]" or "W
     async ({ meetingSubject, attendeeName, hoursAhead = 24 }) => {
       logger.info(`Preparing for meeting: ${meetingSubject || attendeeName || 'next meeting'}`);
 
+      // CRITICAL: Always query current server time first for time-sensitive queries
       const now = new Date();
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const currentTimeFormatted = now.toLocaleString('de-DE', {
+        weekday: 'long',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: timezone,
+      });
       const futureDate = new Date(now.getTime() + hoursAhead * 60 * 60 * 1000);
 
       // Step 1: Find the meeting
@@ -6281,6 +6337,13 @@ Use this when someone asks "Prepare me for my meeting with [person/topic]" or "W
       }
 
       const result: Record<string, unknown> = {
+        // CRITICAL: Always include current server time for time-sensitive queries
+        currentServerTime: {
+          iso: now.toISOString(),
+          local: currentTimeFormatted,
+          timezone: timezone,
+          timestamp: now.getTime(),
+        },
         meeting: {
           subject: targetMeeting.subject,
           start: targetMeeting.start.dateTime,

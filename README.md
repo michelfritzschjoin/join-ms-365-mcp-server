@@ -895,6 +895,106 @@ docker run -d -p 3000:3000 \
 
 ---
 
+## 🔐 Azure AD App Permissions / Azure AD App-Berechtigungen
+
+### Delegate Permissions Overview / Übersicht der Delegate Permissions
+
+**English:** The following Microsoft Graph Delegate Permissions are required for the Azure AD App Registration. These permissions allow the server to access Microsoft 365 services on behalf of the signed-in user.
+
+**Deutsch:** Die folgenden Microsoft Graph Delegate Permissions sind für die Azure AD App-Registrierung erforderlich. Diese Berechtigungen ermöglichen es dem Server, im Namen des angemeldeten Benutzers auf Microsoft 365-Dienste zuzugreifen.
+
+### Personal Account Permissions / Persönliche Kontoberechtigungen
+
+These permissions work with personal Microsoft accounts (Outlook.com, Hotmail, etc.) and work/school accounts:
+
+| Permission                         | Description / Beschreibung                                 | Required For / Erforderlich für                              |
+| ---------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------ |
+| `User.Read`                        | Read user profile / Benutzerprofil lesen                   | Basic functionality / Grundfunktionalität                    |
+| `People.Read`                      | Read people / Personen lesen                               | Contact search / Kontaktsuche                                |
+| `Mail.Read`                        | Read mail / E-Mails lesen                                  | Email reading / E-Mail-Lesen                                 |
+| `Mail.ReadWrite`                   | Read and write mail / E-Mails lesen und schreiben          | Email management / E-Mail-Verwaltung                         |
+| `Mail.Send`                        | Send mail / E-Mails senden                                 | Send email / E-Mails senden                                  |
+| `Calendars.Read`                   | Read calendars / Kalender lesen                            | Calendar viewing / Kalender anzeigen                         |
+| `Calendars.ReadWrite`              | Read and write calendars / Kalender lesen und schreiben    | Calendar management / Kalenderverwaltung                     |
+| `Contacts.Read`                    | Read contacts / Kontakte lesen                             | Contact viewing / Kontakte anzeigen                          |
+| `Contacts.ReadWrite`               | Read and write contacts / Kontakte lesen und schreiben     | Contact management / Kontaktverwaltung                       |
+| `Files.Read`                       | Read files / Dateien lesen                                 | OneDrive read / OneDrive lesen                               |
+| `Files.Read.All`                   | Read all files / Alle Dateien lesen                        | Cross-user file access / Benutzerübergreifender Dateizugriff |
+| `Files.ReadWrite`                  | Read and write files / Dateien lesen und schreiben         | OneDrive management / OneDrive-Verwaltung                    |
+| `Tasks.Read`                       | Read tasks / Aufgaben lesen                                | To-Do read / To-Do lesen                                     |
+| `Tasks.ReadWrite`                  | Read and write tasks / Aufgaben lesen und schreiben        | To-Do management / To-Do-Verwaltung                          |
+| `Notes.Read`                       | Read OneNote / OneNote lesen                               | OneNote viewing / OneNote anzeigen                           |
+| `Notes.Create`                     | Create OneNote / OneNote erstellen                         | OneNote creation / OneNote-Erstellung                        |
+| `OnlineMeetings.Read`              | Read online meetings / Online-Besprechungen lesen          | Meeting information / Besprechungsinformationen              |
+| `OnlineMeetingTranscript.Read.All` | Read meeting transcripts / Besprechungstranskripte lesen   | Transcript access / Transkript-Zugriff                       |
+| `OnlineMeetingRecording.Read.All`  | Read meeting recordings / Besprechungsaufzeichnungen lesen | Recording access / Aufzeichnungs-Zugriff                     |
+
+### Organization Mode Permissions / Organisationsmodus-Berechtigungen
+
+These permissions require work/school accounts and the `--org-mode` flag:
+
+| Permission                | Description / Beschreibung                                        | Required For / Erforderlich für                             |
+| ------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------- |
+| `User.Read.All`           | Read all users / Alle Benutzer lesen                              | User directory / Benutzerverzeichnis                        |
+| `Mail.Read.Shared`        | Read shared mailboxes / Freigegebene Postfächer lesen             | Shared mailbox access / Zugriff auf freigegebene Postfächer |
+| `Mail.Send.Shared`        | Send from shared mailboxes / Von freigegebenen Postfächern senden | Send as shared mailbox / Senden als freigegebenes Postfach  |
+| `Calendars.Read.Shared`   | Read shared calendars / Freigegebene Kalender lesen               | Shared calendar access / Zugriff auf freigegebene Kalender  |
+| `Chat.Read`               | Read chats / Chats lesen                                          | Teams chat reading / Teams-Chat lesen                       |
+| `ChatMessage.Read`        | Read chat messages / Chat-Nachrichten lesen                       | Teams message reading / Teams-Nachrichten lesen             |
+| `ChatMessage.Send`        | Send chat messages / Chat-Nachrichten senden                      | Teams message sending / Teams-Nachrichten senden            |
+| `Team.ReadBasic.All`      | Read basic team info / Grundlegende Team-Informationen lesen      | Teams listing / Teams auflisten                             |
+| `TeamMember.Read.All`     | Read team members / Teammitglieder lesen                          | Team member access / Zugriff auf Teammitglieder             |
+| `Channel.ReadBasic.All`   | Read basic channel info / Grundlegende Kanal-Informationen lesen  | Channel listing / Kanäle auflisten                          |
+| `ChannelMessage.Read.All` | Read all channel messages / Alle Kanalnachrichten lesen           | Channel message reading / Kanalnachrichten lesen            |
+| `ChannelMessage.Send`     | Send channel messages / Kanalnachrichten senden                   | Channel message sending / Kanalnachrichten senden           |
+| `Sites.Read.All`          | Read all SharePoint sites / Alle SharePoint-Websites lesen        | SharePoint access / SharePoint-Zugriff                      |
+
+### Permission Configuration / Berechtigungskonfiguration
+
+**English:** To configure these permissions in Azure Portal:
+
+1. Go to **Azure Active Directory** → **App registrations**
+2. Select your app registration
+3. Navigate to **API permissions**
+4. Click **Add a permission** → **Microsoft Graph** → **Delegated permissions**
+5. Add all required permissions from the tables above
+6. Click **Grant admin consent** (for organization permissions)
+
+**Deutsch:** Um diese Berechtigungen im Azure-Portal zu konfigurieren:
+
+1. Gehen Sie zu **Azure Active Directory** → **App-Registrierungen**
+2. Wählen Sie Ihre App-Registrierung aus
+3. Navigieren Sie zu **API-Berechtigungen**
+4. Klicken Sie auf **Berechtigung hinzufügen** → **Microsoft Graph** → **Delegierte Berechtigungen**
+5. Fügen Sie alle erforderlichen Berechtigungen aus den obigen Tabellen hinzu
+6. Klicken Sie auf **Administratorzustimmung erteilen** (für Organisationsberechtigungen)
+
+### Minimal Permission Set / Minimaler Berechtigungssatz
+
+**English:** For read-only access, you can use a minimal set:
+
+- `User.Read`
+- `Mail.Read`
+- `Calendars.Read`
+- `Files.Read`
+- `Tasks.Read`
+- `Contacts.Read`
+- `Notes.Read`
+
+**Deutsch:** Für schreibgeschützten Zugriff können Sie einen minimalen Satz verwenden:
+
+- `User.Read`
+- `Mail.Read`
+- `Calendars.Read`
+- `Files.Read`
+- `Tasks.Read`
+- `Contacts.Read`
+- `Notes.Read`
+
+> **Note / Hinweis:** The server automatically requests only the permissions needed based on enabled tools. Use `--preset` or `--enabled-tools` to limit the permission scope. / Der Server fordert automatisch nur die Berechtigungen an, die basierend auf aktivierten Tools benötigt werden. Verwenden Sie `--preset` oder `--enabled-tools`, um den Berechtigungsumfang einzuschränken.
+
+---
+
 ## 🔒 Security & Compliance / Sicherheit & Compliance
 
 ### Security Features / Sicherheitsfunktionen

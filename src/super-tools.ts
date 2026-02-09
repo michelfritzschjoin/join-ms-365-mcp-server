@@ -4618,6 +4618,218 @@ async function handleSearch(
       thinking.push('💡 Suggested next tools: ' + [...new Set(toolSuggestions)].join(', '));
     }
 
+    // =========================================================================
+    // AUTOMATIC SUGGESTION EXECUTION - Execute suggested tools automatically
+    // =========================================================================
+    const autoExecutedResults: Record<string, unknown> = {};
+    const uniqueSuggestions = [...new Set(toolSuggestions)];
+
+    // Check for specific suggestions and execute them automatically
+    const shouldExecuteCalendarList = uniqueSuggestions.some(
+      (s) => s.includes('calendar') && s.includes('list')
+    );
+    const shouldExecuteCalendarGet = uniqueSuggestions.some(
+      (s) => s.includes('calendar') && s.includes('get')
+    );
+    const shouldExecuteMyDay = uniqueSuggestions.some(
+      (s) => s.includes('assistant') && s.includes('my-day')
+    );
+
+    if (shouldExecuteCalendarList || shouldExecuteMyDay || shouldExecuteCalendarGet) {
+      thinking.push('🔄 Automatically executing suggested tools...');
+
+      const autoExecutionPromises: Array<Promise<void>> = [];
+
+      // Execute calendar list if suggested (needs to complete before calendar get)
+      if (shouldExecuteCalendarList) {
+        autoExecutionPromises.push(
+          (async () => {
+            try {
+              thinking.push('📅 Executing: calendar tool with action "list"');
+              const calendarListResult = await handleCalendar(
+                { action: 'list', top: 25 },
+                graphClient,
+                _readOnly
+              );
+              // Parse the result to extract calendar events
+              try {
+                const parsed = JSON.parse(calendarListResult);
+                // Handle different response formats
+                if (parsed.data?.formatted?.value) {
+                  autoExecutedResults.calendarList = parsed.data.formatted.value;
+                } else if (parsed.data?.raw?.value) {
+                  autoExecutedResults.calendarList = parsed.data.raw.value;
+                } else if (parsed.data?.value) {
+                  autoExecutedResults.calendarList = parsed.data.value;
+                } else if (parsed.data) {
+                  autoExecutedResults.calendarList = parsed.data;
+                } else if (parsed.value) {
+                  autoExecutedResults.calendarList = parsed.value;
+                } else {
+                  autoExecutedResults.calendarList = parsed;
+                }
+              } catch {
+                autoExecutedResults.calendarList = calendarListResult;
+              }
+            } catch (error) {
+              thinking.push(
+                `⚠️ Failed to execute calendar list: ${error instanceof Error ? error.message : String(error)}`
+              );
+            }
+          })()
+        );
+      }
+
+      // Execute my-day if suggested (can run in parallel)
+      if (shouldExecuteMyDay) {
+        autoExecutionPromises.push(
+          (async () => {
+            try {
+              thinking.push('📊 Executing: assistant tool with action "my-day"');
+              const myDayResult = await handleAssistant(
+                { action: 'my-day' },
+                graphClient,
+                _readOnly
+              );
+              // Parse the result to extract my-day data
+              try {
+                const parsed = JSON.parse(myDayResult);
+                // Handle different response formats
+                if (parsed.data?.formatted) {
+                  autoExecutedResults.myDay = parsed.data.formatted;
+                } else if (parsed.data?.raw) {
+                  autoExecutedResults.myDay = parsed.data.raw;
+                } else if (parsed.data) {
+                  autoExecutedResults.myDay = parsed.data;
+                } else {
+                  autoExecutedResults.myDay = parsed;
+                }
+              } catch {
+                autoExecutedResults.myDay = myDayResult;
+              }
+            } catch (error) {
+              thinking.push(
+                `⚠️ Failed to execute my-day: ${error instanceof Error ? error.message : String(error)}`
+              );
+            }
+          })()
+        );
+      }
+
+      // Wait for calendar list and my-day to complete first
+      await Promise.allSettled(autoExecutionPromises);
+
+      // Execute calendar get if suggested and we have events (after calendar list completes)
+      if (shouldExecuteCalendarGet) {
+        // Check if we have events from calendar list or search results
+        const hasEvents =
+          autoExecutedResults.calendarList ||
+          formattedResults['#microsoft.graph.event'] ||
+          formattedResults['event'];
+
+        if (hasEvents) {
+          try {
+            // Get the first event ID from results
+            let eventId: string | undefined;
+
+            // Try to get event ID from calendar list results
+            if (autoExecutedResults.calendarList) {
+              const calendarData = autoExecutedResults.calendarList as {
+                value?: Array<{ id?: string }>;
+              };
+              if (calendarData?.value?.[0]?.id) {
+                eventId = calendarData.value[0].id;
+              }
+            }
+
+            // Try to get event ID from search results
+            if (!eventId) {
+              const events =
+                formattedResults['#microsoft.graph.event'] || formattedResults['event'];
+              if (Array.isArray(events) && events.length > 0) {
+                const firstEvent = events[0] as { id?: string };
+                if (firstEvent?.id) {
+                  eventId = firstEvent.id;
+                }
+              }
+            }
+
+            if (eventId) {
+              thinking.push(`📅 Executing: calendar tool with action "get" for event ${eventId}`);
+              const calendarGetResult = await handleCalendar(
+                { action: 'get', eventId },
+                graphClient,
+                _readOnly
+              );
+              // Parse the result
+              try {
+                const parsed = JSON.parse(calendarGetResult);
+                // Handle different response formats
+                if (parsed.data?.formatted) {
+                  autoExecutedResults.calendarGet = parsed.data.formatted;
+                } else if (parsed.data?.raw) {
+                  autoExecutedResults.calendarGet = parsed.data.raw;
+                } else if (parsed.data) {
+                  autoExecutedResults.calendarGet = parsed.data;
+                } else {
+                  autoExecutedResults.calendarGet = parsed;
+                }
+              } catch {
+                autoExecutedResults.calendarGet = calendarGetResult;
+              }
+            } else {
+              thinking.push('⚠️ Cannot execute calendar get: No event ID available');
+            }
+          } catch (error) {
+            thinking.push(
+              `⚠️ Failed to execute calendar get: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        } else {
+          thinking.push('⚠️ Cannot execute calendar get: No events found to get details for');
+        }
+      }
+
+      if (Object.keys(autoExecutedResults).length > 0) {
+        thinking.push(
+          `✅ Auto-executed ${Object.keys(autoExecutedResults).length} suggested tool(s)`
+        );
+        // Merge auto-executed results into formatted results and update totalHits
+        if (autoExecutedResults.calendarList) {
+          if (!formattedResults['#microsoft.graph.event']) {
+            formattedResults['#microsoft.graph.event'] = [];
+          }
+          const calendarData = autoExecutedResults.calendarList as {
+            value?: unknown[];
+          };
+          if (calendarData?.value) {
+            formattedResults['#microsoft.graph.event'].push(...calendarData.value);
+            totalHits += calendarData.value.length;
+          }
+        }
+        if (autoExecutedResults.calendarGet) {
+          if (!formattedResults['eventDetails']) {
+            formattedResults['eventDetails'] = [];
+          }
+          formattedResults['eventDetails'].push(autoExecutedResults.calendarGet);
+          totalHits += 1;
+        }
+        if (autoExecutedResults.myDay) {
+          formattedResults['myDaySummary'] = [autoExecutedResults.myDay];
+          // Count items in myDay summary
+          const myDayData = autoExecutedResults.myDay as Record<string, unknown>;
+          const todayEvents = myDayData.todayEvents as { value?: unknown[] } | undefined;
+          const recentEmails = myDayData.recentEmails as { value?: unknown[] } | undefined;
+          if (todayEvents?.value && Array.isArray(todayEvents.value)) {
+            totalHits += todayEvents.value.length;
+          }
+          if (recentEmails?.value && Array.isArray(recentEmails.value)) {
+            totalHits += recentEmails.value.length;
+          }
+        }
+      }
+    }
+
     // Extract all driveItems for download link generation
     const driveItems: unknown[] = [];
     const driveItemTypes = [
