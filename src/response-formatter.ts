@@ -2148,7 +2148,7 @@ export function formatDataByProfession(
  * Get appropriate greeting/introduction based on profession
  */
 export function getProfessionGreeting(
-  context: 'calendar' | 'mail' | 'search' | 'general',
+  context: 'calendar' | 'mail' | 'search' | 'general' | 'business-content',
   options?: ProfessionFormatOptions
 ): string {
   const profile = getActiveProfessionProfile(options);

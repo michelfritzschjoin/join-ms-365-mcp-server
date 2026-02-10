@@ -69,6 +69,24 @@ import {
 } from './response-formatter.js';
 import { findUser, findChatsWithUser, type GraphUser, type GraphChat } from './compound-tools.js';
 import { encode as toonEncode } from '@toon-format/toon';
+import {
+  getPatternBasedExtractor,
+  getExtractorRegistry,
+  EntityExtractorRegistry,
+  MetadataExtractor,
+  SummaryGenerator,
+  getExtractionCache,
+  generateCacheKey as generateExtractionCacheKey,
+  type BusinessContentExtraction,
+  type DocumentType,
+  type ProjectContent,
+  type CustomerContent,
+  type MeetingContent,
+  type DocumentContent,
+  type SalesContent,
+  type HRContent,
+  type ExtractorOptions,
+} from './utils/content-extractor.js';
 
 // Initialize NLP Enhancer for intelligent query processing
 const nlpEnhancer = new NLPEnhancer();
@@ -724,7 +742,7 @@ function formatStandardResponse<T>(
     nlpAnalysis?: NLPAnalysis;
     thinking?: string[];
     requestId?: string;
-    responseType?: 'calendar' | 'mail' | 'search' | 'general';
+    responseType?: 'calendar' | 'mail' | 'search' | 'general' | 'business-content';
     professionProfile?: ProfessionProfile;
   } = {}
 ): StandardResponse<T> {
@@ -1490,6 +1508,14 @@ const emailActions = z.enum([
   'child-folders',
   'attachments',
   'search',
+  // Business content extraction
+  'extract-business-content',
+  'extract-project',
+  'extract-customer',
+  'extract-meeting',
+  'extract-document',
+  'extract-sales',
+  'extract-hr',
   // Write operations (blocked in read-only mode)
   'send',
   'reply',
@@ -1499,19 +1525,38 @@ const emailActions = z.enum([
 
 const emailSchema = z.object({
   action: emailActions.describe(
-    'The email operation: list, get, folders, child-folders, attachments, search (read) | send, reply, delete, move (write)'
+    'The email operation: list, get, folders, child-folders, attachments, search, extract-business-content, extract-project, extract-customer, extract-meeting, extract-document, extract-sales, extract-hr (read) | send, reply, delete, move (write)'
   ),
   // Identifiers
   messageId: z
     .string()
     .optional()
-    .describe('Message ID (required for get, attachments, reply, delete, move)'),
+    .describe('Message ID (required for get, attachments, reply, delete, move, extract-* actions)'),
   folderId: z.string().optional().describe('Folder ID to list messages from or move to'),
   attachmentId: z.string().optional().describe('Attachment ID (for getting specific attachment)'),
   // For send/reply
   to: z.string().optional().describe('Recipient email address(es), comma-separated (for send)'),
   subject: z.string().optional().describe('Email subject (for send)'),
   body: z.string().optional().describe('Email body content (for send/reply)'),
+  // For extract actions
+  extractType: z
+    .string()
+    .optional()
+    .describe(
+      'Specific extract type or "auto" for automatic detection (for extract-business-content)'
+    ),
+  includeMetadata: z
+    .boolean()
+    .optional()
+    .describe('Include metadata in extraction result (default: true)'),
+  includeEntities: z
+    .boolean()
+    .optional()
+    .describe('Include entities in extraction result (default: true)'),
+  includeSummary: z
+    .boolean()
+    .optional()
+    .describe('Include summary in extraction result (default: true)'),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -1594,6 +1639,175 @@ async function handleEmail(
       thinking.push(`Getting email with ID: ${input.messageId}`);
       const result = await callGraph(graphClient, 'GET', `/me/messages/${input.messageId}`);
       return formatAndReturnToolResponse(result, thinking);
+    }
+
+    case 'extract-business-content':
+    case 'extract-project':
+    case 'extract-customer':
+    case 'extract-meeting':
+    case 'extract-document':
+    case 'extract-sales':
+    case 'extract-hr': {
+      if (!input.messageId) throw new Error('messageId is required for extract actions');
+      thinking.push(`Extracting business content from email: ${input.messageId}`);
+
+      // Get email content
+      const emailResult = await callGraph(graphClient, 'GET', `/me/messages/${input.messageId}`, {
+        $select: 'id,subject,body,bodyPreview,receivedDateTime,from,toRecipients,ccRecipients',
+      });
+      const emailData = JSON.parse(emailResult);
+
+      // Extract body content
+      const bodyContent = emailData.body?.content || emailData.bodyPreview || '';
+      const contentType = emailData.body?.contentType || 'text';
+
+      // Sanitize HTML if needed
+      let textContent = bodyContent;
+      if (contentType === 'html') {
+        // Use sanitizeHtml from BaseExtractor
+        const { ProjectExtractor } = await import('./utils/content-extractor.js');
+        const tempExtractor = new ProjectExtractor();
+        // Access protected method via type assertion
+        textContent = (
+          tempExtractor as unknown as { sanitizeHtml: (html: string) => string }
+        ).sanitizeHtml(bodyContent);
+      }
+
+      // Check cache first
+      const cache = getExtractionCache();
+      const extractOptions: ExtractorOptions = {
+        includeMetadata: input.includeMetadata !== false,
+        includeEntities: input.includeEntities !== false,
+        includeSummary: input.includeSummary !== false,
+      };
+      const cacheKey = generateExtractionCacheKey(input.messageId, extractOptions);
+      const cachedResult = cache.get(cacheKey);
+
+      if (cachedResult) {
+        thinking.push(`✅ Using cached extraction result`);
+        const responseWithMetadata = formatStandardResponse(
+          { extracted: cachedResult, raw: emailData },
+          {
+            executionTime: 0,
+            sources: ['email', 'content-extraction', 'cache'],
+            cacheHit: true,
+            responseType: 'business-content',
+            suggestions: [
+              '💡 Use "email" tool with action "get" to view full email',
+              '💡 Use specific extract actions for targeted extraction',
+            ],
+          }
+        );
+        return formatAndReturnToolResponse(responseWithMetadata, thinking);
+      }
+
+      // Determine extraction type
+      let extractType: DocumentType | undefined;
+      if (input.action === 'extract-project') extractType = 'project_plan';
+      else if (input.action === 'extract-customer') extractType = 'customer_info';
+      else if (input.action === 'extract-meeting') extractType = 'meeting_notes';
+      else if (input.action === 'extract-document') extractType = 'invoice';
+      else if (input.action === 'extract-sales') extractType = 'offer';
+      else if (input.action === 'extract-hr') extractType = 'onboarding';
+      else if (input.extractType && input.extractType !== 'auto') {
+        extractType = input.extractType as DocumentType;
+      }
+
+      // Perform extraction
+      const patternExtractor = getPatternBasedExtractor();
+      const extracted = patternExtractor.extract(textContent, extractType, extractOptions);
+
+      // Build complete business content extraction result
+      const entityRegistry = new EntityExtractorRegistry();
+      const metadataExtractor = new MetadataExtractor();
+      const summaryGenerator = new SummaryGenerator();
+
+      const businessExtraction: BusinessContentExtraction = {
+        detectedType: extracted.type,
+        confidence: extracted.confidence,
+        extracted: {
+          project:
+            extracted.type.includes('project') || extracted.type === 'roadmap'
+              ? (extracted.content as ProjectContent)
+              : undefined,
+          customer:
+            extracted.type.includes('customer') ||
+            extracted.type === 'contract' ||
+            extracted.type === 'proposal'
+              ? (extracted.content as CustomerContent)
+              : undefined,
+          meeting:
+            extracted.type.includes('meeting') || extracted.type === 'action_items'
+              ? (extracted.content as MeetingContent)
+              : undefined,
+          document:
+            extracted.type === 'invoice' || extracted.type === 'report'
+              ? (extracted.content as DocumentContent)
+              : undefined,
+          sales:
+            extracted.type === 'offer' ||
+            extracted.type === 'budget' ||
+            extracted.type === 'forecast'
+              ? (extracted.content as SalesContent)
+              : undefined,
+          hr:
+            extracted.type === 'onboarding' ||
+            extracted.type === 'review' ||
+            extracted.type === 'application'
+              ? (extracted.content as HRContent)
+              : undefined,
+        },
+        metadata: {
+          priorities:
+            input.includeMetadata !== false
+              ? metadataExtractor.extractPriorities(textContent)
+              : undefined,
+          statuses:
+            input.includeMetadata !== false
+              ? metadataExtractor.extractStatuses(textContent)
+              : undefined,
+          deadlines:
+            input.includeMetadata !== false
+              ? metadataExtractor.extractDeadlines(textContent)
+              : undefined,
+          tags:
+            input.includeMetadata !== false
+              ? metadataExtractor.extractTags(textContent)
+              : undefined,
+        },
+        entities: input.includeEntities !== false ? entityRegistry.extractAll(textContent) : {},
+        summary:
+          input.includeSummary !== false
+            ? {
+                actionItems: summaryGenerator.generateActionItems(textContent),
+                decisions: summaryGenerator.generateDecisions(textContent),
+                keyPoints: summaryGenerator.generateKeyPoints(textContent),
+              }
+            : undefined,
+      };
+
+      thinking.push(
+        `✅ Extracted business content: ${extracted.type} (confidence: ${(extracted.confidence * 100).toFixed(1)}%)`
+      );
+
+      // Cache the result
+      cache.set(cacheKey, businessExtraction);
+
+      const responseWithMetadata = formatStandardResponse(
+        { extracted: businessExtraction, raw: emailData },
+        {
+          executionTime: 0,
+          sources: ['email', 'content-extraction'],
+          cacheHit: false,
+          responseType: 'business-content',
+          suggestions: [
+            '💡 Use "email" tool with action "get" to view full email',
+            '💡 Use specific extract actions for targeted extraction',
+          ],
+        }
+      );
+
+      return formatAndReturnToolResponse(responseWithMetadata, thinking);
     }
 
     case 'folders': {
