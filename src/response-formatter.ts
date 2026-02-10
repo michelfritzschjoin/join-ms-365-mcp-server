@@ -719,7 +719,7 @@ export function calendarResponseToText(response: FormattedCalendarResponse): str
   // Comprehensive summary at the top
   lines.push(`📊 Anzahl Termine: ${response.summary.totalEvents}`);
   lines.push(`📆 Zeitraum: ${response.summary.dateRange}`);
-  lines.push(`🌍 Zeitzone: ${response.summary.timezone}`);
+  lines.push(`🌍 Zeitzone: ${response.summary.timezone} (Alle Zeiten sind UTC)`);
 
   if (response.summary.totalEvents === 0) {
     lines.push('═'.repeat(60));
@@ -1172,7 +1172,7 @@ export function mailResponseToText(response: FormattedMailResponse): string {
   lines.push(`📊 Anzahl E-Mails: ${response.summary.totalMessages}`);
   lines.push(`📬 Ungelesen: ${response.summary.unreadCount}`);
   lines.push(`📆 Zeitraum: ${response.summary.dateRange}`);
-  lines.push(`🌍 Zeitzone: ${response.summary.timezone}`);
+  lines.push(`🌍 Zeitzone: ${response.summary.timezone} (Alle Zeiten sind UTC)`);
 
   if (response.summary.totalMessages === 0) {
     lines.push('═'.repeat(60));
@@ -1792,7 +1792,7 @@ export function calendarResponseToTextByProfession(
     // Executive: Very brief summary with comprehensive overview
     lines.push(`• ${response.summary.totalEvents} appointments scheduled`);
     lines.push(`• Period: ${response.summary.dateRange}`);
-    lines.push(`• Timezone: ${response.summary.timezone}`);
+    lines.push(`• Timezone: ${response.summary.timezone} (All times are UTC)`);
 
     // Calculate quick statistics
     const now = new Date();
@@ -1848,7 +1848,7 @@ export function calendarResponseToTextByProfession(
     // Technical: Include IDs, structured data
     lines.push(`📊 Total: ${response.summary.totalEvents} events`);
     lines.push(`📆 Range: ${response.summary.dateRange}`);
-    lines.push(`🌍 TZ: ${response.summary.timezone}`);
+    lines.push(`🌍 TZ: ${response.summary.timezone} (All times are UTC)`);
     lines.push('═'.repeat(60));
     lines.push('');
 
@@ -1960,7 +1960,7 @@ export function mailResponseToTextByProfession(
     lines.push(`• Total: ${response.summary.totalMessages} emails`);
     lines.push(`• Unread: ${response.summary.unreadCount} require attention`);
     lines.push(`• Period: ${response.summary.dateRange}`);
-    lines.push(`• Timezone: ${response.summary.timezone}`);
+    lines.push(`• Timezone: ${response.summary.timezone} (All times are UTC)`);
 
     // High priority emails
     const highPriority = response.messages.filter((m) => m.importance === 'high');
@@ -2005,7 +2005,7 @@ export function mailResponseToTextByProfession(
       `📊 Total: ${response.summary.totalMessages} | Unread: ${response.summary.unreadCount}`
     );
     lines.push(`📆 Range: ${response.summary.dateRange}`);
-    lines.push(`🌍 TZ: ${response.summary.timezone}`);
+    lines.push(`🌍 TZ: ${response.summary.timezone} (All times are UTC)`);
     lines.push('═'.repeat(60));
     lines.push('');
 

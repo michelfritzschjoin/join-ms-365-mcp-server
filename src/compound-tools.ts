@@ -22,6 +22,9 @@ import {
   formatMailResponse,
   mailResponseToText,
   convertToLocalTime,
+  formatLocalTime,
+  formatLocalDate,
+  getServerTimezone,
 } from './response-formatter.js';
 import { createThinkingProcess } from './thinking-process.js';
 import { isLoopFile, detectLoopFile, parseLoopContent } from './utils/loop-detector.js';
@@ -5307,16 +5310,9 @@ Use this when someone asks "What meetings do I have with [person]?" or "When is 
 
       // CRITICAL: Always query current server time first for time-sensitive queries
       const now = new Date();
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const currentTimeFormatted = now.toLocaleString('de-DE', {
-        weekday: 'long',
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        timeZone: timezone,
-      });
+      const timezone = getServerTimezone();
+      // Format current time using server timezone explicitly
+      const currentTimeFormatted = `${formatLocalDate(now)} ${formatLocalTime(now)} (${timezone})`;
 
       // Step 2: Find meetings
       const meetings = await findMeetingsWithPerson(
@@ -5339,20 +5335,18 @@ Use this when someone asks "What meetings do I have with [person]?" or "When is 
       const formatMeeting = (event: GraphEvent) => {
         const startLocal = convertToLocalTime(event.start.dateTime, event.start.timeZone);
         const endLocal = convertToLocalTime(event.end.dateTime, event.end.timeZone);
+        // Use formatLocalDate and formatLocalTime to ensure server timezone is used
+        const startDate = formatLocalDate(startLocal);
+        const startTime = formatLocalTime(startLocal);
+        const endTime = formatLocalTime(endLocal);
         return {
           id: event.id,
           subject: event.subject,
-          start: startLocal.toLocaleString('de-DE', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
-          end: endLocal.toLocaleString('de-DE', {
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
+          start: `${startDate} ${startTime}`, // Format: DD.MM.YYYY HH:MM (server timezone)
+          end: endTime, // Format: HH:MM (server timezone)
+          startDateTime: startLocal.toISOString(), // ISO format for reference
+          endDateTime: endLocal.toISOString(), // ISO format for reference
+          timezone: getServerTimezone(), // Explicit server timezone
           location: event.location?.displayName,
           organizer: event.organizer?.emailAddress?.name,
           attendeeCount: event.attendees?.length || 0,
@@ -6249,16 +6243,9 @@ Use this when someone asks "Prepare me for my meeting with [person/topic]" or "W
 
       // CRITICAL: Always query current server time first for time-sensitive queries
       const now = new Date();
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const currentTimeFormatted = now.toLocaleString('de-DE', {
-        weekday: 'long',
-        day: '2-digit',
-        month: '2-digit',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        timeZone: timezone,
-      });
+      const timezone = getServerTimezone();
+      // Format current time using server timezone explicitly
+      const currentTimeFormatted = `${formatLocalDate(now)} ${formatLocalTime(now)} (${timezone})`;
       const futureDate = new Date(now.getTime() + hoursAhead * 60 * 60 * 1000);
 
       // Step 1: Find the meeting

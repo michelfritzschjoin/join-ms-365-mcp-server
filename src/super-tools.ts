@@ -54,6 +54,12 @@ import {
 } from './utils/loop-detector.js';
 // Query Pattern Learning
 import { getQueryStore } from './query-store.js';
+// Automatic Query Optimization
+import {
+  getQueryOptimizer,
+  type OptimizedQuery,
+  type OptimizationContext,
+} from './query-optimizer.js';
 import type { ProfessionProfile } from './user-profile.js';
 import {
   calendarResponseToTextByProfession,
@@ -1316,6 +1322,82 @@ function optimizeQueryWithNLP(query: string): {
   };
 }
 
+// ============================================================================
+// GENERIC QUERY OPTIMIZATION HELPER (USED BY ALL HANDLERS)
+// ============================================================================
+
+/**
+ * Optimize query for search using the QueryOptimizer
+ *
+ * This is the single entry point for all handlers to optimize queries.
+ * It combines NLP analysis, history-based learning, and pattern detection.
+ *
+ * @param query - Original query string
+ * @param context - Tool context with tool name, entity types, and userIdHash
+ * @returns Optimized query with metadata, optimization steps, and variants
+ */
+function optimizeQueryForSearch(query: string, context: OptimizationContext): OptimizedQuery {
+  const optimizer = getQueryOptimizer();
+  return optimizer.optimizeQuery(query, context);
+}
+
+/**
+ * Record the result of a query optimization for learning
+ *
+ * Call this after executing a query to record whether the optimization was successful.
+ * This feeds the learning system so future queries benefit from past experience.
+ *
+ * @param originalQuery - Original unmodified query
+ * @param optimizedQuery - The optimized query that was executed
+ * @param success - Whether the query returned results
+ * @param userIdHash - Hashed user ID for isolation
+ * @param toolContext - Which tool executed the query
+ */
+function recordQueryOptimizationResult(
+  originalQuery: string,
+  optimizedQuery: string,
+  success: boolean,
+  userIdHash: string,
+  toolContext: string = 'search'
+): void {
+  try {
+    const queryStore = getQueryStore();
+    queryStore.recordQueryVariant(originalQuery, optimizedQuery, success, userIdHash, toolContext);
+  } catch (error) {
+    logger.debug('Failed to record query optimization result', { error });
+  }
+}
+
+/**
+ * Add optimization steps to thinking output
+ * @param thinking - Array of thinking strings
+ * @param result - The optimization result
+ */
+function addOptimizationThinking(thinking: string[], result: OptimizedQuery): void {
+  if (result.optimizations.length > 0) {
+    thinking.push(`🧠 Auto Query Optimization (${result.optimizations.length} step(s)):`);
+    for (const step of result.optimizations) {
+      thinking.push(
+        `  → ${step.type}: ${step.description} (confidence: ${Math.round(step.confidence * 100)}%)`
+      );
+    }
+    if (result.optimizedQuery !== result.originalQuery) {
+      thinking.push(`  📝 Optimized: "${result.originalQuery}" → "${result.optimizedQuery}"`);
+    }
+    if (result.variants.length > 0) {
+      thinking.push(
+        `  🔀 Variants: ${result.variants
+          .slice(0, 3)
+          .map((v) => `"${v}"`)
+          .join(', ')}`
+      );
+    }
+    if (result.learnedFromHistory) {
+      thinking.push(`  📚 Used learned patterns from history`);
+    }
+  }
+}
+
 // Common schemas
 const paginationSchema = {
   top: z.number().optional().describe('Maximum number of items to return (default: 25)'),
@@ -1547,13 +1629,17 @@ async function handleEmail(
     case 'search': {
       if (!input.search) throw new Error('search query is required for action "search"');
 
-      // NLP optimization for search query
+      // Automatic query optimization for email search
       const startTime = Date.now();
-      const optimized = optimizeQueryWithNLP(input.search);
+      const currentUserId = getUserId();
+      const userIdHash = currentUserId ? getQueryStore().hashUserId(currentUserId) : undefined;
+      const optimized = optimizeQueryForSearch(input.search, {
+        tool: 'email',
+        entityTypes: ['message'],
+        userIdHash,
+      });
       thinking.push(`🔍 Searching emails for: "${input.search}"`);
-      if (optimized.optimizedQuery !== input.search) {
-        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
-      }
+      addOptimizationThinking(thinking, optimized);
       if (optimized.nlpAnalysis.intent) {
         thinking.push(`📊 Detected intent: ${optimized.nlpAnalysis.intent}`);
       }
@@ -1577,6 +1663,18 @@ async function handleEmail(
       const result = await callGraph(graphClient, 'GET', '/me/messages', params);
       const parsedResult = JSON.parse(result);
       const executionTime = Date.now() - startTime;
+
+      // Record optimization result for learning
+      const emailSearchSuccess = parsedResult?.value?.length > 0;
+      if (userIdHash) {
+        recordQueryOptimizationResult(
+          input.search,
+          optimized.optimizedQuery,
+          emailSearchSuccess,
+          userIdHash,
+          'email'
+        );
+      }
 
       // Format mail response with profession-specific formatting
       if (isMailResponse(parsedResult)) {
@@ -2440,13 +2538,17 @@ async function handleFiles(
     case 'search': {
       if (!input.search) throw new Error('search query is required');
 
-      // NLP optimization for file search
+      // Automatic query optimization for file search
       const startTime = Date.now();
-      const optimized = optimizeQueryWithNLP(input.search);
+      const currentUserId = getUserId();
+      const userIdHash = currentUserId ? getQueryStore().hashUserId(currentUserId) : undefined;
+      const optimized = optimizeQueryForSearch(input.search, {
+        tool: 'files',
+        entityTypes: ['driveItem'],
+        userIdHash,
+      });
       thinking.push(`🔍 Searching files for: "${input.search}"`);
-      if (optimized.optimizedQuery !== input.search) {
-        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
-      }
+      addOptimizationThinking(thinking, optimized);
       if (optimized.nlpAnalysis.intent) {
         thinking.push(`📊 Detected intent: ${optimized.nlpAnalysis.intent}`);
       }
@@ -2458,6 +2560,18 @@ async function handleFiles(
       );
       const parsedResult = JSON.parse(result);
       const executionTime = Date.now() - startTime;
+
+      // Record optimization result for learning
+      const fileSearchSuccess = parsedResult?.value?.length > 0;
+      if (userIdHash) {
+        recordQueryOptimizationResult(
+          input.search,
+          optimized.optimizedQuery,
+          fileSearchSuccess,
+          userIdHash,
+          'files'
+        );
+      }
 
       // Extract pagination info
       const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
@@ -2733,13 +2847,17 @@ async function handleContacts(
     case 'search': {
       if (!input.search) throw new Error('search query is required');
 
-      // NLP optimization for contact/user search
+      // Automatic query optimization for contact/user search
       const startTime = Date.now();
-      const optimized = optimizeQueryWithNLP(input.search);
+      const currentUserId = getUserId();
+      const userIdHash = currentUserId ? getQueryStore().hashUserId(currentUserId) : undefined;
+      const optimized = optimizeQueryForSearch(input.search, {
+        tool: 'contacts',
+        entityTypes: ['person'],
+        userIdHash,
+      });
       thinking.push(`🔍 Searching contacts/users for: "${input.search}"`);
-      if (optimized.optimizedQuery !== input.search) {
-        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
-      }
+      addOptimizationThinking(thinking, optimized);
       if (optimized.nlpAnalysis.intent) {
         thinking.push(`📊 Detected intent: ${optimized.nlpAnalysis.intent}`);
       }
@@ -2754,6 +2872,18 @@ async function handleContacts(
       });
       const parsedResult = JSON.parse(result);
       const executionTime = Date.now() - startTime;
+
+      // Record optimization result for learning
+      const contactSearchSuccess = parsedResult?.value?.length > 0;
+      if (userIdHash) {
+        recordQueryOptimizationResult(
+          input.search,
+          optimized.optimizedQuery,
+          contactSearchSuccess,
+          userIdHash,
+          'contacts'
+        );
+      }
 
       // Extract pagination info
       const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
@@ -3766,9 +3896,11 @@ function mergeSearchResults(
     let filteredCount = searchResult.length - relevantHits.length;
 
     for (const hit of relevantHits) {
-      hitCount++;
       const id = hit.resource?.id as string;
-      if (!id) continue;
+      if (!id) {
+        filteredCount++;
+        continue;
+      }
 
       // Additional validation: Check relevance against ORIGINAL query
       const relevance = validateRelevance(hit, originalQuery, subQuery.query);
@@ -3777,17 +3909,24 @@ function mergeSearchResults(
         continue;
       }
 
-      // ADDITIONALLY: Check if result contains important context
-      if (mainContextWords.length > 0) {
+      // Additional context check: Only filter if validateRelevance passed but result
+      // clearly lacks important context AND has low confidence
+      // This is a lenient check since validateRelevance already validated relevance
+      if (mainContextWords.length > 0 && relevance.confidence < 0.35) {
         const resourceText = JSON.stringify(hit.resource || {}).toLowerCase();
         const hasContext = mainContextWords.some((word) =>
           resourceText.includes(word.toLowerCase())
         );
+        // Only filter if NO context words found AND confidence is very low
+        // This prevents filtering results that validateRelevance deemed relevant
         if (!hasContext) {
           filteredCount++;
           continue;
         }
       }
+
+      // Hit passed all validations
+      hitCount++;
 
       if (hitMap.has(id)) {
         // Multi-match: Boost existing result
@@ -4364,9 +4503,29 @@ async function handleSearch(
     }
   }
 
+  // =========================================================================
+  // AUTOMATIC QUERY OPTIMIZATION (PRE-EXECUTION)
+  // =========================================================================
+  const autoOptimizationEnabled = process.env.MS365_MCP_AUTO_QUERY_OPTIMIZATION_ENABLED !== 'false';
+  let autoOptimizedQuery: OptimizedQuery | null = null;
+
+  if (autoOptimizationEnabled) {
+    const currentUserIdForOpt = getUserId();
+    const userIdHashForOpt = currentUserIdForOpt
+      ? getQueryStore().hashUserId(currentUserIdForOpt)
+      : undefined;
+    autoOptimizedQuery = optimizeQueryForSearch(input.query, {
+      tool: 'search',
+      entityTypes,
+      userIdHash: userIdHashForOpt,
+    });
+    addOptimizationThinking(thinking, autoOptimizedQuery);
+  }
+
   // Improve query for better search results
   // Simplify query for Teams/person searches to just the person name
-  let searchQuery = input.query;
+  // Use auto-optimized query as base if available, otherwise original
+  let searchQuery = autoOptimizedQuery?.optimizedQuery || input.query;
 
   if (personName && (hasTeamsKeywords || entityTypes.includes('chatMessage'))) {
     // For Teams/person queries, simplify to just the person name for better results
@@ -4980,6 +5139,17 @@ async function handleSearch(
 
           // Record pattern for future learning
           queryStore.recordQueryPattern(userIdHash, input.query, entityTypes, success, duration);
+
+          // Record optimization result for automatic query optimization learning
+          if (autoOptimizedQuery && autoOptimizedQuery.optimizedQuery !== input.query) {
+            recordQueryOptimizationResult(
+              input.query,
+              autoOptimizedQuery.optimizedQuery,
+              success,
+              userIdHash,
+              'search'
+            );
+          }
 
           if (success && !historyRecommendationUsed) {
             thinking.push(`📚 Recorded successful pattern for future learning`);
@@ -5716,13 +5886,16 @@ async function handleAssistant(
     case 'ask': {
       if (!input.query) throw new Error('query is required for ask action');
 
-      // NLP optimization for question processing
+      // Automatic query optimization for question processing
       const startTime = Date.now();
-      const optimized = optimizeQueryWithNLP(input.query);
+      const currentUserId = getUserId();
+      const userIdHash = currentUserId ? getQueryStore().hashUserId(currentUserId) : undefined;
+      const optimized = optimizeQueryForSearch(input.query, {
+        tool: 'assistant-ask',
+        userIdHash,
+      });
       thinking.push(`💭 Processing question: "${input.query}"`);
-      if (optimized.optimizedQuery !== input.query) {
-        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
-      }
+      addOptimizationThinking(thinking, optimized);
       if (optimized.nlpAnalysis.intent) {
         thinking.push(
           `📊 Detected intent: ${optimized.nlpAnalysis.intent}, service: ${optimized.nlpAnalysis.service || 'general'}`
@@ -5757,6 +5930,20 @@ async function handleAssistant(
 
       const executionTime = Date.now() - startTime;
 
+      // Record optimization result for learning
+      const askSuccess =
+        (results.emails as Record<string, unknown>)?.value !== undefined ||
+        (results.files as Record<string, unknown>)?.value !== undefined;
+      if (userIdHash) {
+        recordQueryOptimizationResult(
+          input.query,
+          optimized.optimizedQuery,
+          askSuccess,
+          userIdHash,
+          'assistant-ask'
+        );
+      }
+
       // Format response with metadata
       const responseWithMetadata = formatStandardResponse(results, {
         executionTime,
@@ -5784,13 +5971,16 @@ async function handleAssistant(
     case 'search': {
       if (!input.query) throw new Error('query is required for search action');
 
-      // NLP optimization for comprehensive search
+      // Automatic query optimization for comprehensive search
       const startTime = Date.now();
-      const optimized = optimizeQueryWithNLP(input.query);
+      const currentUserId = getUserId();
+      const userIdHash = currentUserId ? getQueryStore().hashUserId(currentUserId) : undefined;
+      const optimized = optimizeQueryForSearch(input.query, {
+        tool: 'assistant-search',
+        userIdHash,
+      });
       thinking.push(`🔍 Searching everything for: "${input.query}"`);
-      if (optimized.optimizedQuery !== input.query) {
-        thinking.push(`💡 NLP optimized query: "${optimized.optimizedQuery}"`);
-      }
+      addOptimizationThinking(thinking, optimized);
       if (optimized.nlpAnalysis.intent) {
         thinking.push(
           `📊 Detected intent: ${optimized.nlpAnalysis.intent}, service: ${optimized.nlpAnalysis.service || 'general'}`
@@ -5823,6 +6013,20 @@ async function handleAssistant(
       }
 
       const executionTime = Date.now() - startTime;
+
+      // Record optimization result for learning
+      const searchSuccess =
+        (results.emails as Record<string, unknown>)?.value !== undefined ||
+        (results.files as Record<string, unknown>)?.value !== undefined;
+      if (userIdHash) {
+        recordQueryOptimizationResult(
+          input.query,
+          optimized.optimizedQuery,
+          searchSuccess,
+          userIdHash,
+          'assistant-search'
+        );
+      }
 
       // Format response with metadata
       const responseWithMetadata = formatStandardResponse(results, {

@@ -135,24 +135,50 @@ interface StoredQueryPattern {
 }
 
 /**
+ * Stored query transformation for automatic optimization learning
+ */
+export interface StoredQueryTransformation {
+  /** Original query pattern (normalized) */
+  originalPattern: string;
+  /** Optimized query pattern that worked */
+  optimizedPattern: string;
+  /** User ID hash for isolation */
+  userIdHash: string;
+  /** Tool context (e.g., 'email', 'files', 'search') */
+  toolContext: string;
+  /** Success count */
+  successCount: number;
+  /** Failure count */
+  failureCount: number;
+  /** Last used timestamp */
+  lastUsed: string;
+  /** First used timestamp */
+  firstUsed: string;
+}
+
+/**
  * Query Store class - manages persistent query storage
  */
 export class QueryStore {
   private dataDir: string;
   private queriesFile: string;
   private patternsFile: string;
+  private transformationsFile: string;
   private queries: StoredQuery[] = [];
   private patterns: StoredQueryPattern[] = [];
+  private transformations: StoredQueryTransformation[] = [];
   private maxQueries: number;
   private retentionDays: number;
   private saveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private patternSaveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private transformationSaveDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly minPatternCount: number;
 
   constructor() {
     this.dataDir = process.env.QUERY_STORE_DIR || path.join(__dirname, '..', 'data');
     this.queriesFile = path.join(this.dataDir, 'queries.json');
     this.patternsFile = path.join(this.dataDir, 'query-patterns.json');
+    this.transformationsFile = path.join(this.dataDir, 'query-transformations.json');
     this.maxQueries = parseInt(process.env.QUERY_STORE_MAX_QUERIES || '100000', 10);
     this.retentionDays = parseInt(process.env.QUERY_STORE_RETENTION_DAYS || '90', 10);
     this.minPatternCount = parseInt(process.env.MS365_MCP_PATTERN_MIN_COUNT || '3', 10);
@@ -160,6 +186,7 @@ export class QueryStore {
     this.ensureDataDir();
     this.loadQueries();
     this.loadPatterns();
+    this.loadTransformations();
     this.startRetentionCleanup();
   }
 
@@ -774,6 +801,217 @@ export class QueryStore {
       confidence,
       reason: `Based on ${matchingPatterns.length} similar patterns with ${Math.round(confidence * 100)}% confidence`,
     };
+  }
+
+  // =========================================================================
+  // QUERY TRANSFORMATION LEARNING (FOR AUTOMATIC QUERY OPTIMIZATION)
+  // =========================================================================
+
+  /**
+   * Load query transformations from disk
+   */
+  private loadTransformations(): void {
+    try {
+      if (fs.existsSync(this.transformationsFile)) {
+        const data = fs.readFileSync(this.transformationsFile, 'utf-8');
+        const parsed = JSON.parse(data);
+        if (Array.isArray(parsed)) {
+          this.transformations = parsed;
+          logger.info('Query transformations loaded', { count: this.transformations.length });
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to load query transformations:', error);
+      this.transformations = [];
+    }
+  }
+
+  /**
+   * Save query transformations to disk (debounced)
+   */
+  private saveTransformations(): void {
+    if (this.transformationSaveDebounceTimer) {
+      clearTimeout(this.transformationSaveDebounceTimer);
+    }
+
+    this.transformationSaveDebounceTimer = setTimeout(() => {
+      try {
+        fs.writeFileSync(
+          this.transformationsFile,
+          JSON.stringify(this.transformations, null, 2),
+          'utf-8'
+        );
+        logger.debug('Query transformations saved', { count: this.transformations.length });
+      } catch (error) {
+        logger.error('Failed to save query transformations:', error);
+      }
+    }, 1000);
+  }
+
+  /**
+   * Record a query variant result for learning which optimizations work
+   * @param originalQuery - The original unmodified query
+   * @param optimizedQuery - The optimized query that was executed
+   * @param success - Whether the optimized query returned results
+   * @param userIdHash - Hashed user ID for isolation
+   * @param toolContext - Which tool executed the query (e.g., 'email', 'search', 'files')
+   */
+  public recordQueryVariant(
+    originalQuery: string,
+    optimizedQuery: string,
+    success: boolean,
+    userIdHash: string,
+    toolContext: string = 'search'
+  ): void {
+    if (!originalQuery || !optimizedQuery || !userIdHash) {
+      return;
+    }
+
+    // Don't record if they're the same
+    if (originalQuery.toLowerCase().trim() === optimizedQuery.toLowerCase().trim()) {
+      return;
+    }
+
+    const originalNormalized = originalQuery.toLowerCase().trim();
+    const optimizedNormalized = optimizedQuery.toLowerCase().trim();
+    const now = new Date().toISOString();
+
+    // Find existing transformation
+    const existingIndex = this.transformations.findIndex(
+      (t) =>
+        t.userIdHash === userIdHash &&
+        t.originalPattern === originalNormalized &&
+        t.optimizedPattern === optimizedNormalized &&
+        t.toolContext === toolContext
+    );
+
+    if (existingIndex >= 0) {
+      // Update existing transformation
+      const existing = this.transformations[existingIndex];
+      if (success) {
+        existing.successCount++;
+      } else {
+        existing.failureCount++;
+      }
+      existing.lastUsed = now;
+    } else {
+      // Create new transformation record
+      const newTransformation: StoredQueryTransformation = {
+        originalPattern: originalNormalized,
+        optimizedPattern: optimizedNormalized,
+        userIdHash,
+        toolContext,
+        successCount: success ? 1 : 0,
+        failureCount: success ? 0 : 1,
+        lastUsed: now,
+        firstUsed: now,
+      };
+      this.transformations.push(newTransformation);
+    }
+
+    this.saveTransformations();
+
+    logger.debug('Query variant recorded', {
+      original: originalNormalized.substring(0, 50),
+      optimized: optimizedNormalized.substring(0, 50),
+      success,
+      toolContext,
+    });
+  }
+
+  /**
+   * Get successful query variants for a pattern
+   * @param query - Query to find successful variants for
+   * @param userIdHash - Hashed user ID
+   * @param toolContext - Optional tool context filter
+   * @returns Array of successful query variants sorted by success rate
+   */
+  public getSuccessfulQueryVariants(
+    query: string,
+    userIdHash: string,
+    toolContext?: string
+  ): string[] {
+    if (!query || !userIdHash) {
+      return [];
+    }
+
+    const normalized = query.toLowerCase().trim();
+
+    return this.transformations
+      .filter((t) => {
+        const isMatch =
+          t.userIdHash === userIdHash &&
+          (t.originalPattern === normalized || t.optimizedPattern === normalized);
+        const isToolMatch = !toolContext || t.toolContext === toolContext;
+        const total = t.successCount + t.failureCount;
+        const hasMinCount = total >= this.minPatternCount;
+        const isSuccessful = total > 0 && t.successCount / total >= 0.5;
+        return isMatch && isToolMatch && hasMinCount && isSuccessful;
+      })
+      .sort((a, b) => {
+        const rateA = a.successCount / (a.successCount + a.failureCount);
+        const rateB = b.successCount / (b.successCount + b.failureCount);
+        return rateB - rateA;
+      })
+      .map((t) => (t.originalPattern === normalized ? t.optimizedPattern : t.originalPattern));
+  }
+
+  /**
+   * Get learned query transformation patterns for automatic optimization
+   * @param userIdHash - Hashed user ID
+   * @param toolContext - Optional tool context filter
+   * @returns Array of transformations sorted by success rate
+   */
+  public getQueryTransformationPatterns(
+    userIdHash: string,
+    toolContext?: string
+  ): StoredQueryTransformation[] {
+    if (!userIdHash) {
+      return [];
+    }
+
+    return this.transformations
+      .filter((t) => {
+        const isUser = t.userIdHash === userIdHash;
+        const isToolMatch = !toolContext || t.toolContext === toolContext;
+        const total = t.successCount + t.failureCount;
+        const hasMinCount = total >= this.minPatternCount;
+        const isSuccessful = total > 0 && t.successCount / total >= 0.5;
+        return isUser && isToolMatch && hasMinCount && isSuccessful;
+      })
+      .sort((a, b) => {
+        const rateA = a.successCount / (a.successCount + a.failureCount);
+        const rateB = b.successCount / (b.successCount + b.failureCount);
+        return rateB - rateA;
+      });
+  }
+
+  /**
+   * Delete transformations for a user (GDPR Right to Erasure)
+   */
+  public deleteUserTransformations(userIdHash: string): number {
+    const beforeCount = this.transformations.length;
+    this.transformations = this.transformations.filter((t) => t.userIdHash !== userIdHash);
+    const deleted = beforeCount - this.transformations.length;
+
+    if (deleted > 0) {
+      this.saveTransformations();
+      logger.info('User query transformations deleted (GDPR erasure)', {
+        userIdHash,
+        deleted,
+      });
+    }
+
+    return deleted;
+  }
+
+  /**
+   * Clear all transformations (admin function)
+   */
+  public clearAllTransformations(): void {
+    this.transformations = [];
+    this.saveTransformations();
+    logger.warn('All query transformations cleared from store');
   }
 
   /**
