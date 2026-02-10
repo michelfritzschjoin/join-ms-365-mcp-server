@@ -8397,6 +8397,517 @@ Use this for:
   registeredCount++;
 
   /**
+   * Tool: summarize-recent-meetings
+   * Summarizes what was discussed in recent meetings by retrieving and analyzing transcripts
+   */
+  server.tool(
+    'summarize-recent-meetings',
+    `Summarizes what was discussed in your recent meetings by retrieving and analyzing transcripts and Loop files.
+This tool automatically:
+1. Finds all online meetings with transcripts in the specified time range
+2. Downloads transcript content for each meeting
+3. Searches for Loop files (meeting notes written by facilitators) in the same time range
+4. Extracts key discussion points, action items, and decisions from both transcripts and Loop files
+5. Links Loop files to their corresponding meetings when possible
+6. Provides a comprehensive summary of what was discussed
+
+Use this for:
+- "What was discussed in my last meetings?"
+- "Summarize what we talked about this week"
+- "What were the key points from recent meetings?"
+- "Show me action items from my recent meetings"
+- "What did the facilitator write in the meeting notes?"
+
+Note: Only meetings with transcription enabled will have transcript content. Loop files are searched automatically and linked to meetings when possible.`,
+    {
+      dateRange: z
+        .enum(['today', 'yesterday', 'this_week', 'last_week', 'this_month', 'last_month'])
+        .optional()
+        .describe('Time range to search for meetings (default: this_week)'),
+      limit: z
+        .number()
+        .optional()
+        .describe('Maximum number of meetings to summarize (default: 10)'),
+      includeTranscripts: z
+        .boolean()
+        .optional()
+        .describe('Include full transcript summaries (default: true)'),
+    },
+    {
+      title: 'Summarize Recent Meetings',
+      readOnlyHint: true,
+      openWorldHint: true,
+    },
+    async ({ dateRange = 'this_week', limit = 10, includeTranscripts = true }) => {
+      logger.info(`Summarizing recent meetings for: ${dateRange}`);
+
+      interface MeetingSummary {
+        meeting: {
+          id: string;
+          subject: string;
+          startTime: string;
+          endTime: string;
+          organizer?: string;
+          attendees: string[];
+        };
+        transcript?: {
+          id: string;
+          createdDateTime: string;
+        };
+        summary?: {
+          keyPoints: string[];
+          actionItems: string[];
+          decisions: string[];
+          participants: string[];
+        };
+        error?: string;
+      }
+
+      const results: MeetingSummary[] = [];
+
+      try {
+        // Calculate date range
+        const now = new Date();
+        let startDate: Date;
+        let endDate: Date = new Date(now);
+        endDate.setHours(23, 59, 59, 999);
+
+        switch (dateRange) {
+          case 'today':
+            startDate = new Date(now);
+            startDate.setHours(0, 0, 0, 0);
+            break;
+          case 'yesterday':
+            startDate = new Date(now);
+            startDate.setDate(startDate.getDate() - 1);
+            startDate.setHours(0, 0, 0, 0);
+            endDate = new Date(startDate);
+            endDate.setHours(23, 59, 59, 999);
+            break;
+          case 'this_week':
+            startDate = new Date(now);
+            startDate.setDate(startDate.getDate() - startDate.getDay());
+            startDate.setHours(0, 0, 0, 0);
+            break;
+          case 'last_week':
+            startDate = new Date(now);
+            startDate.setDate(startDate.getDate() - startDate.getDay() - 7);
+            startDate.setHours(0, 0, 0, 0);
+            endDate = new Date(startDate);
+            endDate.setDate(endDate.getDate() + 6);
+            endDate.setHours(23, 59, 59, 999);
+            break;
+          case 'this_month':
+            startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+            break;
+          case 'last_month':
+            startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            endDate = new Date(now.getFullYear(), now.getMonth(), 0);
+            endDate.setHours(23, 59, 59, 999);
+            break;
+          default:
+            startDate = new Date(now);
+            startDate.setDate(startDate.getDate() - 7);
+        }
+
+        // Step 1: Get online meetings from calendar
+        const onlineQueryParams: Record<string, string> = {
+          startDateTime: startDate.toISOString(),
+          endDateTime: endDate.toISOString(),
+          $filter: 'isOnlineMeeting eq true',
+          $select: 'id,subject,start,end,attendees,isOnlineMeeting,onlineMeeting,organizer',
+          $orderby: 'start/dateTime desc',
+          $top: String(Math.min(limit * 2, 100)),
+        };
+
+        const calendarResponse = await graphClient.makeRequest(
+          `/me/calendarView?${buildGraphQueryString(onlineQueryParams)}`,
+          {
+            method: 'GET',
+          }
+        );
+
+        if (
+          !calendarResponse ||
+          typeof calendarResponse !== 'object' ||
+          !('value' in calendarResponse)
+        ) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify(
+                  {
+                    meetings: [],
+                    total: 0,
+                    dateRange,
+                    message: 'No online meetings found in the specified date range',
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        const events = calendarResponse.value as Array<
+          GraphEvent & { onlineMeeting?: { joinUrl?: string } }
+        >;
+
+        // Step 2: For each meeting, try to find online meeting ID and get transcripts
+        for (const event of events.slice(0, limit)) {
+          const meetingSummary: MeetingSummary = {
+            meeting: {
+              id: event.id,
+              subject: event.subject || 'Untitled Meeting',
+              startTime: event.start.dateTime,
+              endTime: event.end.dateTime,
+              organizer: (event as unknown as { organizer?: { emailAddress?: { name?: string } } })
+                .organizer?.emailAddress?.name,
+              attendees:
+                event.attendees?.map(
+                  (a) => a.emailAddress?.name || a.emailAddress?.address || 'Unknown'
+                ) || [],
+            },
+          };
+
+          // Try to find online meeting ID
+          let onlineMeetingId: string | undefined;
+
+          // First, try to get from onlineMeetings endpoint
+          try {
+            const onlineMeetingsResponse = await graphClient.makeRequest('/me/onlineMeetings', {
+              method: 'GET',
+              queryParams: {
+                $filter: `startDateTime ge ${startDate.toISOString()} and startDateTime le ${endDate.toISOString()}`,
+                $select: 'id,subject,startDateTime,endDateTime',
+                $top: '50',
+              },
+            });
+
+            if (
+              onlineMeetingsResponse &&
+              typeof onlineMeetingsResponse === 'object' &&
+              'value' in onlineMeetingsResponse
+            ) {
+              const onlineMeetings = onlineMeetingsResponse.value as Array<{
+                id: string;
+                subject?: string;
+                startDateTime?: string;
+              }>;
+
+              // Try to match by subject and time
+              for (const om of onlineMeetings) {
+                if (
+                  om.subject?.toLowerCase() === event.subject?.toLowerCase() ||
+                  (om.startDateTime &&
+                    Math.abs(
+                      new Date(om.startDateTime).getTime() -
+                        new Date(event.start.dateTime).getTime()
+                    ) <
+                      5 * 60 * 1000) // Within 5 minutes
+                ) {
+                  onlineMeetingId = om.id;
+                  break;
+                }
+              }
+            }
+          } catch {
+            logger.warn('Could not list online meetings to find meeting ID');
+          }
+
+          if (!onlineMeetingId) {
+            meetingSummary.error = 'Could not find online meeting ID';
+            results.push(meetingSummary);
+            continue;
+          }
+
+          // Step 3: Get transcripts for this meeting
+          if (includeTranscripts) {
+            try {
+              const transcriptsResponse = await graphClient.makeRequest(
+                `/me/onlineMeetings/${onlineMeetingId}/transcripts`,
+                {
+                  method: 'GET',
+                  queryParams: {
+                    $select: 'id,createdDateTime,transcriptContentUrl',
+                  },
+                }
+              );
+
+              if (
+                transcriptsResponse &&
+                typeof transcriptsResponse === 'object' &&
+                'value' in transcriptsResponse &&
+                Array.isArray(transcriptsResponse.value) &&
+                transcriptsResponse.value.length > 0
+              ) {
+                const transcripts = transcriptsResponse.value as Array<{
+                  id: string;
+                  createdDateTime: string;
+                  transcriptContentUrl?: string;
+                }>;
+
+                // Get the most recent transcript
+                const latestTranscript = transcripts[0];
+                meetingSummary.transcript = {
+                  id: latestTranscript.id,
+                  createdDateTime: latestTranscript.createdDateTime,
+                };
+
+                // Step 4: Download transcript content
+                try {
+                  const transcriptContent = await graphClient.makeRequest(
+                    `/me/onlineMeetings/${onlineMeetingId}/transcripts/${latestTranscript.id}/content`,
+                    {
+                      method: 'GET',
+                      queryParams: { $format: 'text/vtt' },
+                    }
+                  );
+
+                  if (transcriptContent && typeof transcriptContent === 'string') {
+                    // Extract summary from transcript
+                    meetingSummary.summary = extractTranscriptSummary(transcriptContent);
+                  } else if (transcriptContent && typeof transcriptContent === 'object') {
+                    meetingSummary.summary = extractTranscriptSummary(
+                      JSON.stringify(transcriptContent)
+                    );
+                  }
+                } catch (contentError) {
+                  logger.warn(`Could not download transcript content: ${contentError}`);
+                  meetingSummary.error = 'Transcript content could not be downloaded';
+                }
+              } else {
+                meetingSummary.error = 'No transcripts available for this meeting';
+              }
+            } catch (transcriptError) {
+              logger.warn(`Could not get transcripts: ${transcriptError}`);
+              meetingSummary.error = 'Could not retrieve transcripts';
+            }
+          }
+
+          results.push(meetingSummary);
+        }
+
+        // Step 5: Search for Loop files that might contain meeting notes
+        const loopFilesWithContent: Array<{
+          meetingId?: string;
+          meetingSubject?: string;
+          fileName: string;
+          fileId: string;
+          webUrl?: string;
+          createdDateTime?: string;
+          content?: string;
+          summary?: {
+            keyPoints: string[];
+            actionItems: string[];
+            decisions: string[];
+          };
+        }> = [];
+
+        try {
+          // Search for Loop files in the date range
+          const loopSearchQuery = `meeting OR "meeting notes" OR "meeting summary" OR facilitator OR "meeting minutes"`;
+          const loopSearchResult = await executeCentralSearch(graphClient, loopSearchQuery, {
+            entityTypes: ['driveItem'],
+            maxResults: 50,
+            timeRange: {
+              startDateTime: startDate.toISOString(),
+              endDateTime: endDate.toISOString(),
+            },
+          });
+
+          // Filter for Loop files and extract content
+          for (const file of loopSearchResult.results.files.slice(0, 20)) {
+            const fileObj = (file.resource || file) as Record<string, unknown>;
+            const loopDetection = detectLoopFile(fileObj);
+
+            if (loopDetection.isLoopFile) {
+              const fileId = fileObj.id as string | undefined;
+              const driveId = (fileObj.parentReference as Record<string, unknown> | undefined)
+                ?.driveId as string | undefined;
+              const fileName = (fileObj.name as string) || 'unknown';
+              const createdDateTime = fileObj.createdDateTime as string | undefined;
+              const webUrl = fileObj.webUrl as string | undefined;
+
+              // Try to match with a meeting based on date/time and title
+              let matchedMeetingId: string | undefined;
+              let matchedMeetingSubject: string | undefined;
+
+              if (createdDateTime) {
+                const fileDate = new Date(createdDateTime);
+                for (const meeting of results) {
+                  const meetingDate = new Date(meeting.meeting.startTime);
+                  // Match if file was created within 2 hours of meeting start
+                  if (Math.abs(fileDate.getTime() - meetingDate.getTime()) < 2 * 60 * 60 * 1000) {
+                    // Also check if file name or content might match meeting subject
+                    const fileNameLower = fileName.toLowerCase();
+                    const meetingSubjectLower = meeting.meeting.subject.toLowerCase();
+                    if (
+                      fileNameLower.includes(meetingSubjectLower.substring(0, 10)) ||
+                      meetingSubjectLower.includes(fileNameLower.substring(0, 10))
+                    ) {
+                      matchedMeetingId = meeting.meeting.id;
+                      matchedMeetingSubject = meeting.meeting.subject;
+                      break;
+                    }
+                  }
+                }
+              }
+
+              // Try to download and parse Loop file content
+              if (fileId) {
+                try {
+                  const endpoint = driveId
+                    ? `/drives/${driveId}/items/${fileId}/content`
+                    : `/me/drive/items/${fileId}/content`;
+
+                  const loopContent = await graphClient.makeRequest(endpoint, {
+                    method: 'GET',
+                  });
+
+                  if (loopContent && typeof loopContent === 'string') {
+                    const parsedLoop = parseLoopContent(loopContent);
+                    const textContent = parsedLoop.textContent || parsedLoop.rawContent;
+
+                    if (textContent) {
+                      // Extract summary from Loop content (similar to transcript)
+                      const loopSummary = extractTranscriptSummary(textContent);
+
+                      loopFilesWithContent.push({
+                        meetingId: matchedMeetingId,
+                        meetingSubject: matchedMeetingSubject,
+                        fileName,
+                        fileId,
+                        webUrl,
+                        createdDateTime,
+                        content: textContent.substring(0, 5000), // Limit content length
+                        summary: loopSummary,
+                      });
+
+                      // If this Loop file is linked to a meeting, add its summary to the meeting
+                      if (matchedMeetingId) {
+                        const meetingIndex = results.findIndex(
+                          (r) => r.meeting.id === matchedMeetingId
+                        );
+                        if (meetingIndex >= 0) {
+                          const meeting = results[meetingIndex];
+                          if (meeting.summary) {
+                            // Merge Loop summary with transcript summary
+                            meeting.summary.keyPoints.push(...loopSummary.keyPoints);
+                            meeting.summary.actionItems.push(...loopSummary.actionItems);
+                            meeting.summary.decisions.push(...loopSummary.decisions);
+                            meeting.summary.participants.push(...loopSummary.participants);
+                          } else {
+                            // Use Loop summary if no transcript available
+                            meeting.summary = loopSummary;
+                          }
+                          // Mark that this meeting has Loop notes
+                          if (!meeting.meeting) {
+                            meeting.meeting = {} as typeof meeting.meeting;
+                          }
+                          (meeting.meeting as unknown as { hasLoopNotes?: boolean }).hasLoopNotes =
+                            true;
+                        }
+                      }
+                    }
+                  }
+                } catch (loopError) {
+                  logger.warn(`Could not download Loop file content: ${loopError}`);
+                }
+              }
+            }
+          }
+        } catch (loopSearchError) {
+          logger.warn(`Error searching for Loop files: ${loopSearchError}`);
+        }
+
+        // Aggregate all action items and decisions (including from Loop files)
+        const allActionItems: string[] = [];
+        const allDecisions: string[] = [];
+        const allKeyPoints: string[] = [];
+
+        for (const result of results) {
+          if (result.summary) {
+            allActionItems.push(...result.summary.actionItems);
+            allDecisions.push(...result.summary.decisions);
+            allKeyPoints.push(...result.summary.keyPoints);
+          }
+        }
+
+        // Also aggregate from standalone Loop files
+        for (const loopFile of loopFilesWithContent) {
+          if (loopFile.summary) {
+            allActionItems.push(...loopFile.summary.actionItems);
+            allDecisions.push(...loopFile.summary.decisions);
+            allKeyPoints.push(...loopFile.summary.keyPoints);
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  summary: {
+                    totalMeetings: results.length,
+                    meetingsWithTranscripts: results.filter((r) => r.transcript).length,
+                    meetingsWithLoopNotes: results.filter(
+                      (r) => (r.meeting as unknown as { hasLoopNotes?: boolean })?.hasLoopNotes
+                    ).length,
+                    loopFilesFound: loopFilesWithContent.length,
+                    dateRange,
+                    aggregated: {
+                      totalActionItems: allActionItems.length,
+                      totalDecisions: allDecisions.length,
+                      totalKeyPoints: allKeyPoints.length,
+                    },
+                  },
+                  meetings: results,
+                  loopFiles: loopFilesWithContent.map((lf) => ({
+                    fileName: lf.fileName,
+                    webUrl: lf.webUrl,
+                    createdDateTime: lf.createdDateTime,
+                    linkedToMeeting: lf.meetingId ? lf.meetingSubject : undefined,
+                    summary: lf.summary,
+                  })),
+                  aggregatedContent: {
+                    allActionItems: allActionItems.slice(0, 20),
+                    allDecisions: allDecisions.slice(0, 20),
+                    allKeyPoints: allKeyPoints.slice(0, 30),
+                  },
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } catch (error) {
+        logger.error(`Error summarizing recent meetings: ${error}`);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify(
+                {
+                  error: `Failed to summarize meetings: ${error}`,
+                  hint: 'Ensure you have the required permissions (OnlineMeetings.Read, OnlineMeetingTranscript.Read.All).',
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+    }
+  );
+  registeredCount++;
+
+  /**
    * Tool: search-across-transcripts
    * Searches for specific topics or keywords across all meeting transcripts
    */
