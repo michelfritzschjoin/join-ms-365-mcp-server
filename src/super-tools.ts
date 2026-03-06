@@ -2112,13 +2112,14 @@ async function handleCalendar(
     }
 
     case 'view': {
-      if (!input.startDateTime || !input.endDateTime) {
-        throw new Error('startDateTime and endDateTime are required for action "view"');
-      }
-      thinking.push(`Getting calendar view from ${input.startDateTime} to ${input.endDateTime}`);
+      const now = new Date();
+      const defaultEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+      const startDateTime = input.startDateTime ?? now.toISOString();
+      const endDateTime = input.endDateTime ?? defaultEnd.toISOString();
+      thinking.push(`Getting calendar view from ${startDateTime} to ${endDateTime}`);
       const params: Record<string, string> = {
-        startDateTime: input.startDateTime,
-        endDateTime: input.endDateTime,
+        startDateTime,
+        endDateTime,
         $top: String(input.top || 50),
       };
       if (input.orderby) params.$orderby = input.orderby;
@@ -2134,11 +2135,7 @@ async function handleCalendar(
 
       // Format calendar response with profession-specific formatting
       if (isCalendarResponse(parsedResult)) {
-        const formatted = formatCalendarResponse(
-          parsedResult,
-          input.startDateTime,
-          input.endDateTime
-        );
+        const formatted = formatCalendarResponse(parsedResult, startDateTime, endDateTime);
         // Use profession-specific text formatting
         const formattedText = calendarResponseToTextByProfession(formatted);
         return addThinkingToResponse(formattedText, thinking);
@@ -3212,6 +3209,48 @@ async function handleMeetings(
 // ============================================================================
 // 8. SHAREPOINT SUPER-TOOL
 // ============================================================================
+/** Returns true if the value looks like a Graph API site ID (GUID or hostname,siteGuid,webGuid). */
+function looksLikeSharePointSiteId(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  const guidPart = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (guidPart.test(trimmed)) return true;
+  const composite = /^[^,\s]+,([0-9a-f-]+,)?[0-9a-f-]+$/i;
+  return composite.test(trimmed) && !trimmed.includes(' ');
+}
+
+/**
+ * Resolves site identifier to a Graph API site ID.
+ * If the value looks like a site ID (GUID or hostname,guid,guid), returns it as-is.
+ * Otherwise searches sites by name and returns the first match's ID.
+ */
+async function resolveSharePointSiteId(
+  graphClient: GraphClient,
+  siteIdOrName: string,
+  thinking: string[]
+): Promise<string> {
+  const trimmed = siteIdOrName.trim();
+  if (looksLikeSharePointSiteId(trimmed)) return trimmed;
+  thinking.push(`Resolving site by name: "${trimmed}"`);
+  const result = await callGraph(graphClient, 'GET', '/sites', {
+    search: trimmed,
+    $top: '5',
+  });
+  const parsed = JSON.parse(result) as { value?: Array<{ id?: string; displayName?: string }> };
+  const sites = parsed?.value;
+  if (!sites?.length) {
+    throw new Error(
+      `No SharePoint site found for "${trimmed}". Use action "search-sites" with search parameter to list available sites.`
+    );
+  }
+  const first = sites[0];
+  if (!first?.id) {
+    throw new Error(`SharePoint search returned no valid site ID for "${trimmed}".`);
+  }
+  thinking.push(`Using site: ${first.displayName ?? first.id}`);
+  return first.id;
+}
+
 const sharepointActions = z.enum([
   'search-sites', // Search SharePoint sites
   'get-site', // Get site details
@@ -3223,8 +3262,12 @@ const sharepointActions = z.enum([
 
 const sharepointSchema = z.object({
   action: sharepointActions.describe('The SharePoint operation to perform'),
-  // Identifiers
-  siteId: z.string().optional().describe('Site ID'),
+  // Identifiers (siteId can be Graph site ID or site display name for lookup)
+  siteId: z
+    .string()
+    .optional()
+    .describe('Site ID (GUID or hostname,id,id) or site display name to resolve'),
+  siteld: z.string().optional().describe('Alias for siteId (use siteId when possible)'),
   driveId: z.string().optional().describe('Drive ID'),
   listId: z.string().optional().describe('List ID'),
   itemId: z.string().optional().describe('Item ID'),
@@ -3253,47 +3296,57 @@ async function handleSharePoint(
     }
 
     case 'get-site': {
-      if (!input.siteId) throw new Error('siteId is required');
-      thinking.push(`Getting site: ${input.siteId}`);
-      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}`);
+      const siteIdOrName = input.siteId ?? input.siteld;
+      if (!siteIdOrName) throw new Error('siteId is required');
+      const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
+      thinking.push(`Getting site: ${siteId}`);
+      const result = await callGraph(graphClient, 'GET', `/sites/${siteId}`);
       return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'site-drives': {
-      if (!input.siteId) throw new Error('siteId is required');
-      thinking.push(`Listing drives for site: ${input.siteId}`);
-      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/drives`);
+      const siteIdOrName = input.siteId ?? input.siteld;
+      if (!siteIdOrName) throw new Error('siteId is required');
+      const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
+      thinking.push(`Listing drives for site: ${siteId}`);
+      const result = await callGraph(graphClient, 'GET', `/sites/${siteId}/drives`);
       return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'site-lists': {
-      if (!input.siteId) throw new Error('siteId is required');
-      thinking.push(`Listing lists for site: ${input.siteId}`);
-      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/lists`);
+      const siteIdOrName = input.siteId ?? input.siteld;
+      if (!siteIdOrName) throw new Error('siteId is required');
+      const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
+      thinking.push(`Listing lists for site: ${siteId}`);
+      const result = await callGraph(graphClient, 'GET', `/sites/${siteId}/lists`);
       return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'list-items': {
-      if (!input.siteId || !input.listId) {
+      const siteIdOrName = input.siteId ?? input.siteld;
+      if (!siteIdOrName || !input.listId) {
         throw new Error('siteId and listId are required');
       }
+      const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
       thinking.push(`Listing items in list: ${input.listId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
       const result = await callGraph(
         graphClient,
         'GET',
-        `/sites/${input.siteId}/lists/${input.listId}/items`,
+        `/sites/${siteId}/lists/${input.listId}/items`,
         params
       );
       return formatAndReturnToolResponse(result, thinking);
     }
 
     case 'site-items': {
-      if (!input.siteId) throw new Error('siteId is required');
-      thinking.push(`Listing items in site: ${input.siteId}`);
+      const siteIdOrName = input.siteId ?? input.siteld;
+      if (!siteIdOrName) throw new Error('siteId is required');
+      const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
+      thinking.push(`Listing items in site: ${siteId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await callGraph(graphClient, 'GET', `/sites/${input.siteId}/items`, params);
+      const result = await callGraph(graphClient, 'GET', `/sites/${siteId}/items`, params);
       return formatAndReturnToolResponse(result, thinking);
     }
 
