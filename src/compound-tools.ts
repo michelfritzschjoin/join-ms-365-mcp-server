@@ -1015,14 +1015,15 @@ async function findEmailsWithPerson(
 ): Promise<GraphEmail[]> {
   const allEmails: GraphEmail[] = [];
 
-  // Search for emails from this person
+  // Search for emails from this person.
+  // IMPORTANT: Do NOT use $orderby with $search - Microsoft Graph returns 400 Bad Request.
+  // Search results are already sorted by receivedDateTime desc; we re-sort client-side anyway.
   try {
     const fromResponse = await graphClient.makeRequest('/me/messages', {
       method: 'GET',
       queryParams: {
         $search: `"from:${userEmail}"`,
         $top: String(Math.ceil(limit / 2)),
-        $orderby: 'receivedDateTime desc',
         $select: 'id,subject,bodyPreview,receivedDateTime,from,toRecipients,hasAttachments,webLink',
       },
     });
@@ -1039,14 +1040,13 @@ async function findEmailsWithPerson(
     logger.warn(`Error searching emails from person: ${error}`);
   }
 
-  // Search for emails to this person
+  // Search for emails to this person (no $orderby with $search - see above).
   try {
     const toResponse = await graphClient.makeRequest('/me/messages', {
       method: 'GET',
       queryParams: {
         $search: `"to:${userEmail}"`,
         $top: String(Math.ceil(limit / 2)),
-        $orderby: 'receivedDateTime desc',
         $select: 'id,subject,bodyPreview,receivedDateTime,from,toRecipients,hasAttachments,webLink',
       },
     });
@@ -5170,13 +5170,13 @@ Dieses Tool führt automatisch aus:
   // ==========================================================================
   server.tool(
     'find-emails-with-person',
-    `Find all emails exchanged with a specific person. This tool automatically:
-1. Finds the user by name or email
-2. Searches for emails FROM this person
-3. Searches for emails TO this person
-4. Combines and sorts results by date
+    `Find all emails exchanged with a specific person, and when you last contacted them. This tool automatically:
+1. Accepts a name OR an email address (e.g. "john@company.com")—use the email directly for external contacts
+2. Finds the user by name or email (if in directory)
+3. Searches for emails FROM and TO this person
+4. Combines and sorts by date; returns lastContactAt for "when did I last contact" questions
 
-Use this when someone asks "Show me emails from [person]" or "Find my email conversations with [person]".`,
+Use for: "Show emails from [person]", "When did I last contact [email]?", "Find my email conversations with [person]".`,
     {
       person: z.string().describe('Name or email of the person to find emails with'),
       limit: z.number().optional().describe('Maximum number of emails to return (default: 20)'),
@@ -5189,16 +5189,31 @@ Use this when someone asks "Show me emails from [person]" or "Find my email conv
     async ({ person, limit = 20 }) => {
       logger.info(`Finding emails with person: ${person}`);
 
-      // Step 1: Find the user
+      const looksLikeEmail = typeof person === 'string' && person.includes('@');
+
+      // Resolve user: if input looks like email, use it directly when not in directory (e.g. external).
+      let userEmail: string;
+      let displayName: string;
+      let userId: string | undefined;
+
       const user = await findUser(graphClient, person);
-      if (!user) {
+      if (user) {
+        userEmail = user.mail || user.userPrincipalName || '';
+        if (!userEmail && looksLikeEmail) userEmail = person.trim();
+        displayName = user.displayName || person;
+        userId = user.id;
+      } else if (looksLikeEmail) {
+        // External or unknown: use the given string as email so "when did I last contact x@y.com" works.
+        userEmail = person.trim();
+        displayName = userEmail;
+      } else {
         return {
           content: [
             {
               type: 'text' as const,
               text: JSON.stringify({
                 error: 'User not found',
-                message: `Could not find a user matching "${person}". Try using their email address directly.`,
+                message: `Could not find a user matching "${person}". Try using their email address directly (e.g. name@company.com).`,
                 searchedFor: person,
               }),
             },
@@ -5207,7 +5222,6 @@ Use this when someone asks "Show me emails from [person]" or "Find my email conv
         };
       }
 
-      const userEmail = user.mail || user.userPrincipalName || '';
       if (!userEmail) {
         return {
           content: [
@@ -5215,8 +5229,8 @@ Use this when someone asks "Show me emails from [person]" or "Find my email conv
               type: 'text' as const,
               text: JSON.stringify({
                 error: 'No email address',
-                message: `Found user ${user.displayName} but they don't have an email address.`,
-                person: user,
+                message: `Found user ${displayName} but no email address available.`,
+                person: user ?? { displayName, id: userId },
               }),
             },
           ],
@@ -5224,8 +5238,8 @@ Use this when someone asks "Show me emails from [person]" or "Find my email conv
         };
       }
 
-      // Step 2: Find emails
-      const emails = await findEmailsWithPerson(graphClient, userEmail, user.displayName, limit);
+      // Find emails (from/to this address)
+      const emails = await findEmailsWithPerson(graphClient, userEmail, displayName, limit);
 
       const formattedEmails = emails.map((email) => ({
         id: email.id,
@@ -5238,6 +5252,9 @@ Use this when someone asks "Show me emails from [person]" or "Find my email conv
         webLink: email.webLink,
       }));
 
+      // Answer "when did I last contact" with the most recent date
+      const lastContactAt = formattedEmails.length > 0 ? formattedEmails[0].date : null;
+
       return {
         content: [
           {
@@ -5246,11 +5263,12 @@ Use this when someone asks "Show me emails from [person]" or "Find my email conv
               {
                 success: true,
                 person: {
-                  name: user.displayName,
+                  name: displayName,
                   email: userEmail,
-                  id: user.id,
+                  id: userId,
                 },
                 emailsFound: formattedEmails.length,
+                lastContactAt,
                 emails: formattedEmails,
               },
               null,

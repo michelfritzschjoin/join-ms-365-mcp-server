@@ -1418,8 +1418,8 @@ function addOptimizationThinking(thinking: string[], result: OptimizedQuery): vo
 
 // Common schemas
 const paginationSchema = {
-  top: z.number().optional().describe('Maximum number of items to return (default: 25)'),
-  skip: z.number().optional().describe('Number of items to skip for pagination'),
+  top: z.number().optional().default(25).describe('Maximum number of items to return'),
+  skip: z.number().optional().default(0).describe('Number of items to skip for pagination'),
 };
 
 const filterSchema = {
@@ -1536,8 +1536,8 @@ const emailSchema = z.object({
   attachmentId: z.string().optional().describe('Attachment ID (for getting specific attachment)'),
   // For send/reply
   to: z.string().optional().describe('Recipient email address(es), comma-separated (for send)'),
-  subject: z.string().optional().describe('Email subject (for send)'),
-  body: z.string().optional().describe('Email body content (for send/reply)'),
+  subject: z.string().optional().default('(No subject)').describe('Email subject (for send)'),
+  body: z.string().optional().default('').describe('Email body content (for send/reply)'),
   // For extract actions
   extractType: z
     .string()
@@ -1548,15 +1548,18 @@ const emailSchema = z.object({
   includeMetadata: z
     .boolean()
     .optional()
-    .describe('Include metadata in extraction result (default: true)'),
+    .default(true)
+    .describe('Include metadata in extraction result'),
   includeEntities: z
     .boolean()
     .optional()
-    .describe('Include entities in extraction result (default: true)'),
+    .default(true)
+    .describe('Include entities in extraction result'),
   includeSummary: z
     .boolean()
     .optional()
-    .describe('Include summary in extraction result (default: true)'),
+    .default(true)
+    .describe('Include summary in extraction result'),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -1920,16 +1923,17 @@ async function handleEmail(
 
     // Write operations (blocked in read-only mode - check happens at function start)
     case 'send': {
-      if (!input.to) throw new Error('to (recipient) is required for action "send"');
-      if (!input.subject) throw new Error('subject is required for action "send"');
-      if (!input.body) throw new Error('body is required for action "send"');
-      thinking.push(`Sending email to: ${input.to}`);
-      const recipients = input.to.split(',').map((email) => ({
+      const to = input.to?.trim();
+      if (!to) throw new Error('to (recipient) is required for action "send"');
+      const subject = input.subject ?? '(No subject)';
+      const body = input.body ?? '';
+      thinking.push(`Sending email to: ${to}`);
+      const recipients = to.split(',').map((email) => ({
         emailAddress: { address: email.trim() },
       }));
       const message = {
-        subject: input.subject,
-        body: { contentType: 'Text', content: input.body },
+        subject,
+        body: { contentType: 'Text', content: body },
         toRecipients: recipients,
       };
       const result = await callGraph(graphClient, 'POST', '/me/sendMail', undefined, {
@@ -1944,14 +1948,14 @@ async function handleEmail(
 
     case 'reply': {
       if (!input.messageId) throw new Error('messageId is required for action "reply"');
-      if (!input.body) throw new Error('body is required for action "reply"');
+      const replyBody = input.body ?? '';
       thinking.push(`Replying to email: ${input.messageId}`);
       const result = await callGraph(
         graphClient,
         'POST',
         `/me/messages/${input.messageId}/reply`,
         undefined,
-        { comment: input.body }
+        { comment: replyBody }
       );
       return addThinkingToResponse(
         result || JSON.stringify({ success: true, message: 'Reply sent' }),
@@ -2015,9 +2019,17 @@ const calendarSchema = z.object({
   startDateTime: z.string().optional().describe('Start date/time (ISO format)'),
   endDateTime: z.string().optional().describe('End date/time (ISO format)'),
   // Timezone
-  timezone: z.string().optional().describe('Timezone for date/time values (e.g., "Europe/Berlin")'),
+  timezone: z
+    .string()
+    .optional()
+    .default('UTC')
+    .describe('Timezone for date/time values (e.g., "Europe/Berlin")'),
   // For create/update event
-  subject: z.string().optional().describe('Event subject/title (for create-event, update-event)'),
+  subject: z
+    .string()
+    .optional()
+    .default('Untitled Event')
+    .describe('Event subject/title (for create-event, update-event)'),
   body: z.string().optional().describe('Event body/description (for create-event, update-event)'),
   location: z.string().optional().describe('Event location (for create-event, update-event)'),
   attendees: z.string().optional().describe('Attendee emails, comma-separated (for create-event)'),
@@ -2179,14 +2191,17 @@ async function handleCalendar(
 
     // Write operations (blocked in read-only mode - check happens at function start)
     case 'create-event': {
-      if (!input.subject) throw new Error('subject is required for create-event');
-      if (!input.startDateTime) throw new Error('startDateTime is required for create-event');
-      if (!input.endDateTime) throw new Error('endDateTime is required for create-event');
-      thinking.push(`Creating event: ${input.subject}`);
+      const now = new Date();
+      const defaultEnd = new Date(now.getTime() + 60 * 60 * 1000);
+      const subject = input.subject ?? 'Untitled Event';
+      const startDateTime = input.startDateTime ?? now.toISOString();
+      const endDateTime = input.endDateTime ?? defaultEnd.toISOString();
+      const tz = input.timezone ?? 'UTC';
+      thinking.push(`Creating event: ${subject}`);
       const event: Record<string, unknown> = {
-        subject: input.subject,
-        start: { dateTime: input.startDateTime, timeZone: input.timezone || 'UTC' },
-        end: { dateTime: input.endDateTime, timeZone: input.timezone || 'UTC' },
+        subject,
+        start: { dateTime: startDateTime, timeZone: tz },
+        end: { dateTime: endDateTime, timeZone: tz },
       };
       if (input.body) event.body = { contentType: 'Text', content: input.body };
       if (input.location) event.location = { displayName: input.location };
@@ -2835,7 +2850,11 @@ const tasksSchema = z.object({
   taskId: z.string().optional().describe('Task ID'),
   planId: z.string().optional().describe('Planner plan ID'),
   // For create/update todo
-  title: z.string().optional().describe('Task title (for create-todo, update-todo)'),
+  title: z
+    .string()
+    .optional()
+    .default('Untitled task')
+    .describe('Task title (for create-todo, update-todo)'),
   dueDateTime: z
     .string()
     .optional()
@@ -2917,9 +2936,9 @@ async function handleTasks(
     // Write operations (blocked in read-only mode - check happens at function start)
     case 'create-todo': {
       if (!input.taskListId) throw new Error('taskListId is required for create-todo');
-      if (!input.title) throw new Error('title is required for create-todo');
-      thinking.push(`Creating To-Do task: ${input.title}`);
-      const task: Record<string, unknown> = { title: input.title };
+      const title = input.title ?? 'Untitled task';
+      thinking.push(`Creating To-Do task: ${title}`);
+      const task: Record<string, unknown> = { title };
       if (input.dueDateTime) {
         task.dueDateTime = { dateTime: input.dueDateTime, timeZone: 'UTC' };
       }
@@ -6126,14 +6145,15 @@ const assistantSchema = z.object({
   // Project/topic context
   topic: z.string().optional().describe('Topic or project name'),
   // Time context
-  days: z.number().optional().describe('Number of days to look back (default: 7, max: 365)'),
+  days: z.number().optional().default(7).describe('Number of days to look back (max: 365)'),
   // Limits
-  limit: z.number().optional().describe('Maximum results per category (default: 25, max: 100)'),
+  limit: z.number().optional().default(25).describe('Maximum results per category (max: 100)'),
   // Include download links for files
   includeDownloadLinks: z
     .boolean()
     .optional()
-    .describe('Include download links for discovered files (default: false)'),
+    .default(false)
+    .describe('Include download links for discovered files'),
 });
 
 type AssistantInput = z.infer<typeof assistantSchema>;
