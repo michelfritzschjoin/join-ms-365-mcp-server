@@ -65,7 +65,7 @@
     "commander": "^14.0.2",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.2.1",
+    "express-rate-limit": "^8.3.0",
     "hono": "^4.11.7",
     "js-yaml": "^4.1.1",
     "winston": "^3.19.0",
