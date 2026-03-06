@@ -9,9 +9,11 @@
   },
   "scripts": {
     "generate": "node bin/generate-graph-client.mjs",
+    "patch-client": "node bin/patch-generated-client.mjs",
     "predev": "node bin/check-generated.mjs",
     "predev:http": "node bin/check-generated.mjs",
     "build": "tsup",
+    "pretypecheck": "node bin/patch-generated-client.mjs",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run lint && npm run format:check && npm run test:security && npm run test:unit && npm run test:integration",
     "test:security": "npm run security:audit && npm run security:check && npm run security:verify",

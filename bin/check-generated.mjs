@@ -21,4 +21,7 @@ if (!existsSync(clientPath)) {
     console.error('\n❌ Generation failed. Please run "npm run generate" manually.\n');
     process.exit(1);
   }
+} else {
+  // Patch existing client so response type "binary" -> "json" (fixes TS2322)
+  execSync('node bin/patch-generated-client.mjs', { stdio: 'inherit', cwd: rootDir });
 }

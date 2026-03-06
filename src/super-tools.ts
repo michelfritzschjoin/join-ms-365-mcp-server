@@ -2039,7 +2039,8 @@ const calendarSchema = z.object({
   ...paginationSchema,
 });
 
-type CalendarInput = z.infer<typeof calendarSchema>;
+/** Input type for calendar tool; use z.input so partial objects (e.g. auto-execution) are accepted. */
+type CalendarInput = z.input<typeof calendarSchema>;
 
 async function handleCalendar(
   input: CalendarInput,
@@ -6156,7 +6157,8 @@ const assistantSchema = z.object({
     .describe('Include download links for discovered files'),
 });
 
-type AssistantInput = z.infer<typeof assistantSchema>;
+/** Input type for assistant tool; use z.input so partial objects (e.g. auto-execution) are accepted. */
+type AssistantInput = z.input<typeof assistantSchema>;
 
 async function handleAssistant(
   input: AssistantInput,

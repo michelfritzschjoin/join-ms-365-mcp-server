@@ -75,6 +75,10 @@ export function generateMcpTools(openApiSpec, outputDir) {
     // I didn't make up this crazy regex myself; you know who did. It seems works though.
     clientCode = clientCode.replace(/,?\s*errors:\s*\[[\s\S]*?],?(?=\s*})/g, '');
 
+    // Fix: Type '"binary"' is not assignable to type '"json"' (openapi-zod-client endpoint responseType)
+    clientCode = clientCode.replace(/: "binary"/g, ': "json"');
+    clientCode = clientCode.replace(/: 'binary'/g, ": 'json'");
+
     fs.writeFileSync(clientFilePath, clientCode);
 
     return true;
