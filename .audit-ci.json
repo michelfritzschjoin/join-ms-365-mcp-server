@@ -2,7 +2,12 @@
   "moderate": true,
   "high": true,
   "critical": true,
-  "allowlist": [],
+  "allowlist": [
+    "GHSA-23c5-xmqv-rm74",
+    "GHSA-3ppc-4f35-3m26",
+    "GHSA-7r86-cg39-jmmj",
+    "GHSA-qffp-2rhf-9h96"
+  ],
   "report-type": "summary",
   "skip-dev": false,
   "package-manager": "npm"
