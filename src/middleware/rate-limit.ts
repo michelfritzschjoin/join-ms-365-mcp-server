@@ -97,11 +97,13 @@ export function createRateLimitMiddleware(
     res.setHeader('X-RateLimit-Reset', new Date(result.resetTime).toISOString());
 
     if (!result.allowed) {
-      logger.warn(`Rate limit exceeded for ${clientId}`);
+      const retryAfterSeconds = Math.ceil((result.resetTime - Date.now()) / 1000);
+      logger.warn(`Rate limit exceeded for ${clientId}, retry after ${retryAfterSeconds}s`);
+      res.setHeader('Retry-After', String(retryAfterSeconds));
       res.status(429).json({
         error: 'Too Many Requests',
         message: 'Rate limit exceeded. Please try again later.',
-        retryAfter: Math.ceil((result.resetTime - Date.now()) / 1000),
+        retryAfter: retryAfterSeconds,
       });
       return;
     }
