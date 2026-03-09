@@ -79,6 +79,35 @@ export function generateMcpTools(openApiSpec, outputDir) {
     clientCode = clientCode.replace(/: "binary"/g, ': "json"');
     clientCode = clientCode.replace(/: 'binary'/g, ": 'json'");
 
+    // Fix: get-chat endpoint — codegen can produce unterminated template literal and merged send_mail body/response
+    const brokenGetChat =
+      /\{\s*method: 'get',\s*path: '\/chats\/:chatId',\s*alias: 'get-chat',\s*description: `[^`]*\\\\`, requestFormat: 'json', parameters: \[\s*\{\s*name: '\$select',[\s\S]*?\},\s*\{\s*name: '\$expand',[\s\S]*?\},\s*\], response: z\.`,\s*type: 'Body',\s*schema: send_mail_Body,\s*\},\s*\],\s*response: z\.void\(\)\s*\},\s*\]\s*\)\s*;/;
+    const fixedGetChat = `{
+    method: 'get',
+    path: '/chats/:chatId',
+    alias: 'get-chat',
+    description: \`Get chat (without its messages). This supports federation. To access a chat, at least one chat member must belong to the tenant the request initiated from.\`,
+    requestFormat: 'json',
+    parameters: [
+      {
+        name: '$select',
+        type: 'Query',
+        schema: z.array(z.string()).describe('Select properties to be returned').optional(),
+      },
+      {
+        name: '$expand',
+        type: 'Query',
+        schema: z.array(z.string()).describe('Expand related entities').optional(),
+      },
+    ],
+    response: z.lazy(() => microsoft_graph_chat),
+  },
+]);`;
+    if (brokenGetChat.test(clientCode)) {
+      clientCode = clientCode.replace(brokenGetChat, fixedGetChat);
+      console.log('Applied get-chat endpoint fix (unterminated template literal).');
+    }
+
     fs.writeFileSync(clientFilePath, clientCode);
 
     return true;
