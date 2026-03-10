@@ -4890,6 +4890,112 @@ async function handleSearch(
       }
     }
 
+    // Record primary query result for learning (so optimizer can prefer this formulation next time)
+    if (autoOptimizedQuery && searchQuery !== input.query) {
+      const currentUserId = getUserId();
+      const userIdHash = currentUserId ? getQueryStore().hashUserId(currentUserId) : undefined;
+      if (userIdHash) {
+        recordQueryOptimizationResult(
+          input.query,
+          searchQuery,
+          totalHits > 0,
+          userIdHash,
+          'search'
+        );
+      }
+    }
+
+    // Auto-improve: if primary query returned no results, try optimizer variants and merge
+    const variantFallbackEnabled =
+      process.env.MS365_MCP_AUTO_QUERY_OPTIMIZATION_ENABLED !== 'false';
+    if (
+      totalHits === 0 &&
+      variantFallbackEnabled &&
+      autoOptimizedQuery?.variants &&
+      autoOptimizedQuery.variants.length > 0
+    ) {
+      const seenIds = new Set<string>();
+      for (const r of Object.values(formattedResults)) {
+        for (const item of r as Array<{ id?: string }>) {
+          if (item.id) seenIds.add(String(item.id));
+        }
+      }
+      const variantsToTry = autoOptimizedQuery.variants.slice(0, 3);
+      for (const variantQuery of variantsToTry) {
+        const vq = formatKQLQuery(variantQuery);
+        if (!vq || vq === searchQuery) continue;
+        try {
+          const variantRequest = {
+            requests: [
+              {
+                entityTypes,
+                query: { queryString: vq },
+                from: input.from || 0,
+                size: input.size || 25,
+                trimDuplicates: input.trimDuplicates !== false,
+                ...(input.fields && { fields: input.fields }),
+                ...(input.sortBy && {
+                  sortProperties: [{ name: input.sortBy, isDescending: true }],
+                }),
+              },
+            ],
+          };
+          const variantResult = await callGraph(
+            graphClient,
+            'POST',
+            '/search/query',
+            undefined,
+            variantRequest
+          );
+          const variantParsed = JSON.parse(variantResult);
+          let variantHits = 0;
+          if (variantParsed.value && Array.isArray(variantParsed.value)) {
+            for (const response of variantParsed.value) {
+              if (response.hitsContainers && Array.isArray(response.hitsContainers)) {
+                for (const container of response.hitsContainers) {
+                  if (container.hits && Array.isArray(container.hits)) {
+                    for (const hit of container.hits) {
+                      const rid = hit.resource?.id;
+                      if (rid && !seenIds.has(String(rid))) {
+                        seenIds.add(String(rid));
+                        variantHits++;
+                        const entityType = hit.resource?.['@odata.type'] || 'unknown';
+                        if (!formattedResults[entityType]) {
+                          formattedResults[entityType] = [];
+                        }
+                        formattedResults[entityType].push({
+                          id: hit.resource?.id,
+                          summary: hit.summary,
+                          rank: hit.rank,
+                          ...hit.resource,
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          totalHits += variantHits;
+          if (variantHits > 0) {
+            thinking.push(
+              `🧠 Auto-improved: variant query "${vq}" returned ${variantHits} additional result(s)`
+            );
+            const currentUserId = getUserId();
+            const userIdHash = currentUserId
+              ? getQueryStore().hashUserId(currentUserId)
+              : undefined;
+            if (userIdHash) {
+              recordQueryOptimizationResult(input.query, variantQuery, true, userIdHash, 'search');
+            }
+            break; // One successful variant is enough; learning will prefer it next time
+          }
+        } catch (err) {
+          logger.debug('Variant query failed', { variant: variantQuery, error: err });
+        }
+      }
+    }
+
     thinking.push(
       `Found ${totalHits} results across ${Object.keys(formattedResults).length} entity types`
     );

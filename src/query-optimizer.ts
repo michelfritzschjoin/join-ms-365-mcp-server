@@ -353,6 +353,51 @@ const CROSS_LANGUAGE_TERMS: Record<string, string> = {
   approval: 'genehmigung',
 };
 
+/** Common abbreviations and their expansions for query improvement */
+const ABBREVIATIONS: Record<string, string> = {
+  q1: 'quarter 1',
+  q2: 'quarter 2',
+  q3: 'quarter 3',
+  q4: 'quarter 4',
+  hr: 'human resources',
+  it: 'information technology',
+  cfo: 'chief financial officer',
+  ceo: 'chief executive officer',
+  cto: 'chief technology officer',
+  asap: 'as soon as possible',
+  eta: 'estimated time',
+  kpi: 'key performance indicator',
+  roi: 'return on investment',
+  fte: 'full time equivalent',
+  rfp: 'request for proposal',
+  nda: 'non-disclosure agreement',
+  qa: 'quality assurance',
+  pr: 'public relations',
+  pm: 'project management',
+  okr: 'objectives key results',
+};
+
+/** Known terms for simple typo correction (edit distance 1) */
+const KNOWN_TERMS_SET = new Set([
+  ...Object.keys(CROSS_LANGUAGE_TERMS),
+  ...Object.keys(ABBREVIATIONS),
+  'projekt',
+  'project',
+  'meeting',
+  'besprechung',
+  'termin',
+  'email',
+  'mail',
+  'datei',
+  'file',
+  'dokument',
+  'document',
+  'kalender',
+  'calendar',
+  'aufgabe',
+  'task',
+]);
+
 // ============================================================================
 // QUERY OPTIMIZER CLASS
 // ============================================================================
@@ -486,7 +531,37 @@ export class QueryOptimizer {
     }
 
     // =====================================================================
-    // STEP 6: Synonym expansion
+    // STEP 6: Abbreviation expansion (add expanded form as variant)
+    // =====================================================================
+    const abbreviationVariants = this.expandAbbreviations(currentQuery);
+    if (abbreviationVariants.length > 0) {
+      optimizations.push({
+        type: 'abbreviation_expansion',
+        description: `Expanded abbreviations: ${abbreviationVariants.slice(0, 2).join(', ')}`,
+        original: currentQuery,
+        optimized: currentQuery,
+        confidence: 0.75,
+      });
+      variants.push(...abbreviationVariants);
+    }
+
+    // =====================================================================
+    // STEP 7: Typo correction (add corrected form as variant)
+    // =====================================================================
+    const typoVariants = this.getTypoCorrectedVariants(currentQuery);
+    if (typoVariants.length > 0) {
+      optimizations.push({
+        type: 'pattern_transformation',
+        description: `Suggested typo corrections: ${typoVariants.slice(0, 2).join(', ')}`,
+        original: currentQuery,
+        optimized: currentQuery,
+        confidence: 0.65,
+      });
+      variants.push(...typoVariants);
+    }
+
+    // =====================================================================
+    // STEP 8: Synonym expansion
     // =====================================================================
     const synonymVariants = this.expandWithSynonyms(currentQuery, context);
     if (synonymVariants.length > 0) {
@@ -501,7 +576,7 @@ export class QueryOptimizer {
     }
 
     // =====================================================================
-    // STEP 7: Normalization (trim, collapse whitespace)
+    // STEP 9: Normalization (trim, collapse whitespace)
     // =====================================================================
     const normalized = currentQuery.replace(/\s+/g, ' ').trim();
     if (normalized !== currentQuery) {
@@ -719,6 +794,82 @@ export class QueryOptimizer {
     }
 
     return variants.slice(0, 3); // Limit to 3 cross-language variants
+  }
+
+  /**
+   * Expand abbreviations in query (e.g. "Q1 report" → "quarter 1 report")
+   * Returns variant strings with abbreviations expanded.
+   */
+  private expandAbbreviations(query: string): string[] {
+    const variants: string[] = [];
+    const words = query.split(/\s+/);
+    const queryLower = query.toLowerCase();
+
+    for (const [abbr, expansion] of Object.entries(ABBREVIATIONS)) {
+      const abbrLower = abbr.toLowerCase();
+      if (queryLower.includes(abbrLower)) {
+        const variant = query.replace(
+          new RegExp(`\\b${this.escapeRegExp(abbr)}\\b`, 'gi'),
+          expansion
+        );
+        if (variant !== query) {
+          variants.push(variant);
+        }
+      }
+    }
+
+    return variants.slice(0, 3);
+  }
+
+  /**
+   * Levenshtein distance between two strings (for typo detection)
+   */
+  private levenshteinDistance(a: string, b: string): number {
+    const an = a.length;
+    const bn = b.length;
+    const matrix: number[][] = Array(an + 1)
+      .fill(null)
+      .map(() => Array(bn + 1).fill(0));
+
+    for (let i = 0; i <= an; i++) matrix[i][0] = i;
+    for (let j = 0; j <= bn; j++) matrix[0][j] = j;
+
+    for (let i = 1; i <= an; i++) {
+      for (let j = 1; j <= bn; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j - 1] + cost
+        );
+      }
+    }
+    return matrix[an][bn];
+  }
+
+  /**
+   * For words in query that are one edit away from a known term, add corrected variant
+   */
+  private getTypoCorrectedVariants(query: string): string[] {
+    const variants: string[] = [];
+    const words = query.toLowerCase().split(/\s+/);
+
+    for (const word of words) {
+      if (word.length < 4) continue; // Skip very short tokens
+      for (const known of KNOWN_TERMS_SET) {
+        if (this.levenshteinDistance(word, known) === 1) {
+          const variant = query.replace(
+            new RegExp(`\\b${this.escapeRegExp(word)}\\b`, 'gi'),
+            known
+          );
+          if (variant !== query) {
+            variants.push(variant);
+          }
+        }
+      }
+    }
+
+    return [...new Set(variants)].slice(0, 3);
   }
 
   /**

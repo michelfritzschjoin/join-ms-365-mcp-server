@@ -9,6 +9,7 @@ import SynonymExpander from './synonym-expander.js';
 import QueryRefiner from './query-refiner.js';
 import LearningSystem, { type SearchResult } from './learning-system.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
+import { getQueryOptimizer } from './query-optimizer.js';
 
 export interface SearchContext {
   entityTypes?: string[];
@@ -47,35 +48,44 @@ export class SearchFirstStrategy {
 
   /**
    * Execute search-first strategy
+   * Uses automatic query optimization first, then optimizer variants, then query refiner on no results.
    */
   async execute(query: string, context?: SearchContext): Promise<SearchFirstResult> {
     logger.info(`Executing search-first strategy for query: "${query}"`);
 
-    // 1. ALWAYS start with search-query
-    const searchResults = await this.executeSearchQuery(query, context);
+    // 0. Auto-optimize query (NLP, synonyms, identifiers, stopwords, abbreviations, typos)
+    const optimizer = getQueryOptimizer();
+    const optimized = optimizer.optimizeQuery(query, {
+      tool: 'search',
+      entityTypes: context?.entityTypes,
+    });
+    const searchQuery = optimized.optimizedQuery;
+
+    // 1. ALWAYS start with search-query using optimized query
+    const searchResults = await this.executeSearchQuery(searchQuery, context);
 
     // 2. Extract entities and keywords from search results
     const extractedInfo = this.entityExtractor.extractFromResults(searchResults.items);
 
-    // 3. If no results, try query refinement
+    // 3. If no results, try optimizer variants first, then query refiner
     if (searchResults.items.length === 0) {
-      logger.info('No results from initial search, trying query refinement');
-      const refinedQueries = await this.queryRefiner.refineQuery(query, true, context);
+      const variantsToTry = [
+        ...optimized.variants,
+        ...(await this.queryRefiner.refineQuery(query, true, context)).slice(1),
+      ];
 
-      // Try refined queries
-      for (const refinedQuery of refinedQueries.slice(1)) {
-        // Skip first as it's the original
-        const refinedResults = await this.executeSearchQuery(refinedQuery, context);
+      for (const variantQuery of variantsToTry) {
+        if (variantQuery === searchQuery || variantQuery === query) continue;
+        const refinedResults = await this.executeSearchQuery(variantQuery, context);
         if (refinedResults.items.length > 0) {
-          // Found results with refined query
+          logger.info(`Variant query returned results: "${variantQuery}"`);
           searchResults.items.push(...refinedResults.items);
           searchResults.sources.push(...refinedResults.sources);
-          searchResults.query = refinedQuery;
+          searchResults.query = variantQuery;
 
-          // Re-extract with new results
           const newExtracted = this.entityExtractor.extractFromResults(refinedResults.items);
           this.mergeExtractedInfo(extractedInfo, newExtracted);
-          break; // Stop after first successful refinement
+          break;
         }
       }
     }
