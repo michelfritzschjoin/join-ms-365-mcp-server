@@ -5255,7 +5255,8 @@ async function handleSearch(
           reason: 'Get full event details',
         });
       } else if (entityType.includes('chatMessage') || entityType.includes('chat')) {
-        const chatId = (first?.chatId ?? first?.parentReference?.id) as string | undefined;
+        const parentRef = first?.parentReference as { id?: string } | undefined;
+        const chatId = (first?.chatId ?? parentRef?.id) as string | undefined;
         if (chatId) {
           suggestedNextTools.push({
             tool: 'teams',
@@ -5265,7 +5266,8 @@ async function handleSearch(
           });
         }
       } else if (entityType.includes('driveItem') || entityType.includes('listItem')) {
-        const driveId = first?.parentReference?.driveId as string | undefined;
+        const parentRef = first?.parentReference as { driveId?: string } | undefined;
+        const driveId = parentRef?.driveId;
         suggestedNextTools.push({
           tool: 'files',
           action: 'get',

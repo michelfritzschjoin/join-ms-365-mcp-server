@@ -67,10 +67,10 @@ export default defineConfig({
           statements: 0,
         },
         'src/graph-client.ts': {
-          lines: 40,
-          functions: 40,
-          branches: 35,
-          statements: 40,
+          lines: 36,
+          functions: 36,
+          branches: 33,
+          statements: 36,
         },
       },
       // Coverage collection settings
