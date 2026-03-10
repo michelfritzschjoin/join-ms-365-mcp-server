@@ -20,6 +20,14 @@ The Join Microsoft 365 MCP Server provides a comprehensive set of tools for inte
 | `select-account` | Select a specific account to use                   | All       |
 | `remove-account` | Remove an account from cache                       | All       |
 
+### Capability Tools
+
+| Tool                    | Description                                                                 | Mode |
+| ----------------------- | --------------------------------------------------------------------------- | ---- |
+| `get-example-questions` | Returns example questions the server can answer 100% (for "Was kannst du?") | All  |
+
+Use `get-example-questions` when the user asks "What can you do?", "Was kannst du?", or "Welche Fragen kann ich dir stellen?". Optional parameter `language`: `"de"`, `"en"`, or `"both"` (default). The same data is exposed in `GET /capabilities` as `exampleQuestions`.
+
 ### User Tools
 
 | Tool               | Description              | Mode     |
@@ -246,10 +254,13 @@ These tools automatically chain multiple API calls to answer complex contextual 
 
 #### Advanced Search & Discovery Tools
 
-| Tool                        | Description                             | Mode |
-| --------------------------- | --------------------------------------- | ---- |
-| `intelligent-query-builder` | Build optimized queries automatically   | All  |
-| `discover-related-topics`   | Discover related topics and connections | All  |
+| Tool                        | Description                                                                     | Mode      |
+| --------------------------- | ------------------------------------------------------------------------------- | --------- |
+| `intelligent-query-builder` | Build optimized queries automatically                                           | All       |
+| `discover-related-topics`   | Discover related topics and connections                                         | All       |
+| `get-query-recommendation`  | Get intent-based tool and entity-type recommendation for a question (Discovery) | Discovery |
+
+When **Discovery Tools** are enabled (`MS365_MCP_ENABLE_DISCOVERY_TOOLS=true`), `get-query-recommendation` returns suggested tools, recommended entity types for search, optimized query, and query analysis markdown. Use it before calling search or other tools to align with NLP intent.
 
 #### Collaboration Intelligence Tools
 

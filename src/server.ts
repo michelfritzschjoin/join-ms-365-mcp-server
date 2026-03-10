@@ -17,10 +17,12 @@ function debugLog(data: Record<string, unknown>): void {
 }
 // #endregion
 import { registerAuthTools } from './auth-tools.js';
+import { registerCapabilityTools } from './capability-tools.js';
 import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
 import { registerDiscoveryTools as registerIntelligentDiscoveryTools } from './discovery-tools.js';
 import { registerCompoundTools } from './compound-tools.js';
 import { registerSuperTools } from './super-tools.js';
+import { exampleQuestionsCategories } from './data/example-questions.js';
 import { ensureLearningSystemInitialized } from './discovery-tools.js';
 import GraphClient from './graph-client.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
@@ -663,6 +665,7 @@ class MicrosoftGraphServer {
     const shouldRegisterAuthTools = !this.options.http || this.options.enableAuthTools;
     if (shouldRegisterAuthTools) {
       registerAuthTools(this.server, this.authManager);
+      registerCapabilityTools(this.server);
     }
 
     if (this.options.discovery) {
@@ -2647,7 +2650,7 @@ class MicrosoftGraphServer {
         });
       });
 
-      // MCP capability guide (for LLMs and clients: tool usage, entity types, read-only/org-mode)
+      // MCP capability guide (for LLMs and clients: tool usage, entity types, read-only/org-mode, example questions)
       app.get('/capabilities', (_req, res) => {
         const useSuperTools =
           process.env.MS365_MCP_USE_SUPER_TOOLS === 'true' ||
@@ -2679,6 +2682,12 @@ class MicrosoftGraphServer {
           readOnly,
           orgMode: orgMode ? 'Teams and SharePoint available' : 'Personal scope only',
           superToolsMode: useSuperTools,
+          exampleQuestions: exampleQuestionsCategories.map((cat) => ({
+            id: cat.id,
+            nameDe: cat.nameDe,
+            nameEn: cat.nameEn,
+            questions: cat.questions.map((q) => ({ de: q.de, en: q.en })),
+          })),
         });
       });
 
