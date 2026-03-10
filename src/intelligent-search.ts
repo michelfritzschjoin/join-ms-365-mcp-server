@@ -47,8 +47,87 @@ export class SearchFirstStrategy {
   }
 
   /**
+   * Build all query candidates for intelligent multi-query search (optimizer + synonym variants).
+   */
+  private buildQueryCandidates(
+    primaryQuery: string,
+    originalQuery: string,
+    optimizerVariants: string[]
+  ): string[] {
+    const seen = new Set<string>([primaryQuery.toLowerCase(), originalQuery.toLowerCase()]);
+    const candidates: string[] = [];
+
+    for (const v of optimizerVariants) {
+      const key = v.trim().toLowerCase();
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        candidates.push(v.trim());
+      }
+    }
+
+    const synonymVariants = this.synonymExpander.expandQuery(primaryQuery, 'search');
+    const maxSynonym = parseInt(process.env.MS365_MCP_SEARCH_MAX_SYNONYM_VARIANTS || '5', 10);
+    for (const v of synonymVariants.slice(0, maxSynonym)) {
+      const key = v.trim().toLowerCase();
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        candidates.push(v.trim());
+      }
+    }
+
+    return candidates.slice(0, 12);
+  }
+
+  /**
+   * Returns a stable key for a search hit resource (for deduplication).
+   */
+  private getResourceKey(resource: Record<string, unknown>): string {
+    const id = resource['id'];
+    if (typeof id === 'string') return id;
+    const webUrl = resource['webUrl'];
+    if (typeof webUrl === 'string') return webUrl;
+    return JSON.stringify(resource);
+  }
+
+  /**
+   * Merge search results from multiple queries and deduplicate by resource key.
+   */
+  private mergeSearchResults(
+    base: SearchResult,
+    additional: SearchResult[],
+    maxItems: number
+  ): void {
+    const keySet = new Set<string>();
+    for (const item of base.items) {
+      if (typeof item === 'object' && item !== null) {
+        keySet.add(this.getResourceKey(item as Record<string, unknown>));
+      }
+    }
+
+    for (const result of additional) {
+      for (const item of result.items) {
+        if (base.items.length >= maxItems) break;
+        if (typeof item !== 'object' || item === null) continue;
+        const key = this.getResourceKey(item as Record<string, unknown>);
+        if (!keySet.has(key)) {
+          keySet.add(key);
+          base.items.push(item);
+        }
+      }
+      for (const source of result.sources) {
+        if (source && !base.sources.includes(source)) {
+          base.sources.push(source);
+        }
+      }
+    }
+
+    base.totalResults = base.items.length;
+  }
+
+  /**
    * Execute search-first strategy
-   * Uses automatic query optimization first, then optimizer variants, then query refiner on no results.
+   * Uses automatic query optimization, then tries multiple query variants (optimizer + synonyms).
+   * Optionally enriches results by running synonym queries in parallel when primary returns few results.
    */
   async execute(query: string, context?: SearchContext): Promise<SearchFirstResult> {
     logger.info(`Executing search-first strategy for query: "${query}"`);
@@ -67,14 +146,21 @@ export class SearchFirstStrategy {
     // 2. Extract entities and keywords from search results
     const extractedInfo = this.entityExtractor.extractFromResults(searchResults.items);
 
-    // 3. If no results, try optimizer variants first, then query refiner
-    if (searchResults.items.length === 0) {
-      const variantsToTry = [
-        ...optimized.variants,
-        ...(await this.queryRefiner.refineQuery(query, true, context)).slice(1),
-      ];
+    // 3a. Build intelligent query candidates (optimizer + synonym variants)
+    const variantsToTry = this.buildQueryCandidates(searchQuery, query, optimized.variants);
 
-      for (const variantQuery of variantsToTry) {
+    // 3b. If no results, try variant queries (synonyms, cross-language, etc.)
+    if (searchResults.items.length === 0) {
+      const refinerQueries = (await this.queryRefiner.refineQuery(query, true, context)).slice(1);
+      const allCandidates = [...variantsToTry];
+      for (const r of refinerQueries) {
+        const key = r.trim().toLowerCase();
+        if (key && key !== searchQuery.toLowerCase() && key !== query.toLowerCase()) {
+          allCandidates.push(r.trim());
+        }
+      }
+
+      for (const variantQuery of allCandidates) {
         if (variantQuery === searchQuery || variantQuery === query) continue;
         const refinedResults = await this.executeSearchQuery(variantQuery, context);
         if (refinedResults.items.length > 0) {
@@ -86,6 +172,35 @@ export class SearchFirstStrategy {
           const newExtracted = this.entityExtractor.extractFromResults(refinedResults.items);
           this.mergeExtractedInfo(extractedInfo, newExtracted);
           break;
+        }
+      }
+    } else if (
+      process.env.MS365_MCP_SEARCH_INTELLIGENT_MERGE !== 'false' &&
+      variantsToTry.length > 0
+    ) {
+      // 3c. Optional: enrich with synonym/variant queries when primary returned few results
+      const mergeThreshold = parseInt(
+        process.env.MS365_MCP_SEARCH_SYNONYM_MERGE_THRESHOLD || '5',
+        10
+      );
+      const maxResults =
+        context?.maxResults ?? parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
+
+      if (searchResults.items.length < mergeThreshold) {
+        const parallelQueries = variantsToTry.slice(0, 2);
+        const extraResults = await Promise.all(
+          parallelQueries.map((q) => this.executeSearchQuery(q, context))
+        );
+        const withResults = extraResults.filter((r) => r.items.length > 0);
+        if (withResults.length > 0) {
+          logger.info(
+            `Intelligent merge: primary had ${searchResults.items.length} items, merging ${withResults.length} synonym query result(s)`
+          );
+          this.mergeSearchResults(searchResults, withResults, maxResults);
+          for (const r of withResults) {
+            const newExtracted = this.entityExtractor.extractFromResults(r.items);
+            this.mergeExtractedInfo(extractedInfo, newExtracted);
+          }
         }
       }
     }

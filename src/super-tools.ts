@@ -46,6 +46,7 @@ import {
   getUserId,
 } from './request-context.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
+import { formatEmailSearchQuery, extractEmailFromSearch } from './utils/search-query-format.js';
 import {
   isLoopFile,
   detectLoopFile,
@@ -156,18 +157,10 @@ function formatSearchQuery(
   // For better results, we can use simple text search or specific properties
   let formattedSearch: string;
   if (searchType === 'email') {
-    // When query looks like a person name (no KQL prefix, 1–4 words): use from: for "emails from X"
-    const looksLikePersonName =
-      !propertyMatch &&
-      /^[\wäöüßÄÖÜ\s.-]+$/.test(trimmedValue) &&
-      trimmedValue.split(/\s+/).length >= 1 &&
-      trimmedValue.split(/\s+/).length <= 4;
-    if (looksLikePersonName) {
-      formattedSearch = `from:${trimmedValue}`;
-    } else {
-      formattedSearch = trimmedValue; // Plain text search (from, subject, body)
-    }
-  } else if (searchType === 'event') {
+    // Use shared intelligent formatting (from:/to: for person names, "an X"/"to X" → to:)
+    return formatEmailSearchQuery(trimmedValue);
+  }
+  if (searchType === 'event') {
     // For events, use simple text search (searches in subject, body, attendees, etc.)
     formattedSearch = trimmedValue; // Simple text search searches all event fields
   } else if (searchType === 'contact') {
@@ -1635,8 +1628,28 @@ async function handleEmail(
       if (input.orderby) params.$orderby = input.orderby;
       if (input.skip) params.$skip = String(input.skip);
 
-      const result = await callGraph(graphClient, 'GET', endpoint, params);
-      const parsedResult = JSON.parse(result);
+      let result = await callGraph(graphClient, 'GET', endpoint, params);
+      let parsedResult = JSON.parse(result);
+
+      // Fallback: if search returns 0 results and query contains an email, retry with from:email only
+      if (input.search && (parsedResult?.value?.length ?? 0) === 0) {
+        const fallbackEmail = extractEmailFromSearch(params.$search ?? input.search);
+        if (fallbackEmail) {
+          const fallbackParams = {
+            ...params,
+            $search: formatEmailSearchQuery(`from:${fallbackEmail}`),
+          };
+          delete (fallbackParams as Record<string, unknown>).$filter;
+          const fallbackResult = await callGraph(graphClient, 'GET', endpoint, fallbackParams);
+          const fallbackParsed = JSON.parse(fallbackResult);
+          if ((fallbackParsed?.value?.length ?? 0) > 0) {
+            parsedResult = fallbackParsed;
+            result = fallbackResult;
+            thinking.push(`🔄 Fallback: retried with from:${fallbackEmail} and found messages`);
+          }
+        }
+      }
+
       const executionTime = Date.now() - startTime;
 
       // Extract pagination info
@@ -1918,8 +1931,29 @@ async function handleEmail(
         thinking.push(`📅 Applying date filter: after ${dateFilter}`);
       }
 
-      const result = await callGraph(graphClient, 'GET', '/me/messages', params);
-      const parsedResult = JSON.parse(result);
+      let result = await callGraph(graphClient, 'GET', '/me/messages', params);
+      let parsedResult = JSON.parse(result);
+
+      // Fallback: if composite query returns 0 results and query contains an email, retry with from:email only
+      const hitCount = parsedResult?.value?.length ?? 0;
+      const fallbackEmail = extractEmailFromSearch(params.$search ?? input.search ?? '');
+      if (hitCount === 0 && fallbackEmail) {
+        const fallbackParams = {
+          ...params,
+          $search: formatEmailSearchQuery(`from:${fallbackEmail}`),
+        };
+        delete (fallbackParams as Record<string, unknown>).$filter;
+        const fallbackResult = await callGraph(graphClient, 'GET', '/me/messages', fallbackParams);
+        const fallbackParsed = JSON.parse(fallbackResult);
+        if ((fallbackParsed?.value?.length ?? 0) > 0) {
+          parsedResult = fallbackParsed;
+          result = fallbackResult;
+          thinking.push(
+            `🔄 Fallback: 0 results for combined query; retried with from:${fallbackEmail} and found messages`
+          );
+        }
+      }
+
       const executionTime = Date.now() - startTime;
 
       // Record optimization result for learning

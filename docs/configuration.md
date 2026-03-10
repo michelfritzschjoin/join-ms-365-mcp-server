@@ -51,6 +51,16 @@ All configuration is done through environment variables. Copy `.example.env` to 
 
 > **Note**: LLM optimization intelligently summarizes search results, extracting only the most relevant fields per entity type. This significantly reduces token usage while maintaining information quality. Set `MS365_MCP_LLM_OPTIMIZE=false` to disable and return full result objects.
 
+### Intelligent Search (Synonyms & Multi-Query)
+
+| Variable                                   | Description                                                                    | Default | Required |
+| ------------------------------------------ | ------------------------------------------------------------------------------ | ------- | -------- |
+| `MS365_MCP_SEARCH_INTELLIGENT_MERGE`       | When primary search returns few results, run synonym queries and merge         | `true`  | No       |
+| `MS365_MCP_SEARCH_SYNONYM_MERGE_THRESHOLD` | If primary result count is below this, synonym/variant queries are merged      | `5`     | No       |
+| `MS365_MCP_SEARCH_MAX_SYNONYM_VARIANTS`    | Max synonym-based query variants considered per search (business terms, DE/EN) | `5`     | No       |
+
+Search uses multiple query variants: optimizer variants (cross-language, typos, abbreviations), **SynonymExpander** (business terminology, e.g. Projekt/project, Meeting/Besprechung), and optional parallel merge when the first query returns few hits.
+
 ### HTTP Server Configuration
 
 | Variable                            | Description                            | Default                           | Required |
