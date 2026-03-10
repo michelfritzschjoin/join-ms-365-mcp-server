@@ -186,7 +186,7 @@
     "toolName": "get-calendar-view",
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
-    "llmTip": "PREFERRED for viewing all events! Shows ALL events (including recurring instances and shared calendars) within a date range. Requires startDateTime and endDateTime (defaults: 30 days past to 90 days future). Returns events where user is organizer OR attendee. Use $top=200 or fetchAllPages=true for large calendars."
+    "llmTip": "PREFERRED for viewing all events! Shows ALL events (including recurring instances and shared calendars) within a date range. Requires startDateTime and endDateTime (defaults: start and end of current day when omitted). Returns events where user is organizer OR attendee. Use $top=200 or fetchAllPages=true for large calendars."
   },
   {
     "pathPattern": "/me/calendars",

@@ -156,9 +156,17 @@ function formatSearchQuery(
   // For better results, we can use simple text search or specific properties
   let formattedSearch: string;
   if (searchType === 'email') {
-    // For emails, use simple text search (searches in subject, body, from, to, etc.)
-    // Or use specific property if needed: subject:, body:, from:, to:
-    formattedSearch = trimmedValue; // Simple text search searches all email fields
+    // When query looks like a person name (no KQL prefix, 1–4 words): use from: for "emails from X"
+    const looksLikePersonName =
+      !propertyMatch &&
+      /^[\wäöüßÄÖÜ\s.-]+$/.test(trimmedValue) &&
+      trimmedValue.split(/\s+/).length >= 1 &&
+      trimmedValue.split(/\s+/).length <= 4;
+    if (looksLikePersonName) {
+      formattedSearch = `from:${trimmedValue}`;
+    } else {
+      formattedSearch = trimmedValue; // Plain text search (from, subject, body)
+    }
   } else if (searchType === 'event') {
     // For events, use simple text search (searches in subject, body, attendees, etc.)
     formattedSearch = trimmedValue; // Simple text search searches all event fields
@@ -1623,7 +1631,7 @@ async function handleEmail(
         : '/me/messages';
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.filter) params.$filter = input.filter;
-      if (input.search) params.$search = formatSearchQuery(input.search);
+      if (input.search) params.$search = formatSearchQuery(input.search, 'displayName', 'email');
       if (input.orderby) params.$orderby = input.orderby;
       if (input.skip) params.$skip = String(input.skip);
 
@@ -1895,7 +1903,7 @@ async function handleEmail(
       }
 
       const params: Record<string, string> = {
-        $search: formatSearchQuery(optimized.optimizedQuery),
+        $search: formatSearchQuery(optimized.optimizedQuery, 'displayName', 'email'),
         $top: String(input.top || 25),
       };
 
@@ -2049,8 +2057,18 @@ const calendarSchema = z.object({
   eventId: z.string().optional().describe('Event ID (required for get)'),
   calendarId: z.string().optional().describe('Calendar ID (for specific-calendar action)'),
   // Date range for view and create-event
-  startDateTime: z.string().optional().describe('Start date/time (ISO format)'),
-  endDateTime: z.string().optional().describe('End date/time (ISO format)'),
+  startDateTime: z
+    .string()
+    .optional()
+    .describe(
+      'Start date/time (ISO format). When omitted for action "view", start of current day is used.'
+    ),
+  endDateTime: z
+    .string()
+    .optional()
+    .describe(
+      'End date/time (ISO format). When omitted for action "view", end of current day is used.'
+    ),
   // Timezone
   timezone: z
     .string()
@@ -2159,9 +2177,15 @@ async function handleCalendar(
 
     case 'view': {
       const now = new Date();
-      const defaultEnd = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
-      const startDateTime = input.startDateTime ?? now.toISOString();
-      const endDateTime = input.endDateTime ?? defaultEnd.toISOString();
+      // When no date/time is given: use current day (start and end of day UTC)
+      const startOfToday = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
+      );
+      const endOfToday = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
+      );
+      const startDateTime = input.startDateTime ?? startOfToday.toISOString();
+      const endDateTime = input.endDateTime ?? endOfToday.toISOString();
       thinking.push(`Getting calendar view from ${startDateTime} to ${endDateTime}`);
       const params: Record<string, string> = {
         startDateTime,

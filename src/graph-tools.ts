@@ -177,18 +177,22 @@ async function executeGraphTool(
     // For calendarView, add default date range if not provided (required parameters)
     if (tool.path.includes('/calendarView') || tool.alias === 'get-calendar-view') {
       if (!params['startDateTime']) {
-        // Default to 30 days in the past
-        const startDate = new Date();
-        startDate.setDate(startDate.getDate() - 30);
-        params['startDateTime'] = startDate.toISOString();
-        logger.info('Applied default startDateTime (30 days ago) for calendarView');
+        // Default to start of current day (UTC)
+        const now = new Date();
+        const startOfToday = new Date(
+          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
+        );
+        params['startDateTime'] = startOfToday.toISOString();
+        logger.info('Applied default startDateTime (start of current day) for calendarView');
       }
       if (!params['endDateTime']) {
-        // Default to 90 days in the future
-        const endDate = new Date();
-        endDate.setDate(endDate.getDate() + 90);
-        params['endDateTime'] = endDate.toISOString();
-        logger.info('Applied default endDateTime (90 days future) for calendarView');
+        // Default to end of current day (UTC)
+        const now = new Date();
+        const endOfToday = new Date(
+          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
+        );
+        params['endDateTime'] = endOfToday.toISOString();
+        logger.info('Applied default endDateTime (end of current day) for calendarView');
       }
     }
 
