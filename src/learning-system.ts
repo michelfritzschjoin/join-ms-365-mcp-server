@@ -281,6 +281,32 @@ export class LearningSystem {
   }
 
   /**
+   * Get suggested query variants from past successful searches (learned patterns).
+   * Returns queries that contained similar terms and previously returned results.
+   */
+  getSuggestedQueryVariants(query: string, limit = 5): string[] {
+    if (!this.learningEnabled || !query || query.trim().length === 0) {
+      return [];
+    }
+    const trimmed = query.trim().toLowerCase();
+    const words = trimmed.split(/\s+/).filter((w) => w.length > 2);
+    if (words.length === 0) return [];
+
+    const seen = new Set<string>([trimmed]);
+    const variants: string[] = [];
+    const pattern = words.slice(0, 2).join(' ');
+    const successful = this.knowledgeBase.getSuccessfulQueries(pattern, limit);
+    for (const s of successful) {
+      const q = s.query.trim().toLowerCase();
+      if (q && !seen.has(q) && q !== trimmed) {
+        seen.add(q);
+        variants.push(s.query.trim());
+      }
+    }
+    return variants.slice(0, limit);
+  }
+
+  /**
    * Get recommended entity types for a query
    */
   getRecommendedEntityTypes(query: string, context?: string): string[] {
