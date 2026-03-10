@@ -36,6 +36,9 @@ jobs:
       - name: Generate client code
         run: npm run generate
 
+      - name: Patch generated client
+        run: node bin/patch-generated-client.mjs
+
       - name: Build project
         run: npm run build
 
@@ -64,8 +67,3 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           event-type: release-published
-
-
-
-
-

@@ -14,7 +14,7 @@
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import GraphClient from './graph-client.js';
+import GraphClient, { type GraphBatchRequest } from './graph-client.js';
 import logger from './logger.js';
 import { addThinkingToResponse, isThinkingEnabled } from './thinking-process.js';
 import {
@@ -68,6 +68,7 @@ import {
   getProfessionGreeting,
 } from './response-formatter.js';
 import { findUser, findChatsWithUser, type GraphUser, type GraphChat } from './compound-tools.js';
+import { getLearningSystem } from './discovery-tools.js';
 import { encode as toonEncode } from '@toon-format/toon';
 import {
   getPatternBasedExtractor,
@@ -1252,7 +1253,19 @@ class RequestDeduplicator {
 const requestDeduplicator = new RequestDeduplicator();
 
 /**
- * Batch API calls with deduplication and error handling
+ * Build a relative Graph URL with optional query params (for batch requests).
+ */
+function buildGraphBatchUrl(path: string, queryParams?: Record<string, string>): string {
+  if (!queryParams || Object.keys(queryParams).length === 0) return path;
+  const qs = Object.entries(queryParams)
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+  return `${path}?${qs}`;
+}
+
+/**
+ * Batch API calls with deduplication and error handling (parallel per-request).
+ * Use graphClient.performBatch() for true Graph $batch when all calls are GETs.
  */
 async function batchAPICalls<T>(
   calls: Array<{
@@ -1414,6 +1427,26 @@ function addOptimizationThinking(thinking: string[], result: OptimizedQuery): vo
       thinking.push(`  📚 Used learned patterns from history`);
     }
   }
+}
+
+/**
+ * Build a short optimization summary for the LLM (included in search response when optimization ran).
+ */
+function buildOptimizationSummary(result: OptimizedQuery): string {
+  const parts: string[] = [];
+  if (result.originalQuery !== result.optimizedQuery) {
+    parts.push(`Query optimized: "${result.originalQuery}" → "${result.optimizedQuery}"`);
+  }
+  if (result.learnedFromHistory) {
+    parts.push('learned pattern from history');
+  }
+  if (result.optimizations.length > 0) {
+    parts.push(result.optimizations.map((s) => `${s.type}: ${s.description}`).join('; '));
+  }
+  if (result.variants.length > 0) {
+    parts.push(`${result.variants.length} variant(s) tried if no results`);
+  }
+  return parts.join('. ');
 }
 
 // Common schemas
@@ -4619,6 +4652,24 @@ async function handleSearch(
   }
 
   if (entityTypes.length === 0) {
+    const learningSystem = getLearningSystem();
+    if (learningSystem) {
+      try {
+        const recommended = learningSystem.getRecommendedEntityTypes(input.query, undefined);
+        if (recommended && recommended.length > 0) {
+          const validated = validateEntityTypeCombinations(recommended);
+          if (validated.length > 0) {
+            entityTypes = validated as Array<(typeof searchEntityTypes)[number]>;
+            thinking.push(`📚 Learning System recommended entity types: ${entityTypes.join(', ')}`);
+          }
+        }
+      } catch (error) {
+        logger.debug('Learning system entity type recommendation failed', { error });
+      }
+    }
+  }
+
+  if (entityTypes.length === 0) {
     // Default: Use compatible entity types
     // File types are most versatile and commonly used, so prioritize them
     // Note: Message types (message, chatMessage) and file types cannot be combined
@@ -5170,6 +5221,85 @@ async function handleSearch(
       thinking.push('💡 Suggested next tools: ' + [...new Set(toolSuggestions)].join(', '));
     }
 
+    // Build structured suggestedNextTools for LLM/client (tool, action, IDs, reason)
+    type SuggestedNextTool = {
+      tool: string;
+      action?: string;
+      messageId?: string;
+      eventId?: string;
+      chatId?: string;
+      driveId?: string;
+      itemId?: string;
+      reason: string;
+    };
+    const suggestedNextTools: SuggestedNextTool[] = [];
+
+    for (const entityType of Object.keys(formattedResults)) {
+      const items = formattedResults[entityType] as Array<Record<string, unknown>>;
+      if (!items?.length) continue;
+      const first = items[0];
+      const id = first?.id as string | undefined;
+      if (!id) continue;
+      if (entityType.includes('message') && !entityType.includes('chat')) {
+        suggestedNextTools.push({
+          tool: 'email',
+          action: 'get',
+          messageId: id,
+          reason: 'Open this email for full content',
+        });
+      } else if (entityType.includes('event')) {
+        suggestedNextTools.push({
+          tool: 'calendar',
+          action: 'get',
+          eventId: id,
+          reason: 'Get full event details',
+        });
+      } else if (entityType.includes('chatMessage') || entityType.includes('chat')) {
+        const chatId = (first?.chatId ?? first?.parentReference?.id) as string | undefined;
+        if (chatId) {
+          suggestedNextTools.push({
+            tool: 'teams',
+            action: 'chat-messages',
+            chatId,
+            reason: 'View more messages in this chat',
+          });
+        }
+      } else if (entityType.includes('driveItem') || entityType.includes('listItem')) {
+        const driveId = first?.parentReference?.driveId as string | undefined;
+        suggestedNextTools.push({
+          tool: 'files',
+          action: 'get',
+          driveId: driveId ?? undefined,
+          itemId: id,
+          reason: 'Get file details or download',
+        });
+      }
+    }
+
+    // Add generic suggestions when no result-based ones
+    if (suggestedNextTools.length === 0) {
+      if (Object.keys(formattedResults).some((k) => k.includes('message'))) {
+        suggestedNextTools.push({ tool: 'email', action: 'list', reason: 'List more emails' });
+      }
+      if (Object.keys(formattedResults).some((k) => k.includes('event'))) {
+        suggestedNextTools.push({ tool: 'calendar', action: 'view', reason: 'View calendar' });
+      }
+      if (
+        Object.keys(formattedResults).some((k) => k.includes('driveItem') || k.includes('listItem'))
+      ) {
+        suggestedNextTools.push({ tool: 'files', action: 'search', reason: 'Search more files' });
+      }
+      if (Object.keys(formattedResults).some((k) => k.includes('chat'))) {
+        suggestedNextTools.push({ tool: 'teams', action: 'chats', reason: 'List Teams chats' });
+      }
+      if (suggestedNextTools.length === 0 && totalHits === 0) {
+        suggestedNextTools.push(
+          { tool: 'search', reason: 'Try a different query or entity types' },
+          { tool: 'assistant', action: 'discover', reason: 'Comprehensive discovery' }
+        );
+      }
+    }
+
     // =========================================================================
     // AUTOMATIC SUGGESTION EXECUTION - Execute suggested tools automatically
     // =========================================================================
@@ -5554,6 +5684,28 @@ async function handleSearch(
       }
     }
 
+    // Learning System: learn from this search (works without Discovery Tools when ensureLearningSystemInitialized was called)
+    const learningSystem = getLearningSystem();
+    if (learningSystem) {
+      try {
+        const items = Object.values(formattedResults).flat();
+        await learningSystem.learnFromSearch(
+          input.query,
+          {
+            items,
+            sources: Array.from(allSources),
+            query: input.query,
+            entityTypes,
+            totalResults: totalHits,
+          },
+          undefined,
+          entityTypes.join(',')
+        );
+      } catch (error) {
+        logger.debug('Learning system learnFromSearch failed', { error });
+      }
+    }
+
     const output: Record<string, unknown> = {
       query: input.query,
       language: {
@@ -5568,10 +5720,15 @@ async function handleSearch(
         temporal: decomposed.temporal,
         confidence: decomposed.confidence,
       },
+      ...(autoOptimizedQuery &&
+        autoOptimizedQuery.optimizations.length > 0 && {
+          optimizationSummary: buildOptimizationSummary(autoOptimizedQuery),
+        }),
       totalHits,
       entityTypes: Object.keys(formattedResults),
       results: formattedResults,
       suggestions: [...new Set(toolSuggestions)],
+      suggestedNextTools,
       sources: {
         importantDocuments,
         allSources: Array.from(allSources),
@@ -6452,46 +6609,48 @@ async function handleAssistant(
       const today = setStartOfDay(new Date());
       const todayEnd = setEndOfDay(new Date());
 
-      // Batch API calls with deduplication
-      const batchResults = await batchAPICalls([
+      const batchRequests: GraphBatchRequest[] = [
         {
-          key: `calendarView_${today.toISOString()}_${todayEnd.toISOString()}`,
-          description: "Today's calendar events",
-          operation: async () => {
-            const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
-              startDateTime: today.toISOString(),
-              endDateTime: todayEnd.toISOString(),
-            });
-            return JSON.parse(result);
-          },
+          id: 'calendar',
+          method: 'GET',
+          url: buildGraphBatchUrl('/me/calendarView', {
+            startDateTime: today.toISOString(),
+            endDateTime: todayEnd.toISOString(),
+          }),
         },
         {
-          key: 'messages_recent_10',
-          description: 'Recent emails',
-          operation: async () => {
-            const result = await callGraph(graphClient, 'GET', '/me/messages', {
-              $top: '10',
-              $orderby: 'receivedDateTime desc',
-            });
-            return JSON.parse(result);
-          },
+          id: 'messages',
+          method: 'GET',
+          url: buildGraphBatchUrl('/me/messages', {
+            $top: '10',
+            $orderby: 'receivedDateTime desc',
+          }),
         },
-      ]);
+      ];
 
-      // Process batch results
       const errors: ErrorInfo[] = [];
-      for (const batchResult of batchResults) {
-        if (batchResult.error) {
-          errors.push({
-            message: `${batchResult.description || batchResult.key} failed: ${batchResult.error.message}`,
-            retryable: true,
-            details: batchResult.error,
-          });
-        } else if (batchResult.description === "Today's calendar events") {
-          results.todayEvents = batchResult.result;
-        } else if (batchResult.description === 'Recent emails') {
-          results.recentEmails = batchResult.result;
+      try {
+        const batchResponses = await graphClient.performBatch(batchRequests);
+        for (const res of batchResponses) {
+          if (res.status >= 400) {
+            const desc = res.id === 'calendar' ? "Today's calendar events" : 'Recent emails';
+            errors.push({
+              message: `${desc} failed: ${res.status} ${typeof res.body === 'object' && res.body && 'error' in res.body ? JSON.stringify((res.body as { error: unknown }).error) : ''}`,
+              retryable: res.status === 429 || res.status === 503,
+              details: res.body,
+            });
+          } else if (res.id === 'calendar' && res.body) {
+            results.todayEvents = res.body as Record<string, unknown>;
+          } else if (res.id === 'messages' && res.body) {
+            results.recentEmails = res.body as Record<string, unknown>;
+          }
         }
+      } catch (err) {
+        errors.push({
+          message: err instanceof Error ? err.message : String(err),
+          retryable: isRetryableError(err),
+          details: err,
+        });
       }
 
       const executionTime = Date.now() - startTime;
@@ -6524,43 +6683,45 @@ async function handleAssistant(
       weekEnd.setDate(weekEnd.getDate() + 7);
       const weekEndTime = setEndOfDay(weekEnd);
 
-      // Batch API calls with deduplication
-      const batchResults = await batchAPICalls([
+      const batchRequestsWeek: GraphBatchRequest[] = [
         {
-          key: `calendarView_${today.toISOString()}_${weekEndTime.toISOString()}`,
-          description: 'Week calendar events',
-          operation: async () => {
-            const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
-              startDateTime: today.toISOString(),
-              endDateTime: weekEndTime.toISOString(),
-            });
-            return JSON.parse(result);
-          },
+          id: 'calendar',
+          method: 'GET',
+          url: buildGraphBatchUrl('/me/calendarView', {
+            startDateTime: today.toISOString(),
+            endDateTime: weekEndTime.toISOString(),
+          }),
         },
         {
-          key: 'todo_lists',
-          description: 'To-Do lists',
-          operation: async () => {
-            const result = await callGraph(graphClient, 'GET', '/me/todo/lists');
-            return JSON.parse(result);
-          },
+          id: 'todo',
+          method: 'GET',
+          url: '/me/todo/lists',
         },
-      ]);
+      ];
 
-      // Process batch results
       const errors: ErrorInfo[] = [];
-      for (const batchResult of batchResults) {
-        if (batchResult.error) {
-          errors.push({
-            message: `${batchResult.description || batchResult.key} failed: ${batchResult.error.message}`,
-            retryable: true,
-            details: batchResult.error,
-          });
-        } else if (batchResult.description === 'Week calendar events') {
-          results.weekEvents = batchResult.result;
-        } else if (batchResult.description === 'To-Do lists') {
-          results.tasks = batchResult.result;
+      try {
+        const batchResponses = await graphClient.performBatch(batchRequestsWeek);
+        for (const res of batchResponses) {
+          if (res.status >= 400) {
+            const desc = res.id === 'calendar' ? 'Week calendar events' : 'To-Do lists';
+            errors.push({
+              message: `${desc} failed: ${res.status} ${typeof res.body === 'object' && res.body && 'error' in res.body ? JSON.stringify((res.body as { error: unknown }).error) : ''}`,
+              retryable: res.status === 429 || res.status === 503,
+              details: res.body,
+            });
+          } else if (res.id === 'calendar' && res.body) {
+            results.weekEvents = res.body as Record<string, unknown>;
+          } else if (res.id === 'todo' && res.body) {
+            results.tasks = res.body as Record<string, unknown>;
+          }
         }
+      } catch (err) {
+        errors.push({
+          message: err instanceof Error ? err.message : String(err),
+          retryable: isRetryableError(err),
+          details: err,
+        });
       }
 
       const executionTime = Date.now() - startTime;
@@ -8390,7 +8551,7 @@ export function registerSuperTools(
   // 0. SEARCH (Microsoft 365 Unified Search - RECOMMENDED FIRST TOOL)
   server.tool(
     'search',
-    'Microsoft 365 Unified Search - USE THIS FIRST to find content across all Microsoft 365 services (emails, calendar events, files, SharePoint sites, Teams messages, people). Returns unified results from multiple sources and suggests which specific tools to use next for detailed operations. Supports natural language queries and keyword searches across entity types: message (emails), event (calendar), driveItem (files), site, list, listItem, chatMessage, person, acronym, bookmark, qna, externalItem.',
+    'Recommended first tool for any Microsoft 365 question. Use search before email, calendar, files, or teams to find content across all M365 services (emails, calendar events, files, SharePoint, Teams messages, people). Returns unified results and suggestedNextTools with exact parameters for the next call. When to use: start here for "find X", "emails about Y", "meetings with Z", or cross-product discovery. Entity types: message, event, driveItem, site, list, listItem, chatMessage, person.',
     searchSchema.shape,
     async (input: SearchInput) => {
       try {
@@ -8459,7 +8620,7 @@ export function registerSuperTools(
   // 3. Teams
   server.tool(
     'teams',
-    'Unified Teams operations: teams, channels, chats, messages',
+    'Unified Teams operations: list teams, channels, chats, and chat messages. When to use: after search finds chatMessage results, or when user asks for Teams chats/channels by name.',
     teamsSchema.shape,
     async (input: TeamsInput) => {
       try {
@@ -8482,7 +8643,7 @@ export function registerSuperTools(
   // 4. Files
   server.tool(
     'files',
-    'Unified file operations: drives, list files, get file, download, search',
+    'Unified OneDrive/file operations: list drives, list files, get file, download, search. When to use: after search finds driveItem/listItem, or when user asks for files in a folder or by name.',
     filesSchema.shape,
     async (input: FilesInput) => {
       try {
@@ -8505,7 +8666,7 @@ export function registerSuperTools(
   // 5. Tasks
   server.tool(
     'tasks',
-    'Unified task operations: To-Do lists/tasks, Planner plans/tasks',
+    'Unified task operations: To-Do lists/tasks, Planner plans/tasks. When to use: user asks for tasks, to-do, or planner; or after assistant my-week shows task lists.',
     tasksSchema.shape,
     async (input: TasksInput) => {
       try {
@@ -8528,7 +8689,7 @@ export function registerSuperTools(
   // 6. Contacts
   server.tool(
     'contacts',
-    'Unified contact operations: contacts, users, current user, search',
+    'Unified contact and user operations: list contacts, users, current user, search. When to use: resolve recipient names/emails before send-mail, or list org users.',
     contactsSchema.shape,
     async (input: ContactsInput) => {
       try {
@@ -8551,7 +8712,7 @@ export function registerSuperTools(
   // 7. Meetings
   server.tool(
     'meetings',
-    'Unified meeting operations: online meetings, recordings, transcripts',
+    'Unified online meeting operations: list meetings, get meeting, transcripts, recordings. When to use: user asks for meeting transcript or recording; requires org-mode and appropriate permissions.',
     meetingsSchema.shape,
     async (input: MeetingsInput) => {
       try {
@@ -8574,7 +8735,7 @@ export function registerSuperTools(
   // 8. SharePoint
   server.tool(
     'sharepoint',
-    'Unified SharePoint operations: sites, drives, lists, items',
+    'Unified SharePoint operations: search sites, get site, site drives, site lists. When to use: after search finds site/listItem, or when user asks for SharePoint sites or lists.',
     sharepointSchema.shape,
     async (input: SharePointInput) => {
       try {
@@ -8597,7 +8758,7 @@ export function registerSuperTools(
   // 9. Notes (OneNote)
   server.tool(
     'notes',
-    'Unified OneNote operations: notebooks, sections, pages, content',
+    'Unified OneNote operations: notebooks, sections, pages, page content. When to use: user asks for OneNote notes or notebooks by name.',
     notesSchema.shape,
     async (input: NotesInput) => {
       try {
@@ -8620,7 +8781,7 @@ export function registerSuperTools(
   // 10. Assistant
   server.tool(
     'assistant',
-    'Smart assistant: natural language queries, search everything, daily/weekly summaries, person info, project overview, follow-ups, meeting prep',
+    'Use for my-day, my-week, discover, follow-ups, person-info, project-overview (high-level summaries and discovery). For specific operations (list emails, get one event, send mail, list files) use the domain tools: email, calendar, files, teams, tasks. When to use: daily/weekly digest, "everything about X", or multi-source overview; otherwise prefer search first, then email/calendar/files/teams.',
     assistantSchema.shape,
     async (input: AssistantInput) => {
       try {

@@ -111,6 +111,33 @@ function initializeDiscoveryComponents(graphClient: GraphClient, secrets: AppSec
 }
 
 /**
+ * Initialize only the Learning System (and dependencies) for use without Discovery Tools.
+ * Call when Super-Tools or Classic mode is used and MS365_MCP_LEARNING_ENABLED is true.
+ * Idempotent: if already initialized, does nothing.
+ */
+export function ensureLearningSystemInitialized(): void {
+  if (learningSystemInstance !== null) {
+    return;
+  }
+  const knowledgeBase = new KnowledgeBase();
+  const synonymExpander = new SynonymExpander();
+  const learningSystem = new LearningSystem(knowledgeBase, synonymExpander);
+  knowledgeBaseInstance = knowledgeBase;
+  learningSystemInstance = learningSystem;
+  logger.info(
+    'Learning System initialized (standalone, without Discovery Tools). Pattern and entity-type learning will be used by Search/Assistant.'
+  );
+}
+
+/**
+ * Return the Learning System instance if it has been initialized (Discovery or standalone).
+ * Use from Super-Tools search handler to record learnFromSearch and getRecommendedEntityTypes.
+ */
+export function getLearningSystem(): LearningSystem | null {
+  return learningSystemInstance;
+}
+
+/**
  * Register all discovery tools
  */
 export function registerDiscoveryTools(

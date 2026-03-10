@@ -80,8 +80,6 @@ export function generateMcpTools(openApiSpec, outputDir) {
     clientCode = clientCode.replace(/: 'binary'/g, ": 'json'");
 
     // Fix: get-chat endpoint — codegen can produce unterminated template literal and merged send_mail body/response
-    const brokenGetChat =
-      /\{\s*method: 'get',\s*path: '\/chats\/:chatId',\s*alias: 'get-chat',\s*description: `[^`]*\\\\`, requestFormat: 'json', parameters: \[\s*\{\s*name: '\$select',[\s\S]*?\},\s*\{\s*name: '\$expand',[\s\S]*?\},\s*\], response: z\.`,\s*type: 'Body',\s*schema: send_mail_Body,\s*\},\s*\],\s*response: z\.void\(\)\s*\},\s*\]\s*\)\s*;/;
     const fixedGetChat = `{
     method: 'get',
     path: '/chats/:chatId',
@@ -103,8 +101,15 @@ export function generateMcpTools(openApiSpec, outputDir) {
     response: z.lazy(() => microsoft_graph_chat),
   },
 ]);`;
-    if (brokenGetChat.test(clientCode)) {
-      clientCode = clientCode.replace(brokenGetChat, fixedGetChat);
+    const brokenGetChatWithSendMail =
+      /\{\s*method: 'get',\s*path: '\/chats\/:chatId',\s*alias: 'get-chat',\s*description: `[^`]*\\\\`, requestFormat: 'json', parameters: \[\s*\{\s*name: '\$select',[\s\S]*?\},\s*\{\s*name: '\$expand',[\s\S]*?\},\s*\], response: z\.`,\s*type: 'Body',\s*schema: send_mail_Body,\s*\},\s*\],\s*response: z\.void\(\)\s*\},\s*\]\s*\)\s*;/;
+    const brokenGetChatAny =
+      /\{\s*method: 'get',\s*path: '\/chats\/:chatId'[\s\S]*?response: z\.`[\s\S]*?\]\s*\)\s*;/;
+    if (brokenGetChatWithSendMail.test(clientCode)) {
+      clientCode = clientCode.replace(brokenGetChatWithSendMail, fixedGetChat);
+      console.log('Applied get-chat endpoint fix (unterminated template literal, with send_mail).');
+    } else if (brokenGetChatAny.test(clientCode)) {
+      clientCode = clientCode.replace(brokenGetChatAny, fixedGetChat);
       console.log('Applied get-chat endpoint fix (unterminated template literal).');
     }
 

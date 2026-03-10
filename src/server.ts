@@ -21,6 +21,7 @@ import { registerGraphTools, registerDiscoveryTools } from './graph-tools.js';
 import { registerDiscoveryTools as registerIntelligentDiscoveryTools } from './discovery-tools.js';
 import { registerCompoundTools } from './compound-tools.js';
 import { registerSuperTools } from './super-tools.js';
+import { ensureLearningSystemInitialized } from './discovery-tools.js';
 import GraphClient from './graph-client.js';
 import AuthManager, { buildScopesFromEndpoints } from './auth.js';
 import KnowledgeBase from './knowledge-base.js';
@@ -681,6 +682,12 @@ class MicrosoftGraphServer {
       if (useSuperTools) {
         // Super-Tools mode: 10 consolidated tools instead of 126+
         logger.info('Super-Tools mode enabled - registering 10 consolidated tools');
+        const learningEnabled =
+          process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
+          process.env.MS365_MCP_LEARNING_ENABLED !== '0';
+        if (learningEnabled) {
+          ensureLearningSystemInitialized();
+        }
         registerSuperTools(this.server, this.graphClient, this.options.readOnly, this.secrets);
       } else {
         // Classic mode: register all individual tools
@@ -718,15 +725,17 @@ class MicrosoftGraphServer {
       }
       registerIntelligentDiscoveryTools(this.server, this.graphClient, this.secrets);
     } else {
-      // Warn if learning is enabled but discovery tools are not
+      // When Discovery Tools are not enabled: Learning can still run in Super-Tools mode (already initialized above)
       const learningEnabled =
         process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
         process.env.MS365_MCP_LEARNING_ENABLED !== '0';
-
-      if (learningEnabled && process.env.MS365_MCP_LEARNING_ENABLED) {
-        logger.warn(
-          'MS365_MCP_LEARNING_ENABLED is set but Learning System requires Discovery Tools! ' +
-            'Set MS365_MCP_ENABLE_DISCOVERY_TOOLS=true to activate the Learning System.'
+      const useSuperTools =
+        process.env.MS365_MCP_USE_SUPER_TOOLS === 'true' ||
+        process.env.MS365_MCP_USE_SUPER_TOOLS === '1';
+      if (learningEnabled && !useSuperTools) {
+        logger.info(
+          'Learning is enabled. For Learning with Super-Tools only, use MS365_MCP_USE_SUPER_TOOLS=true. ' +
+            'For full Discovery + Learning, set MS365_MCP_ENABLE_DISCOVERY_TOOLS=true.'
         );
       }
     }
@@ -2632,8 +2641,44 @@ class MicrosoftGraphServer {
             token: '/token',
             oauthDiscovery: '/.well-known/oauth-authorization-server',
             protectedResourceDiscovery: '/.well-known/oauth-protected-resource',
+            capabilities: '/capabilities',
             ...(isDashboardEnabled() ? { dashboard: '/dashboard' } : {}),
           },
+        });
+      });
+
+      // MCP capability guide (for LLMs and clients: tool usage, entity types, read-only/org-mode)
+      app.get('/capabilities', (_req, res) => {
+        const useSuperTools =
+          process.env.MS365_MCP_USE_SUPER_TOOLS === 'true' ||
+          process.env.MS365_MCP_USE_SUPER_TOOLS === '1';
+        const readOnly =
+          process.env.READ_ONLY === '1' ||
+          process.env.READ_ONLY === 'true' ||
+          process.env.MS365_MCP_READ_ONLY === 'true';
+        const orgMode =
+          process.env.MS365_MCP_ORG_MODE === 'true' || process.env.MS365_MCP_ORG_MODE === '1';
+        res.json({
+          toolUsageGuide:
+            'Use search first for any Microsoft 365 question; then use suggestedNextTools or domain tools (email, calendar, files, teams, tasks, sharepoint, notes, contacts, meetings, assistant) with the suggested action and parameters. For daily/weekly summaries use assistant with action my-day or my-week.',
+          firstTool: 'search',
+          supportedEntityTypes: [
+            'message',
+            'event',
+            'driveItem',
+            'site',
+            'list',
+            'listItem',
+            'chatMessage',
+            'person',
+            'acronym',
+            'bookmark',
+            'qna',
+            'externalItem',
+          ],
+          readOnly,
+          orgMode: orgMode ? 'Teams and SharePoint available' : 'Personal scope only',
+          superToolsMode: useSuperTools,
         });
       });
 

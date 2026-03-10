@@ -122,11 +122,18 @@ export class SearchFirstStrategy {
         context?.entityTypes ||
         this.learningSystem.getRecommendedEntityTypes(query, context?.sources?.join(','));
 
-      // If no specific types recommended, use comprehensive default set
+      // If no specific types recommended, use default (configurable via MS365_MCP_SEARCH_DEFAULT_ENTITY_TYPES)
       if (!recommendedEntityTypes || recommendedEntityTypes.length === 0) {
-        // Use compatible file types as default (most versatile)
-        recommendedEntityTypes = ['driveItem', 'site', 'list', 'listItem'];
-        logger.debug('Using comprehensive default entity types for search');
+        const envDefault = process.env.MS365_MCP_SEARCH_DEFAULT_ENTITY_TYPES;
+        recommendedEntityTypes = envDefault
+          ? envDefault
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : ['message', 'event', 'driveItem', 'site', 'list', 'listItem'];
+        logger.debug('Using default entity types for search', {
+          types: recommendedEntityTypes,
+        });
       }
 
       // Validate entity types to ensure compatibility

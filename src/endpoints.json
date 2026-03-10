@@ -10,7 +10,8 @@
     "pathPattern": "/me/mailFolders",
     "method": "get",
     "toolName": "list-mail-folders",
-    "scopes": ["Mail.Read"]
+    "scopes": ["Mail.Read"],
+    "llmTip": "Returns folder IDs. Use list-mail-folder-messages with mailFolder-id to list messages in a folder."
   },
   {
     "pathPattern": "/me/mailFolders/{mailFolder-id}/messages",
@@ -23,7 +24,8 @@
     "pathPattern": "/me/messages/{message-id}",
     "method": "get",
     "toolName": "get-mail-message",
-    "scopes": ["Mail.Read"]
+    "scopes": ["Mail.Read"],
+    "llmTip": "Use message-id from list-mail-messages or from search/email tool results. Do not guess IDs."
   },
   {
     "pathPattern": "/me/sendMail",
@@ -121,7 +123,8 @@
     "method": "get",
     "toolName": "get-calendar-event",
     "scopes": ["Calendars.Read"],
-    "supportsTimezone": true
+    "supportsTimezone": true,
+    "llmTip": "Use event-id from list-calendar-events or get-calendar-view. For a date range use get-calendar-view instead."
   },
   {
     "pathPattern": "/me/events",
@@ -189,19 +192,22 @@
     "pathPattern": "/me/calendars",
     "method": "get",
     "toolName": "list-calendars",
-    "scopes": ["Calendars.Read"]
+    "scopes": ["Calendars.Read"],
+    "llmTip": "Use to get calendar-id for list-specific-calendar-events. For all events in a date range use get-calendar-view (no calendar-id needed)."
   },
   {
     "pathPattern": "/me/findMeetingTimes",
     "method": "post",
     "toolName": "find-meeting-times",
-    "workScopes": ["Calendars.Read.Shared"]
+    "workScopes": ["Calendars.Read.Shared"],
+    "llmTip": "Requires start and end time. Use list-users to get attendee email addresses; pass attendees as array of {emailAddress: {address, name}}."
   },
   {
     "pathPattern": "/me/drives",
     "method": "get",
     "toolName": "list-drives",
-    "scopes": ["Files.Read"]
+    "scopes": ["Files.Read"],
+    "llmTip": "Returns drive IDs. Use get-drive-root-item or list-folder-files with drive-id and item-id from list results."
   },
   {
     "pathPattern": "/drives/{drive-id}/root",

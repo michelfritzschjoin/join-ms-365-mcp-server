@@ -733,6 +733,103 @@ export function createDashboardRouter(): Router {
     }
   });
 
+  // API: Get development insights for MCP server improvement
+  router.get('/api/development-insights', rateLimitMiddleware, requireAuth, (req, res) => {
+    try {
+      const days = Math.min(Math.max(parseInt((req.query.days as string) || '30', 10), 1), 365);
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - days);
+      const cutoffStr = cutoff.toISOString();
+
+      const allQueries = queryStore.getQueries({ limit: 100000 });
+      const recentQueries = allQueries.filter((q) => q.timestamp >= cutoffStr);
+
+      // Tools to improve: low success rate, sorted by impact (failures * total usage)
+      const toolStats: Record<
+        string,
+        { total: number; success: number; failed: number; totalDuration: number }
+      > = {};
+      for (const q of recentQueries) {
+        if (!toolStats[q.toolName]) {
+          toolStats[q.toolName] = { total: 0, success: 0, failed: 0, totalDuration: 0 };
+        }
+        const s = toolStats[q.toolName];
+        s.total++;
+        if (q.success) s.success++;
+        else s.failed++;
+        if (q.durationMs) s.totalDuration += q.durationMs;
+      }
+
+      const toolsToImprove = Object.entries(toolStats)
+        .filter(([, s]) => s.total >= 3 && s.total > 0)
+        .map(([tool, s]) => ({
+          tool,
+          totalQueries: s.total,
+          successRate: (s.success / s.total) * 100,
+          failedQueries: s.failed,
+          impact: s.failed, // failures to fix
+        }))
+        .filter((t) => t.successRate < 90)
+        .sort((a, b) => b.impact - a.impact)
+        .slice(0, 10);
+
+      // Top errors to fix (error message + tool, dedupe by normalized message)
+      const errorByTool: Record<string, Record<string, number>> = {};
+      for (const q of recentQueries) {
+        if (q.success) continue;
+        const msg = (q.errorMessage || 'Unknown error').substring(0, 200);
+        if (!errorByTool[q.toolName]) errorByTool[q.toolName] = {};
+        errorByTool[q.toolName][msg] = (errorByTool[q.toolName][msg] || 0) + 1;
+      }
+
+      const topErrorsToFix: Array<{ tool: string; error: string; count: number }> = [];
+      for (const [tool, errors] of Object.entries(errorByTool)) {
+        for (const [error, count] of Object.entries(errors)) {
+          topErrorsToFix.push({ tool, error, count });
+        }
+      }
+      topErrorsToFix.sort((a, b) => b.count - a.count);
+
+      // Slow tools (avg duration, only tools with enough data)
+      const slowToolsToOptimize = Object.entries(toolStats)
+        .filter(([, s]) => s.total >= 5)
+        .map(([tool, s]) => ({
+          tool,
+          averageDurationMs: Math.round(s.totalDuration / s.total),
+          totalQueries: s.total,
+        }))
+        .sort((a, b) => b.averageDurationMs - a.averageDurationMs)
+        .slice(0, 8);
+
+      // Rarely used tools (candidates for docs or deprecation)
+      const rareTools = Object.entries(toolStats)
+        .filter(([, s]) => s.total <= 5 && s.total > 0)
+        .map(([tool, s]) => ({ tool, totalQueries: s.total }))
+        .sort((a, b) => a.totalQueries - b.totalQueries)
+        .slice(0, 10);
+
+      // Quick wins: top 3 errors by count
+      const quickWins = topErrorsToFix.slice(0, 5).map((e) => ({
+        action: `Fix: "${e.error.substring(0, 60)}${e.error.length > 60 ? '…' : ''}" in ${e.tool}`,
+        tool: e.tool,
+        affectedRequests: e.count,
+      }));
+
+      res.json({
+        periodDays: days,
+        toolsToImprove,
+        topErrorsToFix: topErrorsToFix.slice(0, 15),
+        slowToolsToOptimize,
+        rareTools,
+        quickWins,
+        totalQueriesInPeriod: recentQueries.length,
+      });
+    } catch (error) {
+      logger.error('Error fetching development insights:', error);
+      res.status(500).json({ error: 'Failed to fetch development insights' });
+    }
+  });
+
   // API: Get success rate trends
   router.get('/api/success-trends', rateLimitMiddleware, requireAuth, (req, res) => {
     try {
@@ -1751,9 +1848,19 @@ function getDashboardPageHtml(): string {
 
     <!-- Overview Tab -->
     <div id="tab-overview" class="tab-content active">
-      <!-- Time Series Chart -->
+      <div class="chart-section" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+        <h3 style="margin-bottom: 0;">Queries im Zeitraum</h3>
+        <div class="filter-group" style="margin-bottom: 0;">
+          <label for="overviewDays">Zeitraum</label>
+          <select id="overviewDays" onchange="setOverviewDays(this.value); fetchTimeSeries();">
+            <option value="7">7 Tage</option>
+            <option value="30">30 Tage</option>
+            <option value="90">90 Tage</option>
+          </select>
+        </div>
+      </div>
       <div class="chart-section">
-        <h3>Queries der letzten 7 Tage</h3>
+        <h3 id="overviewChartTitle">Queries der letzten 7 Tage</h3>
         <div class="line-chart-container">
           <svg class="line-chart" id="timeSeriesChart"></svg>
         </div>
@@ -1909,23 +2016,47 @@ function getDashboardPageHtml(): string {
 
      <!-- Insights Tab -->
      <div id="tab-insights" class="tab-content">
+       <div class="chart-section" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;">
+         <h3 style="margin-bottom: 0;">Erkenntnisse Zeitraum</h3>
+         <div class="filter-group" style="margin-bottom: 0;">
+           <label for="insightsDays">Zeitraum</label>
+           <select id="insightsDays" onchange="setInsightsDays(this.value); fetchInsights();">
+             <option value="7">7 Tage</option>
+             <option value="30" selected>30 Tage</option>
+             <option value="90">90 Tage</option>
+           </select>
+         </div>
+       </div>
+
        <!-- Key Insights Cards -->
        <div class="stats-grid" style="margin-bottom: 24px;">
          <div class="stat-card" id="insightCard1">
-           <div class="stat-label">Erkenntnis 1</div>
+           <div class="stat-label">Trend Erfolgsrate</div>
            <div class="stat-value" style="font-size: 16px;">Lade...</div>
          </div>
          <div class="stat-card" id="insightCard2">
-           <div class="stat-label">Erkenntnis 2</div>
+           <div class="stat-label">Aktuelle Erfolgsrate</div>
            <div class="stat-value" style="font-size: 16px;">Lade...</div>
          </div>
          <div class="stat-card" id="insightCard3">
-           <div class="stat-label">Erkenntnis 3</div>
+           <div class="stat-label">Tools zu verbessern</div>
            <div class="stat-value" style="font-size: 16px;">Lade...</div>
          </div>
          <div class="stat-card" id="insightCard4">
-           <div class="stat-label">Erkenntnis 4</div>
+           <div class="stat-label">Schnelle Verbesserungen</div>
            <div class="stat-value" style="font-size: 16px;">Lade...</div>
+         </div>
+       </div>
+
+       <!-- Weiterentwicklung: Empfehlungen für MCP-Server -->
+       <div class="chart-section" style="border-left: 4px solid var(--accent);">
+         <h3>🛠️ Weiterentwicklung des MCP Servers</h3>
+         <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 20px;">Priorisierte Empfehlungen für Stabilität, Performance und Nutzererfahrung.</p>
+         <div id="developmentInsightsContainer" style="margin-top: 16px;">
+           <div class="loading">
+             <div class="loading-spinner"></div>
+             Lade Entwicklungs-Erkenntnisse...
+           </div>
          </div>
        </div>
 
@@ -1984,6 +2115,18 @@ function getDashboardPageHtml(): string {
     let totalQueries = 0;
     let filters = {};
     let currentTab = 'overview';
+    let overviewDays = 7;
+    let insightsDays = 30;
+
+    function setOverviewDays(days) {
+      overviewDays = parseInt(days, 10);
+      var title = document.getElementById('overviewChartTitle');
+      if (title) title.textContent = 'Queries der letzten ' + overviewDays + ' Tage';
+    }
+
+    function setInsightsDays(days) {
+      insightsDays = parseInt(days, 10);
+    }
 
      function switchTab(tabName, evt) {
        // Update tab buttons
@@ -1995,7 +2138,7 @@ function getDashboardPageHtml(): string {
        } else {
          // Find button by tab name
          const tabs = Array.from(document.querySelectorAll('.tab'));
-         const tabNames = ['overview', 'queries', 'tools', 'users', 'analytics'];
+         const tabNames = ['overview', 'queries', 'tools', 'users', 'analytics', 'insights'];
          const index = tabNames.indexOf(tabName);
          if (index >= 0 && tabs[index]) {
            tabs[index].classList.add('active');
@@ -2031,10 +2174,107 @@ function getDashboardPageHtml(): string {
            fetchPerformanceBottlenecks(),
            fetchUsagePatterns(),
            fetchSuccessTrends(),
+           fetchDevelopmentInsights(),
          ]);
        } catch (error) {
          console.error('Error fetching insights:', error);
        }
+     }
+
+     async function fetchDevelopmentInsights() {
+       try {
+         const res = await fetch('/dashboard/api/development-insights?days=' + insightsDays);
+         const data = await res.json();
+         renderDevelopmentInsights(data);
+         var card3 = document.getElementById('insightCard3');
+         var card4 = document.getElementById('insightCard4');
+         if (card3) {
+           card3.innerHTML = '<div class="stat-label">Tools zu verbessern</div>' +
+             '<div class="stat-value" style="font-size: 16px;">' + data.toolsToImprove.length + '</div>' +
+             '<div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Erfolgsrate &lt; 90%</div>';
+         }
+         if (card4) {
+           card4.innerHTML = '<div class="stat-label">Schnelle Verbesserungen</div>' +
+             '<div class="stat-value" style="font-size: 16px;">' + data.quickWins.length + '</div>' +
+             '<div style="font-size: 12px; color: var(--text-secondary); margin-top: 4px;">Top-Fehler zuerst beheben</div>';
+         }
+       } catch (error) {
+         console.error('Error fetching development insights:', error);
+         var container = document.getElementById('developmentInsightsContainer');
+         if (container) container.innerHTML = '<div class="empty-state">Fehler beim Laden der Entwicklungs-Erkenntnisse.</div>';
+       }
+     }
+
+     function renderDevelopmentInsights(data) {
+       var container = document.getElementById('developmentInsightsContainer');
+       if (!container) return;
+
+       var html = '';
+
+       if (data.quickWins && data.quickWins.length > 0) {
+         html += '<h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Schnelle Verbesserungen (höchster Impact)</h4>';
+         html += '<div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;">';
+         data.quickWins.forEach(function(win, i) {
+           html += '<div style="display: flex; align-items: flex-start; gap: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 8px;">';
+           html += '<span style="font-size: 12px; color: var(--text-muted); min-width: 24px;">#' + (i + 1) + '</span>';
+           html += '<div style="flex: 1;"><span class="tool-name">' + win.tool + '</span><div style="font-size: 13px; margin-top: 4px;">' + escapeHtml(win.action) + '</div></div>';
+           html += '<span style="font-size: 12px; font-weight: 600; color: var(--warning);">' + win.affectedRequests + ' betroffen</span>';
+           html += '</div>';
+         });
+         html += '</div>';
+       }
+
+       if (data.toolsToImprove && data.toolsToImprove.length > 0) {
+         html += '<h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Tools mit niedriger Erfolgsrate</h4>';
+         html += '<div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;">';
+         data.toolsToImprove.forEach(function(t) {
+           html += '<div style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--bg-tertiary); border-radius: 6px;">';
+           html += '<span class="tool-name">' + escapeHtml(t.tool) + '</span>';
+           html += '<span style="font-size: 13px;">' + t.successRate.toFixed(1) + '% Erfolg</span>';
+           html += '<span style="font-size: 12px; color: var(--error);">' + t.failedQueries + ' Fehler</span>';
+           html += '<span style="font-size: 12px; color: var(--text-muted);">' + t.totalQueries + ' Aufrufe</span>';
+           html += '</div>';
+         });
+         html += '</div>';
+       }
+
+       if (data.slowToolsToOptimize && data.slowToolsToOptimize.length > 0) {
+         html += '<h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Langsame Tools (optimieren)</h4>';
+         html += '<div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 24px;">';
+         data.slowToolsToOptimize.forEach(function(t) {
+           html += '<div style="display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--bg-tertiary); border-radius: 6px;">';
+           html += '<span class="tool-name">' + escapeHtml(t.tool) + '</span>';
+           html += '<span style="font-size: 13px;">Ø ' + t.averageDurationMs.toLocaleString('de-DE') + ' ms</span>';
+           html += '<span style="font-size: 12px; color: var(--text-muted);">' + t.totalQueries + ' Aufrufe</span>';
+           html += '</div>';
+         });
+         html += '</div>';
+       }
+
+       if (data.rareTools && data.rareTools.length > 0) {
+         html += '<h4 style="font-size: 14px; margin-bottom: 12px; color: var(--text-secondary);">Selten genutzte Tools</h4>';
+         html += '<p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">Kandidaten für bessere Dokumentation oder Überprüfung.</p>';
+         html += '<div style="display: flex; flex-wrap: wrap; gap: 8px;">';
+         data.rareTools.forEach(function(t) {
+           html += '<span class="tool-name" style="padding: 6px 10px;">' + escapeHtml(t.tool) + ' <span style="color: var(--text-muted);">(' + t.totalQueries + ')</span></span>';
+         });
+         html += '</div>';
+       }
+
+       if (!html) {
+         html = '<p style="color: var(--text-secondary);">Keine spezifischen Empfehlungen im gewählten Zeitraum. Mehr Daten sammeln oder Zeitraum erweitern.</p>';
+       } else {
+         html = '<p style="font-size: 12px; color: var(--text-muted); margin-bottom: 16px;">Zeitraum: ' + data.periodDays + ' Tage, ' + (data.totalQueriesInPeriod || 0).toLocaleString('de-DE') + ' Queries.</p>' + html;
+       }
+
+       container.innerHTML = html;
+     }
+
+     function escapeHtml(text) {
+       if (!text) return '';
+       var div = document.createElement('div');
+       div.textContent = text;
+       return div.innerHTML;
      }
 
      async function fetchErrorAnalysis() {
@@ -2270,7 +2510,8 @@ function getDashboardPageHtml(): string {
 
      async function fetchSuccessTrends() {
        try {
-         const res = await fetch('/dashboard/api/success-trends?days=30');
+         const days = typeof insightsDays !== 'undefined' ? insightsDays : 30;
+         const res = await fetch('/dashboard/api/success-trends?days=' + days);
          const data = await res.json();
          renderSuccessTrends(data);
        } catch (error) {
@@ -2394,7 +2635,8 @@ function getDashboardPageHtml(): string {
 
     async function fetchTimeSeries() {
       try {
-        const res = await fetch('/dashboard/api/timeseries?days=7');
+        const days = typeof overviewDays !== 'undefined' ? overviewDays : 7;
+        const res = await fetch('/dashboard/api/timeseries?days=' + days);
         const data = await res.json();
         renderTimeSeriesChart(data.timeseries);
       } catch (error) {
@@ -2808,6 +3050,8 @@ function getDashboardPageHtml(): string {
     function refreshData() {
       fetchStats();
       fetchQueries();
+      if (currentTab === 'overview') fetchTimeSeries();
+      if (currentTab === 'insights') fetchInsights();
     }
 
     async function logout() {

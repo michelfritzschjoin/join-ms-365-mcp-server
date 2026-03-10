@@ -11,6 +11,7 @@ import {
   ServiceUnavailableError,
   AuthenticationError,
   AuthorizationError,
+  NotFoundError,
   isRetryableError,
   getRetryAfter,
 } from './errors.js';
@@ -28,6 +29,23 @@ interface GraphRequestOptions {
   queryParams?: Record<string, string>;
 
   [key: string]: unknown;
+}
+
+/** Single request for Microsoft Graph JSON batching (POST /$batch). URL is relative to /v1.0 (e.g. /me/messages). */
+export interface GraphBatchRequest {
+  id: string;
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+  url: string;
+  body?: unknown;
+  headers?: Record<string, string>;
+}
+
+/** Single response from a batch request. */
+export interface GraphBatchResponse {
+  id: string;
+  status: number;
+  body?: unknown;
+  headers?: Record<string, string>;
 }
 
 interface ContentItem {
@@ -130,19 +148,29 @@ class GraphClient {
           const errorText = await response.text();
           let error: GraphApiError;
 
-          // Create appropriate error type
+          // Create appropriate error type with actionable next steps for LLM
+          if (response.status === 401) {
+            throw new AuthenticationError(
+              'Re-authenticate: use login or refresh token. If using CLI/stdio, call the "login" tool; if using OAuth, complete the authorization flow and retry. ' +
+                (errorText ? errorText.slice(0, 200) : ''),
+              response
+            );
+          }
           if (response.status === 403) {
-            if (errorText.includes('scope') || errorText.includes('permission')) {
-              error = new AuthorizationError(
-                `Microsoft Graph API scope error: ${response.status} ${response.statusText} - ${errorText}. This tool requires organization mode. Please restart with --org-mode flag.`,
-                response
-              );
-            } else {
-              error = new AuthorizationError(
-                `Microsoft Graph API error: ${response.status} ${response.statusText} - ${errorText}`,
-                response
-              );
-            }
+            const base =
+              errorText.includes('scope') || errorText.includes('permission')
+                ? `Microsoft Graph API scope error - ${errorText.slice(0, 300)}. This tool may require organization mode (--org-mode).`
+                : `Microsoft Graph API error: ${response.status} - ${errorText.slice(0, 300)}`;
+            error = new AuthorizationError(
+              base + ' Next step: Check Azure AD app permissions for this operation.',
+              response
+            );
+          } else if (response.status === 404) {
+            error = new NotFoundError(
+              'Recipient or resource not found. Next step: Use list-users or search to resolve user/email before sending; or verify the resource ID. ' +
+                (errorText ? errorText.slice(0, 200) : ''),
+              response
+            );
           } else if (response.status === 429) {
             const retryAfterHeader = response.headers.get('Retry-After');
             const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
@@ -360,6 +388,125 @@ class GraphClient {
       }
     }
     return JSON.stringify(data, null, pretty ? 2 : undefined);
+  }
+
+  /**
+   * Execute multiple Graph API requests in a single HTTP call using JSON batching.
+   * Uses POST /v1.0/$batch (max 20 requests per batch). Each request url must be
+   * relative to /v1.0 (e.g. /me/calendarView?startDateTime=...).
+   *
+   * @param requests - Array of batch requests (id, method, url, optional body/headers)
+   * @returns Array of responses in the same order as requests (id, status, body)
+   */
+  async performBatch(requests: GraphBatchRequest[]): Promise<GraphBatchResponse[]> {
+    if (requests.length === 0) return [];
+    if (requests.length > 20) {
+      throw new GraphApiError(
+        'Graph batch supports at most 20 requests per call. Split into multiple batches.',
+        400,
+        false
+      );
+    }
+
+    const contextTokens = getRequestTokens();
+    let accessToken: string | null = null;
+    try {
+      accessToken = contextTokens?.accessToken ?? (await this.authManager.getToken());
+    } catch (error) {
+      logger.debug('Token acquisition failed for batch', { error: (error as Error).message });
+    }
+    const refreshToken = contextTokens?.refreshToken;
+
+    if (!accessToken) {
+      throw new AuthenticationError(
+        'AUTHENTICATION REQUIRED: You are not logged in to Microsoft 365. ' +
+          'Call the "login" tool to authenticate or complete OAuth flow.'
+      );
+    }
+
+    const batchBody = {
+      requests: requests.map((r) => {
+        const req: {
+          id: string;
+          method: string;
+          url: string;
+          body?: unknown;
+          headers?: Record<string, string>;
+        } = {
+          id: r.id,
+          method: r.method,
+          url: r.url.startsWith('/') ? r.url : `/${r.url}`,
+        };
+        if (r.body !== undefined) {
+          req.body = r.body;
+          req.headers = { 'Content-Type': 'application/json', ...r.headers };
+        } else if (r.headers && Object.keys(r.headers).length > 0) {
+          req.headers = r.headers;
+        }
+        return req;
+      }),
+    };
+
+    const cloudEndpoints = getCloudEndpoints(this.secrets.cloudType);
+    const url = `${cloudEndpoints.graphApi}/v1.0/$batch`;
+    let response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(batchBody),
+    });
+
+    if (response.status === 401 && refreshToken) {
+      const newTokens = await this.refreshAccessToken(refreshToken);
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${newTokens.accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(batchBody),
+      });
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      if (response.status === 401) {
+        throw new AuthenticationError(
+          'Re-authenticate: use login or refresh token. ' + errorText,
+          undefined
+        );
+      }
+      if (response.status === 429) {
+        const retryAfterHeader = response.headers.get('Retry-After');
+        const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+        throw new RateLimitError(retryAfter, response);
+      }
+      throw new GraphApiError(
+        `Graph batch request failed: ${response.status} ${response.statusText} - ${errorText}`,
+        response.status,
+        false,
+        undefined,
+        response
+      );
+    }
+
+    const data = (await response.json()) as {
+      responses?: Array<{
+        id: string;
+        status: number;
+        body?: unknown;
+        headers?: Record<string, string>;
+      }>;
+    };
+    const responses = data.responses ?? [];
+    return responses.map((r) => ({
+      id: r.id,
+      status: r.status,
+      body: r.body,
+      headers: r.headers,
+    }));
   }
 
   async graphRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<McpResponse> {

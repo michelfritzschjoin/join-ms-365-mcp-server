@@ -38,8 +38,9 @@ export class RetryableError extends GraphApiError {
 
 export class RateLimitError extends RetryableError {
   constructor(retryAfter?: number, originalError?: unknown) {
+    const seconds = retryAfter ?? 'unknown';
     super(
-      `Microsoft Graph API rate limit exceeded. Retry after ${retryAfter || 'unknown'} seconds.`,
+      `Microsoft Graph API rate limit exceeded. Next step: Retry after ${seconds} seconds.`,
       429,
       retryAfter,
       originalError

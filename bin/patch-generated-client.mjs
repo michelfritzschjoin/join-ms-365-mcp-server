@@ -26,10 +26,8 @@ const original = content;
 content = content.replace(/: "binary"/g, ': "json"');
 content = content.replace(/: 'binary'/g, ": 'json'");
 
-// Fix: get-chat endpoint — codegen can produce unterminated template literal and merged send_mail body/response
-const brokenGetChat =
-  /\{\s*method: 'get',\s*path: '\/chats\/:chatId',\s*alias: 'get-chat',\s*description: `[^`]*\\\\`, requestFormat: 'json', parameters: \[\s*\{\s*name: '\$select',[\s\S]*?\},\s*\{\s*name: '\$expand',[\s\S]*?\},\s*\], response: z\.`,\s*type: 'Body',\s*schema: send_mail_Body,\s*\},\s*\],\s*response: z\.void\(\)\s*\},\s*\]\s*\)\s*;/;
-const fixedGetChat = `{
+// Fix: get-chat endpoint — codegen can produce unterminated template literal and merged send_mail body/response.
+const fixedGetChatBlock = `{
     method: 'get',
     path: '/chats/:chatId',
     alias: 'get-chat',
@@ -51,9 +49,58 @@ const fixedGetChat = `{
   },
 ]);`;
 
-if (brokenGetChat.test(content)) {
-  content = content.replace(brokenGetChat, fixedGetChat);
+// Match 1: broken get-chat with send_mail_Body in the same block (merged output).
+const getChatBrokenWithSendMail =
+  /\{\s*method: 'get',\s*path: '\/chats\/:chatId'[\s\S]*?response: z\.`[\s\S]*?send_mail_Body[\s\S]*?\]\s*\)\s*;/;
+// Match 2: broken get-chat with unterminated template literal, up to end of makeApi (]);).
+const getChatBrokenAny =
+  /\{\s*method: 'get',\s*path: '\/chats\/:chatId'[\s\S]*?response: z\.`[\s\S]*?\]\s*\)\s*;/;
+
+if (getChatBrokenWithSendMail.test(content)) {
+  content = content.replace(getChatBrokenWithSendMail, fixedGetChatBlock);
+  console.log(
+    'patch-generated-client: patched get-chat endpoint (unterminated template literal, with send_mail).'
+  );
+} else if (getChatBrokenAny.test(content)) {
+  content = content.replace(getChatBrokenAny, fixedGetChatBlock);
   console.log('patch-generated-client: patched get-chat endpoint (unterminated template literal).');
+} else if (content.includes("alias: 'get-chat'") && content.includes('response: z.`')) {
+  // Fallback: broken get-chat with unterminated literal but regex didn't match (format variation)
+  const makeApiStart = content.indexOf('const endpoints = makeApi([');
+  if (makeApiStart !== -1) {
+    const afterBracket = content.indexOf('\n  {', makeApiStart);
+    const makeApiEnd = content.indexOf(']);', afterBracket);
+    if (afterBracket !== -1 && makeApiEnd !== -1) {
+      const before = content.slice(0, afterBracket);
+      const after = content.slice(makeApiEnd);
+      content =
+        before +
+        `
+  {
+    method: 'get',
+    path: '/chats/:chatId',
+    alias: 'get-chat',
+    description: \`Get chat (without its messages). This supports federation. To access a chat, at least one chat member must belong to the tenant the request initiated from.\`,
+    requestFormat: 'json',
+    parameters: [
+      {
+        name: '$select',
+        type: 'Query',
+        schema: z.array(z.string()).describe('Select properties to be returned').optional(),
+      },
+      {
+        name: '$expand',
+        type: 'Query',
+        schema: z.array(z.string()).describe('Expand related entities').optional(),
+      },
+    ],
+    response: z.lazy(() => microsoft_graph_chat),
+  },
+` +
+        after;
+      console.log('patch-generated-client: patched get-chat endpoint (fallback).');
+    }
+  }
 }
 
 if (content !== original) {

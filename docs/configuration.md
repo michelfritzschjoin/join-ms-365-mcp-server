@@ -82,20 +82,17 @@ All configuration is done through environment variables. Copy `.example.env` to 
 
 ### Learning & Knowledge Base
 
-> **Important**: The Learning System requires Discovery Tools to be enabled!
-> Set `MS365_MCP_ENABLE_DISCOVERY_TOOLS=true` along with `MS365_MCP_LEARNING_ENABLED=true`.
+The Learning System improves search and entity-type recommendations over time. With **Super-Tools** (`MS365_MCP_USE_SUPER_TOOLS=true`) and `MS365_MCP_LEARNING_ENABLED=true`, Learning runs without Discovery Tools. For full Discovery + Learning, set `MS365_MCP_ENABLE_DISCOVERY_TOOLS=true`.
 
-| Variable                             | Description                        | Default                      | Required |
-| ------------------------------------ | ---------------------------------- | ---------------------------- | -------- |
-| `MS365_MCP_ENABLE_DISCOVERY_TOOLS`   | Enable discovery tools (required!) | `false`                      | Yes\*    |
-| `MS365_MCP_LEARNING_ENABLED`         | Enable learning system             | `true`                       | No       |
-| `MS365_MCP_KNOWLEDGE_BASE_PATH`      | Knowledge base file path           | `./data/knowledge-base.json` | No       |
-| `MS365_MCP_LEARNING_DECAY_DAYS`      | Days before pattern decay starts   | `90`                         | No       |
-| `MS365_MCP_LEARNING_DECAY_FACTOR`    | Decay rate per month               | `0.1`                        | No       |
-| `MS365_MCP_LEARNING_CLUSTER_ENABLED` | Enable pattern clustering          | `true`                       | No       |
-| `MS365_MCP_LEARNING_NLP_ENABLED`     | Enable NLP enhancements            | `true`                       | No       |
-
-\*Required if you want to use the Learning System
+| Variable                             | Description                      | Default                      | Required |
+| ------------------------------------ | -------------------------------- | ---------------------------- | -------- |
+| `MS365_MCP_ENABLE_DISCOVERY_TOOLS`   | Enable discovery tools           | `false`                      | No       |
+| `MS365_MCP_LEARNING_ENABLED`         | Enable learning system           | `true`                       | No       |
+| `MS365_MCP_KNOWLEDGE_BASE_PATH`      | Knowledge base file path         | `./data/knowledge-base.json` | No       |
+| `MS365_MCP_LEARNING_DECAY_DAYS`      | Days before pattern decay starts | `90`                         | No       |
+| `MS365_MCP_LEARNING_DECAY_FACTOR`    | Decay rate per month             | `0.1`                        | No       |
+| `MS365_MCP_LEARNING_CLUSTER_ENABLED` | Enable pattern clustering        | `true`                       | No       |
+| `MS365_MCP_LEARNING_NLP_ENABLED`     | Enable NLP enhancements          | `true`                       | No       |
 
 ### Chat Memory Configuration
 
