@@ -101,6 +101,53 @@ if (getChatBrokenWithSendMail.test(content)) {
       console.log('patch-generated-client: patched get-chat endpoint (fallback).');
     }
   }
+} else if (
+  content.includes("path: '/chats/:chatId'") &&
+  (content.includes('response: z.`') ||
+    (content.includes("description: `Get chat (without its messages)") &&
+      !content.includes('the request initiated from.`')))
+) {
+  // Fallback 2: broken get-chat (unterminated template or truncated file in CI)
+  const getChatStart = content.indexOf("path: '/chats/:chatId'");
+  if (getChatStart !== -1) {
+    let blockStart = content.lastIndexOf('\n  {', getChatStart);
+    if (blockStart < 0) blockStart = content.lastIndexOf('{\n    method:', getChatStart);
+    if (blockStart < 0) blockStart = content.lastIndexOf('{', getChatStart);
+    const suffix = `]);
+
+export const api = new Zodios(endpoints);
+
+export function createApiClient(baseUrl: string, options?: ZodiosOptions) {
+  return new Zodios(baseUrl, endpoints, options);
+}
+`;
+    const fixedBlockContent = `{
+    method: 'get',
+    path: '/chats/:chatId',
+    alias: 'get-chat',
+    description: \`Get chat (without its messages). This supports federation. To access a chat, at least one chat member must belong to the tenant the request initiated from.\`,
+    requestFormat: 'json',
+    parameters: [
+      {
+        name: '$select',
+        type: 'Query',
+        schema: z.array(z.string()).describe('Select properties to be returned').optional(),
+      },
+      {
+        name: '$expand',
+        type: 'Query',
+        schema: z.array(z.string()).describe('Expand related entities').optional(),
+      },
+    ],
+    response: z.lazy(() => microsoft_graph_chat),
+  },
+`;
+    const before = content.slice(0, blockStart >= 0 ? blockStart : getChatStart - 20);
+    const closing = content.indexOf(']);', getChatStart);
+    const after = closing !== -1 ? content.slice(closing) : suffix;
+    content = before + (blockStart >= 0 ? '\n  ' : '') + fixedBlockContent.trimEnd() + '\n' + after;
+    console.log('patch-generated-client: patched get-chat endpoint (truncated/unterminated fallback).');
+  }
 }
 
 if (content !== original) {
