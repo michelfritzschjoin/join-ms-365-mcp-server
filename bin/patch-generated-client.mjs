@@ -53,10 +53,7 @@ const fixedGetChatBlockContent = `{
 // This fixes broken codegen (unterminated template literal, merged send_mail) regardless of format.
 if (content.includes("path: '/chats/:chatId'")) {
   const pathIdx = content.indexOf("path: '/chats/:chatId'");
-  const alreadyFixed = content.includes(
-    'response: z.lazy(() => microsoft_graph_chat)',
-    pathIdx
-  );
+  const alreadyFixed = content.includes('response: z.lazy(() => microsoft_graph_chat)', pathIdx);
   if (!alreadyFixed) {
     let blockStart = content.lastIndexOf('\n  {', pathIdx);
     if (blockStart < 0) blockStart = content.lastIndexOf('{\n    method:', pathIdx);
