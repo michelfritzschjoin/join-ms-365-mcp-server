@@ -7,6 +7,7 @@ vi.mock('commander', () => {
     description: vi.fn().mockReturnThis(),
     version: vi.fn().mockReturnThis(),
     option: vi.fn().mockReturnThis(),
+    allowExcessArguments: vi.fn().mockReturnThis(),
     parse: vi.fn().mockReturnThis(),
     opts: vi.fn().mockReturnValue({ file: 'test.xlsx' }),
   };
