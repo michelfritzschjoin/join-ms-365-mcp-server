@@ -52,7 +52,8 @@ program
     '--enable-discovery-tools',
     'Enable intelligent discovery tools (deep-research, discover-project, discover-person, etc.)'
   )
-  .option('--cloud <type>', 'Microsoft cloud environment: global (default) or china (21Vianet)');
+  .option('--cloud <type>', 'Microsoft cloud environment: global (default) or china (21Vianet)')
+  .allowExcessArguments(true);
 
 export interface CommandOptions {
   v?: boolean;
