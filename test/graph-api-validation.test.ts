@@ -48,16 +48,15 @@ describe('Graph API Validation', () => {
     const endpointsPath = path.join(__dirname, '../src/endpoints.json');
     endpointsData = JSON.parse(readFileSync(endpointsPath, 'utf8')) as EndpointConfig[];
 
-    // Try to load OpenAPI spec (might be large, so we'll handle it carefully)
+    // Try to load OpenAPI spec for validation when present
     const openApiPath = path.join(__dirname, '../openapi/openapi.yaml');
     if (existsSync(openApiPath)) {
       try {
         const openApiContent = readFileSync(openApiPath, 'utf8');
-        // Only parse a portion to avoid memory issues with large files
-        // In production, you'd use a streaming parser or check specific paths
-        openApiSpec = yaml.load(openApiContent.substring(0, 100000)) as OpenAPISpec;
+        // Parse full content; truncation would cut YAML mid-scalar and cause parse errors
+        openApiSpec = yaml.load(openApiContent) as OpenAPISpec;
       } catch (error) {
-        // OpenAPI file might be too large or invalid
+        // OpenAPI file might be invalid or unsupported format
         // This is OK - we'll skip OpenAPI validation in that case
         console.warn('Could not load OpenAPI spec for validation:', error);
       }

@@ -104,7 +104,7 @@ if (getChatBrokenWithSendMail.test(content)) {
 } else if (
   content.includes("path: '/chats/:chatId'") &&
   (content.includes('response: z.`') ||
-    (content.includes("description: `Get chat (without its messages)") &&
+    (content.includes('description: `Get chat (without its messages)') &&
       !content.includes('the request initiated from.`')))
 ) {
   // Fallback 2: broken get-chat (unterminated template or truncated file in CI)
@@ -146,7 +146,9 @@ export function createApiClient(baseUrl: string, options?: ZodiosOptions) {
     const closing = content.indexOf(']);', getChatStart);
     const after = closing !== -1 ? content.slice(closing) : suffix;
     content = before + (blockStart >= 0 ? '\n  ' : '') + fixedBlockContent.trimEnd() + '\n' + after;
-    console.log('patch-generated-client: patched get-chat endpoint (truncated/unterminated fallback).');
+    console.log(
+      'patch-generated-client: patched get-chat endpoint (truncated/unterminated fallback).'
+    );
   }
 }
 
