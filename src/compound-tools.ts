@@ -28,6 +28,8 @@ import {
 } from './response-formatter.js';
 import { createThinkingProcess } from './thinking-process.js';
 import { isLoopFile, detectLoopFile, parseLoopContent } from './utils/loop-detector.js';
+import { formatEmailSearchQuery } from './utils/search-query-format.js';
+import { getMaxPages } from './perf-config.js';
 
 /**
  * SECURITY: Properly sanitize HTML content to prevent XSS
@@ -789,7 +791,7 @@ async function getAllJoinedTeams(
   selectFields: string = 'id,displayName,description,webUrl'
 ): Promise<GraphTeam[]> {
   const allTeams: GraphTeam[] = [];
-  const maxPages = parseInt(process.env.MS365_MCP_MAX_PAGES || '50', 10);
+  const maxPages = getMaxPages();
   let pageCount = 0;
 
   try {
@@ -3185,7 +3187,7 @@ export function registerCompoundTools(
             // Cannot combine $search with $filter in Graph API
             delete queryParams.$filter;
           } else if (entities.topic) {
-            queryParams.$search = `"${entities.topic}"`;
+            queryParams.$search = formatEmailSearchQuery(entities.topic);
             delete queryParams.$orderby;
             delete queryParams.$filter;
           }
@@ -4496,7 +4498,7 @@ Dieses Tool bietet eine BESSERE E-Mail-Erfahrung als das einfache list-mail-mess
       }
 
       if (search) {
-        queryParams.$search = `"${search}"`;
+        queryParams.$search = formatEmailSearchQuery(search);
         // Remove orderby when using search (Graph API limitation)
         delete queryParams.$orderby;
       }

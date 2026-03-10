@@ -19,6 +19,7 @@ import DataAggregator from './data-aggregator.js';
 import DownloadLinkGenerator from './download-link-generator.js';
 import DeepResearchEngine from './deep-research-engine.js';
 import type { AppSecrets } from './secrets.js';
+import { getMaxResults, getMaxAggregateItems } from './perf-config.js';
 
 let searchStrategy: SearchFirstStrategy | null = null;
 let deepResearchEngine: DeepResearchEngine | null = null;
@@ -200,8 +201,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`MS365 Universal Search: "${query}"`);
 
-      const configuredMaxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const configuredMaxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
       const effectiveMaxResults = Math.min(maxResults || 50, configuredMaxResults);
 
       // Default to all entity types for comprehensive search
@@ -332,8 +333,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering project: "${projectName}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(projectName, {
         entityTypes: ['driveItem', 'site', 'chatMessage', 'event', 'message'],
@@ -414,8 +415,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering person: "${personName}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(personName, {
         entityTypes: ['person', 'message', 'event', 'driveItem'],
@@ -496,8 +497,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering meeting: "${meetingQuery}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(meetingQuery, {
         entityTypes: ['event', 'message', 'driveItem'],
@@ -578,8 +579,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering document: "${documentName}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(documentName, {
         entityTypes: ['driveItem'],
@@ -659,8 +660,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering team: "${teamName}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(teamName, {
         entityTypes: ['chatMessage', 'driveItem', 'event'],
@@ -726,8 +727,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering customer: "${customerName}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(customerName, {
         entityTypes: ['person', 'message', 'event', 'driveItem'],
@@ -796,8 +797,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering contract: "${contractQuery}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(contractQuery, {
         entityTypes: ['driveItem', 'message'],
@@ -876,8 +877,8 @@ Even if no results are found, this confirms the information is not in the user's
 
       logger.info(`Discovering decision: "${topic}"`);
 
-      const maxResults = parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxResults = getMaxResults();
+      const maxAggregateItems = getMaxAggregateItems();
 
       const result = await searchStrategy.execute(topic, {
         entityTypes: ['message', 'chatMessage', 'driveItem'],

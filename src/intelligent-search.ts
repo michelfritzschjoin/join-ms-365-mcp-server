@@ -10,6 +10,10 @@ import QueryRefiner from './query-refiner.js';
 import LearningSystem, { type SearchResult } from './learning-system.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
 import { getQueryOptimizer } from './query-optimizer.js';
+import { CrossLanguageSearchExpander } from './uqas/search/index.js';
+import { LanguageDetector } from './uqas/i18n/index.js';
+import type { SupportedLanguage } from './uqas/i18n/index.js';
+import { getMaxResults } from './perf-config.js';
 
 export interface SearchContext {
   entityTypes?: string[];
@@ -31,6 +35,8 @@ export class SearchFirstStrategy {
   private synonymExpander: SynonymExpander;
   private queryRefiner: QueryRefiner;
   private learningSystem: LearningSystem;
+  private crossLanguageExpander: CrossLanguageSearchExpander | null = null;
+  private languageDetector: LanguageDetector | null = null;
 
   constructor(
     graphClient: GraphClient,
@@ -47,35 +53,115 @@ export class SearchFirstStrategy {
   }
 
   /**
-   * Build all query candidates for intelligent multi-query search (optimizer + synonym variants).
+   * Lazy-init cross-language expander and language detector for bilingual query variants.
+   */
+  private getCrossLanguageExpander(): CrossLanguageSearchExpander {
+    if (!this.crossLanguageExpander) {
+      this.crossLanguageExpander = new CrossLanguageSearchExpander();
+    }
+    return this.crossLanguageExpander;
+  }
+
+  private getLanguageDetector(): LanguageDetector {
+    if (!this.languageDetector) {
+      this.languageDetector = new LanguageDetector();
+    }
+    return this.languageDetector;
+  }
+
+  /**
+   * Generate simplified query variants (drop one word, key terms only) for fallback.
+   */
+  private buildSimplifiedQueries(query: string): string[] {
+    const words = query
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length > 0);
+    if (words.length < 3) return [];
+
+    const simplified: string[] = [];
+    for (let i = 0; i < words.length; i++) {
+      const without = words.filter((_, j) => j !== i).join(' ');
+      if (without.length >= 2) simplified.push(without);
+    }
+    if (words.length >= 3) {
+      simplified.push(words.slice(0, 2).join(' '));
+      if (words.length >= 4) simplified.push(words.slice(0, 3).join(' '));
+    }
+    return [...new Set(simplified)].slice(0, 5);
+  }
+
+  /**
+   * Build all query candidates: learned variants, cross-language, optimizer, synonyms, simplified.
    */
   private buildQueryCandidates(
     primaryQuery: string,
     originalQuery: string,
     optimizerVariants: string[]
   ): string[] {
-    const seen = new Set<string>([primaryQuery.toLowerCase(), originalQuery.toLowerCase()]);
+    const seen = new Set<string>([
+      primaryQuery.toLowerCase().trim(),
+      originalQuery.toLowerCase().trim(),
+    ]);
     const candidates: string[] = [];
 
-    for (const v of optimizerVariants) {
+    const add = (v: string) => {
       const key = v.trim().toLowerCase();
       if (key && !seen.has(key)) {
         seen.add(key);
         candidates.push(v.trim());
       }
+    };
+
+    // 1. Learned variants from past successful searches (highest priority)
+    const learnedLimit = parseInt(process.env.MS365_MCP_SEARCH_LEARNED_VARIANTS || '3', 10);
+    if (learnedLimit > 0) {
+      const learned = this.learningSystem.getSuggestedQueryVariants(primaryQuery, learnedLimit);
+      for (const v of learned) add(v);
     }
 
-    const synonymVariants = this.synonymExpander.expandQuery(primaryQuery, 'search');
+    // 2. Cross-language variants (DE/EN thesaurus)
+    if (process.env.MS365_MCP_SEARCH_CROSS_LANGUAGE !== 'false') {
+      try {
+        const detector = this.getLanguageDetector();
+        const expander = this.getCrossLanguageExpander();
+        const lang = detector.detect(primaryQuery).lang as SupportedLanguage;
+        const set = expander.expand(primaryQuery, lang);
+        for (const v of set.sourceLangVariants.slice(0, 3)) add(v);
+        for (const v of set.crossLangVariants.slice(0, 3)) add(v);
+      } catch (err) {
+        logger.debug(`Cross-language expansion skipped: ${err}`);
+      }
+    }
+
+    // 3. Optimizer variants (cross-lang, typos, abbreviations, NLP)
+    for (const v of optimizerVariants) add(v);
+
+    // 4. Synonym expander (business terms, learned synonyms)
     const maxSynonym = parseInt(process.env.MS365_MCP_SEARCH_MAX_SYNONYM_VARIANTS || '5', 10);
-    for (const v of synonymVariants.slice(0, maxSynonym)) {
-      const key = v.trim().toLowerCase();
-      if (key && !seen.has(key)) {
-        seen.add(key);
-        candidates.push(v.trim());
-      }
+    const synonymVariants = this.synonymExpander.expandQuery(primaryQuery, 'search');
+    for (const v of synonymVariants.slice(0, maxSynonym)) add(v);
+
+    // 5. Simplified sub-queries (drop-one-word, key terms) for fallback
+    if (process.env.MS365_MCP_SEARCH_SIMPLIFIED_FALLBACK !== 'false') {
+      for (const v of this.buildSimplifiedQueries(primaryQuery)) add(v);
     }
 
-    return candidates.slice(0, 12);
+    const maxCandidates = parseInt(process.env.MS365_MCP_SEARCH_MAX_CANDIDATES || '18', 10);
+    return candidates.slice(0, maxCandidates);
+  }
+
+  /**
+   * Build a single OR-query string from primary + top variants (for one broad API call).
+   */
+  private buildOrQuery(primaryQuery: string, variants: string[], maxTerms = 3): string {
+    const terms = [primaryQuery, ...variants].slice(0, maxTerms);
+    const escaped = terms.map((q) => {
+      const t = q.trim();
+      if (t.includes(' ') || t.includes('"')) return `"${t.replace(/"/g, '\\"')}"`;
+      return t;
+    });
+    return escaped.join(' OR ');
   }
 
   /**
@@ -149,29 +235,48 @@ export class SearchFirstStrategy {
     // 3a. Build intelligent query candidates (optimizer + synonym variants)
     const variantsToTry = this.buildQueryCandidates(searchQuery, query, optimized.variants);
 
-    // 3b. If no results, try variant queries (synonyms, cross-language, etc.)
+    // 3b. If no results, try OR-query first (one broad request), then variant queries
     if (searchResults.items.length === 0) {
-      const refinerQueries = (await this.queryRefiner.refineQuery(query, true, context)).slice(1);
-      const allCandidates = [...variantsToTry];
-      for (const r of refinerQueries) {
-        const key = r.trim().toLowerCase();
-        if (key && key !== searchQuery.toLowerCase() && key !== query.toLowerCase()) {
-          allCandidates.push(r.trim());
+      const useOrQuery = process.env.MS365_MCP_SEARCH_USE_OR_QUERY !== 'false';
+      if (useOrQuery && variantsToTry.length >= 1) {
+        const orQuery = this.buildOrQuery(searchQuery, variantsToTry, 3);
+        if (orQuery !== searchQuery) {
+          const orResults = await this.executeSearchQuery(orQuery, context);
+          if (orResults.items.length > 0) {
+            logger.info(`OR-query returned results: "${orQuery.slice(0, 80)}..."`);
+            searchResults.items.push(...orResults.items);
+            searchResults.sources.push(...orResults.sources);
+            searchResults.query = orQuery;
+            searchResults.totalResults = searchResults.items.length;
+            const newExtracted = this.entityExtractor.extractFromResults(orResults.items);
+            this.mergeExtractedInfo(extractedInfo, newExtracted);
+          }
         }
       }
 
-      for (const variantQuery of allCandidates) {
-        if (variantQuery === searchQuery || variantQuery === query) continue;
-        const refinedResults = await this.executeSearchQuery(variantQuery, context);
-        if (refinedResults.items.length > 0) {
-          logger.info(`Variant query returned results: "${variantQuery}"`);
-          searchResults.items.push(...refinedResults.items);
-          searchResults.sources.push(...refinedResults.sources);
-          searchResults.query = variantQuery;
+      if (searchResults.items.length === 0) {
+        const refinerQueries = (await this.queryRefiner.refineQuery(query, true, context)).slice(1);
+        const allCandidates = [...variantsToTry];
+        for (const r of refinerQueries) {
+          const key = r.trim().toLowerCase();
+          if (key && key !== searchQuery.toLowerCase() && key !== query.toLowerCase()) {
+            allCandidates.push(r.trim());
+          }
+        }
 
-          const newExtracted = this.entityExtractor.extractFromResults(refinedResults.items);
-          this.mergeExtractedInfo(extractedInfo, newExtracted);
-          break;
+        for (const variantQuery of allCandidates) {
+          if (variantQuery === searchQuery || variantQuery === query) continue;
+          const refinedResults = await this.executeSearchQuery(variantQuery, context);
+          if (refinedResults.items.length > 0) {
+            logger.info(`Variant query returned results: "${variantQuery}"`);
+            searchResults.items.push(...refinedResults.items);
+            searchResults.sources.push(...refinedResults.sources);
+            searchResults.query = variantQuery;
+
+            const newExtracted = this.entityExtractor.extractFromResults(refinedResults.items);
+            this.mergeExtractedInfo(extractedInfo, newExtracted);
+            break;
+          }
         }
       }
     } else if (
@@ -183,11 +288,14 @@ export class SearchFirstStrategy {
         process.env.MS365_MCP_SEARCH_SYNONYM_MERGE_THRESHOLD || '5',
         10
       );
-      const maxResults =
-        context?.maxResults ?? parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10);
+      const maxResults = context?.maxResults ?? getMaxResults();
 
       if (searchResults.items.length < mergeThreshold) {
-        const parallelQueries = variantsToTry.slice(0, 2);
+        const parallelMergeCount = parseInt(
+          process.env.MS365_MCP_SEARCH_PARALLEL_MERGE_COUNT || '3',
+          10
+        );
+        const parallelQueries = variantsToTry.slice(0, Math.max(1, parallelMergeCount));
         const extraResults = await Promise.all(
           parallelQueries.map((q) => this.executeSearchQuery(q, context))
         );
@@ -271,7 +379,7 @@ export class SearchFirstStrategy {
               queryString: query,
             },
             from: 0,
-            size: context?.maxResults || parseInt(process.env.MS365_MCP_MAX_RESULTS || '500', 10),
+            size: context?.maxResults || getMaxResults(),
             // Mandatory for 'event' entityType
             ...(recommendedEntityTypes.includes('event') && {
               timeContext: {

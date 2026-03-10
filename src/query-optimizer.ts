@@ -590,9 +590,10 @@ export class QueryOptimizer {
       currentQuery = normalized;
     }
 
-    // Deduplicate variants and remove current query from variants
+    // Deduplicate variants, trim whitespace, and remove current query from variants
     const uniqueVariants = [...new Set(variants)]
-      .filter((v) => v !== currentQuery && v !== query && v.trim().length > 0)
+      .map((v) => (typeof v === 'string' ? v.trim() : v))
+      .filter((v) => v !== currentQuery && v !== query && v.length > 0)
       .slice(0, 8);
 
     // Calculate final confidence
@@ -873,23 +874,43 @@ export class QueryOptimizer {
   }
 
   /**
-   * Expand query with synonyms
+   * Expand query with synonyms.
+   * Skips splitting person-name-like queries (e.g. "Ricardo Rohland") into word variants for email
+   * so the primary search uses the full name; variants are still trimmed to avoid trailing spaces.
    */
   private expandWithSynonyms(query: string, context: OptimizationContext): string[] {
     const variants: string[] = [];
     const decomposed = this.nlpEnhancer.decomposeQuery(query);
+    const trimmedQuery = query.trim();
 
-    // Use semantic variants from NLP decomposer
-    if (decomposed.semanticVariants.length > 0) {
-      variants.push(...decomposed.semanticVariants.slice(0, 3));
+    // Person-name-like: 2–4 words, letters/spaces only. For email search, avoid splitting into
+    // first/last name variants so the main query stays "from:Full Name".
+    const looksLikePersonName =
+      /^[\wäöüßÄÖÜ\s.-]+$/.test(trimmedQuery) &&
+      trimmedQuery.split(/\s+/).filter((w) => w.length > 1).length >= 2 &&
+      trimmedQuery.split(/\s+/).filter((w) => w.length > 1).length <= 4;
+    const skipCompoundVariants = context.tool === 'email' && looksLikePersonName;
+
+    if (!skipCompoundVariants) {
+      // Use semantic variants from NLP decomposer (trimmed)
+      if (decomposed.semanticVariants.length > 0) {
+        variants.push(
+          ...decomposed.semanticVariants
+            .slice(0, 3)
+            .map((v) => (typeof v === 'string' ? v.trim() : v))
+        );
+      }
+      // Use compound parts as additional variants (trimmed)
+      if (decomposed.compoundParts.length > 1) {
+        const joined = decomposed.compoundParts
+          .map((p) => (typeof p === 'string' ? p.trim() : p))
+          .filter((p) => p.length > 0)
+          .join(' ');
+        if (joined) variants.push(joined);
+      }
     }
 
-    // Use compound parts as additional variants
-    if (decomposed.compoundParts.length > 1) {
-      variants.push(decomposed.compoundParts.join(' '));
-    }
-
-    return variants.slice(0, 5);
+    return variants.filter((v) => v.length > 0).slice(0, 5);
   }
 
   /**

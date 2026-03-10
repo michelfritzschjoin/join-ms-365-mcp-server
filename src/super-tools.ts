@@ -46,7 +46,12 @@ import {
   getUserId,
 } from './request-context.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
-import { formatEmailSearchQuery, extractEmailFromSearch } from './utils/search-query-format.js';
+import {
+  formatEmailSearchQuery,
+  extractEmailFromSearch,
+  looksLikePersonName,
+} from './utils/search-query-format.js';
+import { getGraphMaxRetries, getGraphRetryMaxDelayMs } from './perf-config.js';
 import {
   isLoopFile,
   detectLoopFile,
@@ -502,12 +507,14 @@ interface RetryConfig {
   retryableStatusCodes: number[];
 }
 
-const defaultRetryConfig: RetryConfig = {
-  maxRetries: 3,
-  baseDelay: 1000, // 1 second
-  maxDelay: 30000, // 30 seconds
-  retryableStatusCodes: [429, 500, 502, 503, 504],
-};
+function getDefaultRetryConfig(): RetryConfig {
+  return {
+    maxRetries: getGraphMaxRetries(),
+    baseDelay: 1000, // 1 second
+    maxDelay: getGraphRetryMaxDelayMs(),
+    retryableStatusCodes: [429, 500, 502, 503, 504],
+  };
+}
 
 /**
  * Calculate delay with exponential backoff and jitter
@@ -528,7 +535,7 @@ async function callGraphWithRetry(
   queryParams?: Record<string, string>,
   body?: unknown,
   headers?: Record<string, string>,
-  retryConfig: RetryConfig = defaultRetryConfig,
+  retryConfig: RetryConfig = getDefaultRetryConfig(),
   useCache = true
 ): Promise<string> {
   // Handle empty method (shouldn't happen but fail gracefully)
@@ -1934,7 +1941,7 @@ async function handleEmail(
       let result = await callGraph(graphClient, 'GET', '/me/messages', params);
       let parsedResult = JSON.parse(result);
 
-      // Fallback: if composite query returns 0 results and query contains an email, retry with from:email only
+      // Fallback: if 0 results, try email-based or last-name-only retry
       const hitCount = parsedResult?.value?.length ?? 0;
       const fallbackEmail = extractEmailFromSearch(params.$search ?? input.search ?? '');
       if (hitCount === 0 && fallbackEmail) {
@@ -1951,6 +1958,35 @@ async function handleEmail(
           thinking.push(
             `🔄 Fallback: 0 results for combined query; retried with from:${fallbackEmail} and found messages`
           );
+        }
+      }
+      // Fallback: if still 0 results and query looks like a full person name, retry with last name only (e.g. "Rohland" to match "Rohland, Ricardo")
+      if ((parsedResult?.value?.length ?? 0) === 0 && !fallbackEmail) {
+        const searchQuery = (optimized.optimizedQuery || input.search || '').trim();
+        if (looksLikePersonName(searchQuery)) {
+          const words = searchQuery.split(/\s+/).filter((w) => w.length > 1);
+          if (words.length >= 2) {
+            const lastName = words[words.length - 1];
+            const fallbackParams = {
+              ...params,
+              $search: formatEmailSearchQuery(lastName),
+            };
+            delete (fallbackParams as Record<string, unknown>).$filter;
+            const fallbackResult = await callGraph(
+              graphClient,
+              'GET',
+              '/me/messages',
+              fallbackParams
+            );
+            const fallbackParsed = JSON.parse(fallbackResult);
+            if ((fallbackParsed?.value?.length ?? 0) > 0) {
+              parsedResult = fallbackParsed;
+              result = fallbackResult;
+              thinking.push(
+                `🔄 Fallback: 0 results for full name; retried with last name "${lastName}" and found messages`
+              );
+            }
+          }
         }
       }
 

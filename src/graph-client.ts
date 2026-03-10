@@ -16,6 +16,11 @@ import {
   getRetryAfter,
 } from './errors.js';
 import { GraphApiRepairManager } from './graph-api-repair.js';
+import {
+  getGraphRequestTimeoutMs,
+  getGraphMaxRetries,
+  getGraphRetryMaxDelayMs,
+} from './perf-config.js';
 
 interface GraphRequestOptions {
   headers?: Record<string, string>;
@@ -99,7 +104,7 @@ class GraphClient {
   async makeRequest(
     endpoint: string,
     options: GraphRequestOptions = {},
-    maxRetries = 3
+    maxRetries = getGraphMaxRetries()
   ): Promise<unknown> {
     const contextTokens = getRequestTokens();
 
@@ -296,17 +301,17 @@ class GraphClient {
   }
 
   /**
-   * Calculate exponential backoff delay
+   * Calculate exponential backoff delay (capped by perf-config max delay).
    */
   private calculateBackoff(attempt: number, retryAfter?: number): number {
-    // If Retry-After header is provided, use it
+    // If Retry-After header is provided, use it (capped by max delay)
+    const maxDelay = getGraphRetryMaxDelayMs();
     if (retryAfter) {
-      return retryAfter * 1000; // Convert seconds to milliseconds
+      return Math.min(retryAfter * 1000, maxDelay);
     }
 
-    // Exponential backoff: 1s, 2s, 4s, 8s, etc.
+    // Exponential backoff: 1s, 2s, 4s, 8s, etc., capped by config
     const baseDelay = 1000; // 1 second
-    const maxDelay = 30000; // 30 seconds max
     const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
 
     // Add jitter to prevent thundering herd
@@ -371,11 +376,30 @@ class GraphClient {
       ...options.headers,
     };
 
-    return fetch(url, {
-      method: options.method || 'GET',
-      headers,
-      body: options.body,
-    });
+    const timeoutMs = getGraphRequestTimeoutMs();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetch(url, {
+        method: options.method || 'GET',
+        headers,
+        body: options.body,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if ((error as Error).name === 'AbortError') {
+        throw new GraphApiError(
+          `Microsoft Graph API request timed out after ${timeoutMs}ms. Consider MS365_MCP_GRAPH_REQUEST_TIMEOUT_MS or MS365_MCP_FAST_MODE for faster failure.`,
+          408,
+          true
+        );
+      }
+      throw error;
+    }
   }
 
   private serializeData(data: unknown, outputFormat: 'json' | 'toon', pretty = false): string {
@@ -449,64 +473,84 @@ class GraphClient {
 
     const cloudEndpoints = getCloudEndpoints(this.secrets.cloudType);
     const url = `${cloudEndpoints.graphApi}/v1.0/$batch`;
-    let response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(batchBody),
-    });
+    const timeoutMs = getGraphRequestTimeoutMs();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-    if (response.status === 401 && refreshToken) {
-      const newTokens = await this.refreshAccessToken(refreshToken);
-      response = await fetch(url, {
+    try {
+      let response = await fetch(url, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${newTokens.accessToken}`,
+          Authorization: `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(batchBody),
+        signal: controller.signal,
       });
-    }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (response.status === 401) {
-        throw new AuthenticationError(
-          'Re-authenticate: use login or refresh token. ' + errorText,
-          undefined
+      if (response.status === 401 && refreshToken) {
+        const newTokens = await this.refreshAccessToken(refreshToken);
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${newTokens.accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(batchBody),
+          signal: controller.signal,
+        });
+      }
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        if (response.status === 401) {
+          throw new AuthenticationError(
+            'Re-authenticate: use login or refresh token. ' + errorText,
+            undefined
+          );
+        }
+        if (response.status === 429) {
+          const retryAfterHeader = response.headers.get('Retry-After');
+          const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
+          throw new RateLimitError(retryAfter, response);
+        }
+        throw new GraphApiError(
+          `Graph batch request failed: ${response.status} ${response.statusText} - ${errorText}`,
+          response.status,
+          false,
+          undefined,
+          response
         );
       }
-      if (response.status === 429) {
-        const retryAfterHeader = response.headers.get('Retry-After');
-        const retryAfter = retryAfterHeader ? parseInt(retryAfterHeader, 10) : undefined;
-        throw new RateLimitError(retryAfter, response);
-      }
-      throw new GraphApiError(
-        `Graph batch request failed: ${response.status} ${response.statusText} - ${errorText}`,
-        response.status,
-        false,
-        undefined,
-        response
-      );
-    }
 
-    const data = (await response.json()) as {
-      responses?: Array<{
-        id: string;
-        status: number;
-        body?: unknown;
-        headers?: Record<string, string>;
-      }>;
-    };
-    const responses = data.responses ?? [];
-    return responses.map((r) => ({
-      id: r.id,
-      status: r.status,
-      body: r.body,
-      headers: r.headers,
-    }));
+      const data = (await response.json()) as {
+        responses?: Array<{
+          id: string;
+          status: number;
+          body?: unknown;
+          headers?: Record<string, string>;
+        }>;
+      };
+      const responses = data.responses ?? [];
+      return responses.map((r) => ({
+        id: r.id,
+        status: r.status,
+        body: r.body,
+        headers: r.headers,
+      }));
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if ((error as Error).name === 'AbortError') {
+        throw new GraphApiError(
+          `Microsoft Graph batch request timed out after ${timeoutMs}ms. Consider MS365_MCP_GRAPH_REQUEST_TIMEOUT_MS or MS365_MCP_FAST_MODE.`,
+          408,
+          true
+        );
+      }
+      throw error;
+    }
   }
 
   async graphRequest(endpoint: string, options: GraphRequestOptions = {}): Promise<McpResponse> {

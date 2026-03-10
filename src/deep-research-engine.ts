@@ -13,6 +13,7 @@ import DataAggregator from './data-aggregator.js';
 import DownloadLinkGenerator from './download-link-generator.js';
 import logger from './logger.js';
 import type { AppSecrets } from './secrets.js';
+import { getMaxAggregateItems } from './perf-config.js';
 
 export interface ResearchQuestion {
   question: string;
@@ -145,7 +146,7 @@ export class DeepResearchEngine {
       allItems.push(...Object.values(searchResult.specificResults).flat());
 
       // 6. If we have enough information or no next steps, break
-      const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+      const maxAggregateItems = getMaxAggregateItems();
       if (nextSteps.length === 0 || allItems.length >= maxAggregateItems) {
         logger.info('Research complete: sufficient information gathered or no more steps');
         break;
@@ -164,7 +165,7 @@ export class DeepResearchEngine {
     }
 
     // Aggregate all results
-    const maxAggregateItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10);
+    const maxAggregateItems = getMaxAggregateItems();
     const aggregated = this.dataAggregator.aggregate(
       [
         {

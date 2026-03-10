@@ -3,6 +3,7 @@
  */
 
 import logger from './logger.js';
+import { getMaxAggregateItems } from './perf-config.js';
 
 export interface AggregatedItem {
   id: string;
@@ -40,7 +41,7 @@ export class DataAggregator {
     const {
       sortBy = 'relevance',
       sortOrder = 'desc',
-      maxItems = parseInt(process.env.MS365_MCP_MAX_AGGREGATE_ITEMS || '500', 10),
+      maxItems = getMaxAggregateItems(),
       deduplicate = true,
       formatForLLM = false,
     } = options;

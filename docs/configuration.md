@@ -34,11 +34,24 @@ All configuration is done through environment variables. Copy `.example.env` to 
 | ----------------------------------- | --------------------- | ------- | -------- |
 | `MS365_MCP_MAX_RESULTS`             | Max results per query | `500`   | No       |
 | `MS365_MCP_MAX_AGGREGATE_ITEMS`     | Max aggregate items   | `500`   | No       |
-| `MS365_MCP_MAX_PAGES`               | Max pagination pages  | `500`   | No       |
+| `MS365_MCP_MAX_PAGES`               | Max pagination pages  | `20`    | No       |
 | `MS365_MCP_MAX_CONCURRENT_TOOLS`    | Max concurrent tools  | `5`     | No       |
 | `MS365_MCP_DEEP_RESEARCH_MAX_DEPTH` | Research depth        | `5`     | No       |
 | `MS365_MCP_MAX_RESEARCH_ITERATIONS` | Research iterations   | `5`     | No       |
 | `MS365_MCP_STOP_ON_ERROR`           | Stop on tool error    | `false` | No       |
+
+### Response time and fast mode
+
+Use these when you need answers within a few seconds. With `MS365_MCP_FAST_MODE=true`, lower limits and shorter timeouts are applied automatically.
+
+| Variable                             | Description                                  | Default | Required |
+| ------------------------------------ | -------------------------------------------- | ------- | -------- |
+| `MS365_MCP_FAST_MODE`                | Lower limits, shorter timeout, fewer retries | `false` | No       |
+| `MS365_MCP_GRAPH_REQUEST_TIMEOUT_MS` | Timeout per Graph API request (ms)           | `15000` | No       |
+| `MS365_MCP_GRAPH_MAX_RETRIES`        | Max retries for Graph requests (429/5xx)     | `3`     | No       |
+| `MS365_MCP_GRAPH_RETRY_MAX_DELAY_MS` | Max backoff delay between retries (ms)       | `30000` | No       |
+
+When **fast mode** is enabled: timeout 6s, max pages 5, max results 50, max aggregate items 100, 1 retry, max retry delay 5s. Override any of these via the variables above when fast mode is off.
 
 ### LLM Optimization & Search Results
 
@@ -53,13 +66,19 @@ All configuration is done through environment variables. Copy `.example.env` to 
 
 ### Intelligent Search (Synonyms & Multi-Query)
 
-| Variable                                   | Description                                                                    | Default | Required |
-| ------------------------------------------ | ------------------------------------------------------------------------------ | ------- | -------- |
-| `MS365_MCP_SEARCH_INTELLIGENT_MERGE`       | When primary search returns few results, run synonym queries and merge         | `true`  | No       |
-| `MS365_MCP_SEARCH_SYNONYM_MERGE_THRESHOLD` | If primary result count is below this, synonym/variant queries are merged      | `5`     | No       |
-| `MS365_MCP_SEARCH_MAX_SYNONYM_VARIANTS`    | Max synonym-based query variants considered per search (business terms, DE/EN) | `5`     | No       |
+| Variable                                   | Description                                                                   | Default | Required |
+| ------------------------------------------ | ----------------------------------------------------------------------------- | ------- | -------- |
+| `MS365_MCP_SEARCH_INTELLIGENT_MERGE`       | When primary search returns few results, run synonym queries and merge        | `true`  | No       |
+| `MS365_MCP_SEARCH_SYNONYM_MERGE_THRESHOLD` | If primary result count is below this, synonym/variant queries are merged     | `5`     | No       |
+| `MS365_MCP_SEARCH_MAX_SYNONYM_VARIANTS`    | Max synonym-based query variants (business terms, DE/EN)                      | `5`     | No       |
+| `MS365_MCP_SEARCH_MAX_CANDIDATES`          | Max total query candidates (learned + cross-language + synonyms + simplified) | `18`    | No       |
+| `MS365_MCP_SEARCH_LEARNED_VARIANTS`        | Max variants from past successful searches (learning system)                  | `3`     | No       |
+| `MS365_MCP_SEARCH_CROSS_LANGUAGE`          | Add UQAS bilingual variants (DE↔EN thesaurus)                                 | `true`  | No       |
+| `MS365_MCP_SEARCH_SIMPLIFIED_FALLBACK`     | Add simplified sub-queries (drop-one-word, key terms) when no results         | `true`  | No       |
+| `MS365_MCP_SEARCH_USE_OR_QUERY`            | When no results, try one broad request with "q1 OR q2 OR q3"                  | `true`  | No       |
+| `MS365_MCP_SEARCH_PARALLEL_MERGE_COUNT`    | How many variant queries to run in parallel when merging few results          | `3`     | No       |
 
-Search uses multiple query variants: optimizer variants (cross-language, typos, abbreviations), **SynonymExpander** (business terminology, e.g. Projekt/project, Meeting/Besprechung), and optional parallel merge when the first query returns few hits.
+Search intelligence: **learned variants** (knowledge base), **UQAS cross-language** (BilingualThesaurus), **optimizer** (typos, abbreviations, NLP), **SynonymExpander** (business terms), **simplified queries** (shorter sub-phrases), **OR-query** (single broad call when no results), and **parallel merge** when the first query returns few hits.
 
 ### HTTP Server Configuration
 

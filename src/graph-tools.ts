@@ -10,8 +10,10 @@ import { TOOL_CATEGORIES } from './tool-categories.js';
 import type KnowledgeBase from './knowledge-base.js';
 import { formatGraphResponse } from './response-formatter.js';
 import { formatToolResponse } from './super-tools.js';
+import { formatEmailSearchQuery } from './utils/search-query-format.js';
 import { createThinkingProcess } from './thinking-process.js';
 import { encode as toonEncode } from '@toon-format/toon';
+import { getMaxPages, getDefaultPageSize } from './perf-config.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -167,11 +169,14 @@ async function executeGraphTool(
       thinking.addDecision('intent', 'Identified as mail-related operation');
     }
 
-    // Apply default $top for calendar events to get more results (Microsoft Graph defaults to only 10)
+    // Apply default $top for calendar events (MS Graph default is only 10); use perf-config for faster first response
     if (isCalendarTool && !params['$top'] && !params['top']) {
-      params['$top'] = 100;
-      logger.info('Applied default $top=100 for calendar events (MS Graph default is only 10)');
-      thinking.addDecision('optimization', 'Applied default $top=100 for calendar events');
+      const pageSize = getDefaultPageSize();
+      params['$top'] = pageSize;
+      logger.info(
+        `Applied default $top=${pageSize} for calendar events (MS Graph default is only 10)`
+      );
+      thinking.addDecision('optimization', `Applied default $top=${pageSize} for calendar events`);
     }
 
     // For calendarView, add default date range if not provided (required parameters)
@@ -429,6 +434,12 @@ async function executeGraphTool(
             `Search query already formatted, ensuring quotes: "${searchValue}" -> "${queryParams['$search']}"`
           );
         }
+      } else if (isMailTool) {
+        // Intelligent email search: person name → from:, "an X"/"to X" → to:
+        queryParams['$search'] = formatEmailSearchQuery(searchValue);
+        logger.info(
+          `Applied intelligent email search for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
+        );
       } else {
         // For endpoints that don't require property:value format (like SharePoint sites)
         // Just ensure the value is wrapped in double quotes
@@ -530,7 +541,7 @@ async function executeGraphTool(
         let nextLink = combinedResponse['@odata.nextLink'];
         let pageCount = 1;
 
-        const maxPages = parseInt(process.env.MS365_MCP_MAX_PAGES || '500', 10); // Default 500, configurable via ENV
+        const maxPages = getMaxPages();
         thinking.addInfo(
           'processing',
           `Pagination: starting with ${allItems.length} items, max ${maxPages} pages`
