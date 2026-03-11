@@ -19,6 +19,18 @@ import type {
 import { getProfessionProfile } from './request-context.js';
 import { detectLoopFile, type LoopFileDetectionResult } from './utils/loop-detector.js';
 
+/** Supported human-readable response formats */
+export type ResponseFormat = 'text' | 'markdown';
+
+/**
+ * Returns the configured response format for _humanReadable output.
+ * Default is markdown; set MS365_MCP_RESPONSE_FORMAT=text for plain text.
+ */
+export function getResponseFormat(): ResponseFormat {
+  const v = process.env.MS365_MCP_RESPONSE_FORMAT?.toLowerCase();
+  return v === 'text' ? 'text' : 'markdown';
+}
+
 /**
  * Structured calendar event interface
  */
@@ -893,6 +905,115 @@ export function calendarResponseToText(response: FormattedCalendarResponse): str
 }
 
 /**
+ * Convert formatted calendar response to structured Markdown (headings, table, lists).
+ * Used when MS365_MCP_RESPONSE_FORMAT=markdown (default).
+ */
+export function calendarResponseToMarkdown(response: FormattedCalendarResponse): string {
+  const lines: string[] = [];
+
+  lines.push('# 📅 Kalenderübersicht');
+  lines.push('');
+  lines.push('## Zusammenfassung');
+  lines.push('');
+  lines.push('| **Feld** | **Wert** |');
+  lines.push('| --- | --- |');
+  lines.push(`| Anzahl Termine | ${response.summary.totalEvents} |`);
+  lines.push(`| Zeitraum | ${response.summary.dateRange} |`);
+  lines.push(`| Zeitzone | ${response.summary.timezone} |`);
+  lines.push('');
+
+  if (response.summary.totalEvents === 0) {
+    lines.push('*Keine Termine in diesem Zeitraum gefunden.*');
+    return lines.join('\n');
+  }
+
+  const upcomingEvents = response.events.filter((e) => {
+    try {
+      const eventDateParts = e.startDate.split('.');
+      if (eventDateParts.length === 3) {
+        const eventDate = new Date(
+          `${eventDateParts[2]}-${eventDateParts[1]}-${eventDateParts[0]}T${e.startTime}:00`
+        );
+        return eventDate >= new Date();
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  });
+  const nextEvent = upcomingEvents.length > 0 ? upcomingEvents[0] : null;
+  if (nextEvent) {
+    lines.push(
+      `- **Nächster Termin:** ${nextEvent.subject} (${nextEvent.startDate} ${nextEvent.startTimeDisplay})`
+    );
+    lines.push('');
+  }
+
+  lines.push('## Schnellübersicht');
+  lines.push('');
+  const allEventsSorted = [...response.events].sort((a, b) => {
+    const aDateStr = a.startDate.split('.').reverse().join('-') + 'T' + a.startTime;
+    const bDateStr = b.startDate.split('.').reverse().join('-') + 'T' + b.startTime;
+    return aDateStr.localeCompare(bDateStr);
+  });
+  lines.push('| # | Datum | Zeit | Termin |');
+  lines.push('| --- | --- | --- | --- |');
+  for (let i = 0; i < allEventsSorted.length; i++) {
+    const event = allEventsSorted[i];
+    const statusIcon = event.isCancelled ? '❌' : event.isOnlineMeeting ? '💻' : '📍';
+    const timeStr = event.isAllDay ? 'Ganztägig' : event.startTimeDisplay;
+    const subjectEscaped = event.subject.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+    lines.push(`| ${i + 1} | ${event.startDate} | ${timeStr} | ${statusIcon} ${subjectEscaped} |`);
+  }
+  lines.push('');
+  lines.push('## Detailansicht');
+  lines.push('');
+
+  const sortedDates = Object.keys(response.groupedByDate).sort((a, b) => {
+    const aDate = new Date(a.split('.').reverse().join('-'));
+    const bDate = new Date(b.split('.').reverse().join('-'));
+    return aDate.getTime() - bDate.getTime();
+  });
+
+  for (const date of sortedDates) {
+    const events = response.groupedByDate[date];
+    const dateObj = new Date(date.split('.').reverse().join('-'));
+    const weekday = dateObj.toLocaleDateString('de-DE', { weekday: 'long' });
+    lines.push(`### ${weekday}, ${date} (${events.length} Termin${events.length > 1 ? 'e' : ''})`);
+    lines.push('');
+
+    for (const event of events) {
+      const statusIcon = event.isCancelled ? '❌' : event.isOnlineMeeting ? '💻' : '📍';
+      const timeStr = event.isAllDay
+        ? 'Ganztägig'
+        : `${event.startTimeDisplay} - ${event.endTimeDisplay} (${event.duration})`;
+      lines.push(`- **${statusIcon} ${event.subject}**`);
+      lines.push(`  - ⏰ ${timeStr}`);
+      if (event.location) lines.push(`  - 📍 ${event.location}`);
+      if (event.organizer) lines.push(`  - 👤 ${event.organizer}`);
+      if (event.attendees && event.attendees.length > 0) {
+        lines.push(
+          `  - 👥 ${event.attendees.slice(0, 5).join(', ')}${event.attendees.length > 5 ? ` (+${event.attendees.length - 5} weitere)` : ''}`
+        );
+      }
+      if (event.onlineMeetingUrl) lines.push(`  - 🔗 ${event.onlineMeetingUrl}`);
+      if (event.bodyPreview?.trim()) {
+        const preview = event.bodyPreview.substring(0, 100).replace(/\n/g, ' ').trim();
+        if (preview) lines.push(`  - 📝 ${preview}${event.bodyPreview.length > 100 ? '...' : ''}`);
+      }
+      lines.push('');
+    }
+  }
+
+  lines.push('---');
+  lines.push('');
+  lines.push(
+    '*Zeitraum: ' + response.summary.dateRange + ' · Zeitzone: ' + response.summary.timezone + '*'
+  );
+  return lines.join('\n');
+}
+
+/**
  * Detect if response is a calendar events response
  */
 export function isCalendarResponse(response: unknown): boolean {
@@ -1325,6 +1446,103 @@ export function mailResponseToText(response: FormattedMailResponse): string {
 }
 
 /**
+ * Convert formatted mail response to structured Markdown (same content as mailResponseToText).
+ */
+export function mailResponseToMarkdown(response: FormattedMailResponse): string {
+  const lines: string[] = [];
+
+  lines.push('# E-Mails');
+  lines.push('');
+  lines.push('## Zusammenfassung');
+  lines.push('');
+  lines.push(`- **Anzahl E-Mails:** ${response.summary.totalMessages}`);
+  lines.push(`- **Ungelesen:** ${response.summary.unreadCount}`);
+  lines.push(`- **Zeitraum:** ${response.summary.dateRange}`);
+  lines.push(`- **Zeitzone:** ${response.summary.timezone}`);
+  lines.push('');
+
+  if (response.summary.totalMessages === 0) {
+    lines.push('Keine E-Mails gefunden.');
+    return lines.join('\n');
+  }
+
+  const mostRecentUnread = response.messages.find((m) => !m.isRead);
+  if (mostRecentUnread) {
+    lines.push(
+      `- **Neueste ungelesene:** "${mostRecentUnread.subject.substring(0, 50)}${mostRecentUnread.subject.length > 50 ? '...' : ''}" von ${mostRecentUnread.from.name}`
+    );
+  }
+  lines.push('');
+  lines.push('## Schnellübersicht');
+  lines.push('');
+
+  const allMessagesSorted = [...response.messages].sort((a, b) => {
+    const aDateStr = a.receivedDate.split('.').reverse().join('-') + 'T' + a.receivedTime;
+    const bDateStr = b.receivedDate.split('.').reverse().join('-') + 'T' + b.receivedTime;
+    return bDateStr.localeCompare(aDateStr);
+  });
+
+  for (let i = 0; i < allMessagesSorted.length; i++) {
+    const msg = allMessagesSorted[i];
+    const readIcon = msg.isRead ? '📭' : '📬';
+    const attachIcon = msg.hasAttachments ? ' 📎' : '';
+    const subjectShort =
+      msg.subject.length > 40 ? msg.subject.substring(0, 40) + '...' : msg.subject;
+    lines.push(
+      `${i + 1}. ${readIcon}${attachIcon} ${msg.receivedDate} ${msg.receivedTimeDisplay} | ${msg.from.name} | **${subjectShort}**`
+    );
+  }
+  lines.push('');
+  lines.push('## Detailansicht');
+  lines.push('');
+
+  const sortedDates = Object.keys(response.groupedByDate).sort((a, b) => {
+    const aDate = new Date(a.split('.').reverse().join('-'));
+    const bDate = new Date(b.split('.').reverse().join('-'));
+    return bDate.getTime() - aDate.getTime();
+  });
+
+  for (const date of sortedDates) {
+    const messages = response.groupedByDate[date];
+    const dateObj = new Date(date.split('.').reverse().join('-'));
+    const weekday = dateObj.toLocaleDateString('de-DE', { weekday: 'long' });
+    lines.push(
+      `### ${weekday}, ${date} (${messages.length} E-Mail${messages.length > 1 ? 's' : ''})`
+    );
+    lines.push('');
+
+    for (const message of messages) {
+      const readIcon = message.isRead ? '📭' : '📬';
+      lines.push(`- **${readIcon} ${message.subject}**`);
+      lines.push(`  - ⏰ ${message.receivedTimeDisplay}`);
+      lines.push(`  - 👤 Von: ${message.from.name} <${message.from.email}>`);
+      if (message.to.length > 0) {
+        const toList = message.to
+          .slice(0, 3)
+          .map((r) => r.name)
+          .join(', ');
+        lines.push(
+          `  - 👥 An: ${toList}${message.to.length > 3 ? ` (+${message.to.length - 3} weitere)` : ''}`
+        );
+      }
+      if (message.bodyPreview?.trim()) {
+        const preview = message.bodyPreview.substring(0, 120).replace(/\n/g, ' ').trim();
+        if (preview)
+          lines.push(`  - 📝 ${preview}${message.bodyPreview.length > 120 ? '...' : ''}`);
+      }
+      lines.push('');
+    }
+  }
+
+  lines.push('## Metadaten');
+  lines.push('');
+  lines.push(`- Zeitraum: ${response.summary.dateRange}`);
+  lines.push(`- Anzahl: ${response.summary.totalMessages}`);
+  lines.push(`- Ungelesen: ${response.summary.unreadCount}`);
+  return lines.join('\n');
+}
+
+/**
  * Detect if response is a mail messages response
  */
 export function isMailResponse(response: unknown): boolean {
@@ -1651,6 +1869,120 @@ export function filesResponseToText(response: {
   return lines.join('\n');
 }
 
+/** Type for files response used by filesResponseToText and filesResponseToMarkdown */
+type FormattedFilesResponseForText = {
+  summary: {
+    totalFiles: number;
+    totalFolders: number;
+    totalLoopFiles?: number;
+    totalSize: number;
+    fileTypes: Record<string, number>;
+  };
+  files: Array<Record<string, unknown>>;
+  loopFiles?: Array<Record<string, unknown>>;
+  groupedByType: Record<string, Array<Record<string, unknown>>>;
+};
+
+/**
+ * Convert formatted files response to structured Markdown (same content as filesResponseToText).
+ */
+export function filesResponseToMarkdown(response: FormattedFilesResponseForText): string {
+  const lines: string[] = [];
+
+  lines.push('# Dateien');
+  lines.push('');
+  lines.push('## Zusammenfassung');
+  lines.push('');
+  lines.push(`- **Anzahl Dateien:** ${response.summary.totalFiles}`);
+  lines.push(`- **Anzahl Ordner:** ${response.summary.totalFolders}`);
+  if (response.summary.totalLoopFiles && response.summary.totalLoopFiles > 0) {
+    lines.push(`- **Loop-Dateien:** ${response.summary.totalLoopFiles}`);
+  }
+  lines.push(`- **Gesamtgröße:** ${formatFileSize(response.summary.totalSize)}`);
+  lines.push('');
+
+  if (response.summary.totalFiles === 0 && response.summary.totalFolders === 0) {
+    lines.push('Keine Dateien oder Ordner gefunden.');
+    return lines.join('\n');
+  }
+
+  const fileTypeEntries = Object.entries(response.summary.fileTypes).sort((a, b) => b[1] - a[1]);
+  const topFileTypes = fileTypeEntries.slice(0, 5);
+  if (topFileTypes.length > 0) {
+    lines.push(
+      '- **Dateitypen:** ' + topFileTypes.map(([type, count]) => `${type} (${count})`).join(', ')
+    );
+    if (fileTypeEntries.length > 5)
+      lines.push(`  ... und ${fileTypeEntries.length - 5} weitere Typen`);
+  }
+  lines.push('');
+  lines.push('## Schnellübersicht');
+  lines.push('');
+
+  for (let i = 0; i < Math.min(response.files.length, 20); i++) {
+    const item = response.files[i];
+    const name = (item.name as string) || (item.displayName as string) || 'Unbekannt';
+    const odataType = (item['@odata.type'] as string) || '';
+    const isFolder = odataType.includes('folder') || item.folder !== undefined;
+    const isLoop = item.isLoopFile === true;
+    const icon = isLoop ? '📋' : isFolder ? '📂' : '📄';
+    const loopBadge = isLoop ? ' [Loop]' : '';
+    const size = isFolder ? '' : ` (${formatFileSize((item.size as number) || 0)})`;
+    const webUrl = (item.webUrl as string) || '';
+    const urlPart = webUrl ? ` [🔗](${webUrl})` : '';
+    lines.push(`${i + 1}. ${icon} ${name}${loopBadge}${size}${urlPart}`);
+  }
+  if (response.files.length > 20) {
+    lines.push(`... und ${response.files.length - 20} weitere`);
+  }
+  lines.push('');
+
+  if (response.loopFiles && response.loopFiles.length > 0) {
+    lines.push('## Loop-Dateien');
+    lines.push('');
+    for (const loopFile of response.loopFiles.slice(0, 10)) {
+      const name = (loopFile.name as string) || (loopFile.displayName as string) || 'Unbekannt';
+      const size = formatFileSize((loopFile.size as number) || 0);
+      const webUrl = (loopFile.webUrl as string) || '';
+      const urlPart = webUrl ? ` [🔗](${webUrl})` : '';
+      lines.push(`- 📋 ${name} (${size})${urlPart}`);
+    }
+    if (response.loopFiles.length > 10) {
+      lines.push(`... und ${response.loopFiles.length - 10} weitere Loop-Dateien`);
+    }
+    lines.push('');
+  }
+
+  lines.push('## Detailansicht nach Typ');
+  lines.push('');
+  const sortedTypes = Object.keys(response.groupedByType).sort(
+    (a, b) => response.groupedByType[b].length - response.groupedByType[a].length
+  );
+  for (const type of sortedTypes.slice(0, 10)) {
+    const typeFiles = response.groupedByType[type];
+    lines.push(
+      `### ${type.toUpperCase()} (${typeFiles.length} Datei${typeFiles.length > 1 ? 'en' : ''})`
+    );
+    lines.push('');
+    for (const file of typeFiles.slice(0, 10)) {
+      const name = (file.name as string) || (file.displayName as string) || 'Unbekannt';
+      const size = formatFileSize((file.size as number) || 0);
+      const webUrl = (file.webUrl as string) || '';
+      const urlPart = webUrl ? ` [🔗](${webUrl})` : '';
+      lines.push(`- ${name} (${size})${urlPart}`);
+    }
+    if (typeFiles.length > 10) lines.push(`... und ${typeFiles.length - 10} weitere`);
+    lines.push('');
+  }
+
+  lines.push('## Metadaten');
+  lines.push('');
+  lines.push(`- Dateien: ${response.summary.totalFiles}`);
+  lines.push(`- Ordner: ${response.summary.totalFolders}`);
+  lines.push(`- Gesamtgröße: ${formatFileSize(response.summary.totalSize)}`);
+  return lines.join('\n');
+}
+
 /**
  * Format any Graph API response based on its type
  */
@@ -1665,6 +1997,8 @@ export function formatGraphResponse(
 
   const obj = response as Record<string, unknown>;
 
+  const useMarkdown = getResponseFormat() === 'markdown';
+
   // Check for calendar responses
   if (
     isCalendarResponse(response) ||
@@ -1675,9 +2009,10 @@ export function formatGraphResponse(
     const endDateTime = params?.endDateTime as string | undefined;
 
     const formatted = formatCalendarResponse(obj, startDateTime, endDateTime);
-    const textOutput = calendarResponseToText(formatted);
+    const textOutput = useMarkdown
+      ? calendarResponseToMarkdown(formatted)
+      : calendarResponseToText(formatted);
 
-    // _humanReadable at the top of the response
     return {
       formatted: {
         _humanReadable: textOutput,
@@ -1691,9 +2026,10 @@ export function formatGraphResponse(
   // Check for mail responses
   if (isMailResponse(response) || toolName?.includes('mail') || toolName?.includes('message')) {
     const formatted = formatMailResponse(obj);
-    const textOutput = mailResponseToText(formatted);
+    const textOutput = useMarkdown
+      ? mailResponseToMarkdown(formatted)
+      : mailResponseToText(formatted);
 
-    // _humanReadable at the top of the response
     return {
       formatted: {
         _humanReadable: textOutput,
@@ -1712,9 +2048,10 @@ export function formatGraphResponse(
     toolName?.includes('driveItem')
   ) {
     const formatted = formatFilesResponse(obj);
-    const textOutput = filesResponseToText(formatted);
+    const textOutput = useMarkdown
+      ? filesResponseToMarkdown(formatted as FormattedFilesResponseForText)
+      : filesResponseToText(formatted);
 
-    // _humanReadable at the top of the response
     return {
       formatted: {
         _humanReadable: textOutput,
@@ -2286,17 +2623,20 @@ export default {
   formatCalendarEvent,
   formatCalendarResponse,
   calendarResponseToText,
+  calendarResponseToMarkdown,
   calendarResponseToTextByProfession,
   isCalendarResponse,
   // Mail functions
   formatMailMessage,
   formatMailResponse,
   mailResponseToText,
+  mailResponseToMarkdown,
   mailResponseToTextByProfession,
   isMailResponse,
   // Files functions
   formatFilesResponse,
   filesResponseToText,
+  filesResponseToMarkdown,
   isFilesResponse,
   // Profession-based formatting
   formatDataByProfession,
