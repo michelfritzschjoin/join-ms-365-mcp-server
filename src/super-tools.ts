@@ -1955,32 +1955,43 @@ async function handleEmail(
       // Search results are automatically ordered by relevance
       // Note: input.orderby is intentionally not used here
 
-      // Apply temporal filters if NLP detected them
+      // Apply temporal filters if NLP detected them; otherwise for from:email searches use a small window first (fallback to 365 days if no results)
+      const searchBySenderEmail =
+        extractEmailFromSearch(searchForMessages) || extractEmailFromSearch(input.search ?? '');
       if (optimized.filters?.dateFilter) {
         const dateFilter = optimized.filters.dateFilter as string;
         params.$filter = `receivedDateTime ge ${dateFilter}`;
         thinking.push(`📅 Applying date filter: after ${dateFilter}`);
+      } else if (searchBySenderEmail) {
+        const smallRangeStart = new Date();
+        smallRangeStart.setDate(smallRangeStart.getDate() - 30);
+        params.$filter = `receivedDateTime ge ${smallRangeStart.toISOString()}`;
+        thinking.push(
+          `📅 Applying default small time range: last 30 days (will retry with 365 days if no results)`
+        );
       }
 
       let result = await callGraph(graphClient, 'GET', '/me/messages', params);
       let parsedResult = JSON.parse(result);
 
-      // Fallback: if 0 results, try email-based or last-name-only retry
+      // Fallback: if 0 results in small time range, retry with from:email and 365-day window
       const hitCount = parsedResult?.value?.length ?? 0;
       const fallbackEmail = extractEmailFromSearch(params.$search ?? input.search ?? '');
       if (hitCount === 0 && fallbackEmail) {
-        const fallbackParams = {
+        const yearAgo = new Date();
+        yearAgo.setDate(yearAgo.getDate() - 365);
+        const fallbackParams: Record<string, string> = {
           ...params,
           $search: formatEmailSearchQuery(`from:${fallbackEmail}`),
+          $filter: `receivedDateTime ge ${yearAgo.toISOString()}`,
         };
-        delete (fallbackParams as Record<string, unknown>).$filter;
         const fallbackResult = await callGraph(graphClient, 'GET', '/me/messages', fallbackParams);
         const fallbackParsed = JSON.parse(fallbackResult);
         if ((fallbackParsed?.value?.length ?? 0) > 0) {
           parsedResult = fallbackParsed;
           result = fallbackResult;
           thinking.push(
-            `🔄 Fallback: 0 results for combined query; retried with from:${fallbackEmail} and found messages`
+            `🔄 Fallback: 0 results in small time range; retried with from:${fallbackEmail} and last 365 days and found messages`
           );
         }
       }
