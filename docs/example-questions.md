@@ -10,6 +10,7 @@
 
 - Zeig mir die letzten 10 E-Mails. / Show my last 10 emails.
 - Suche E-Mails von [Person] oder zum Betreff "[Thema]". / Search emails from [person] or with subject "[topic]".
+- Suche alle E-Mails von [Name] (z. B. Markus Görnhardt). / Search all emails from [name] (e.g. Markus Görnhardt).
 - Sende eine E-Mail an [Empfänger] mit Betreff "[…]" und Text "[…]". / Send an email to [recipient] with subject "[…]" and body "[…]".
 - Erstelle einen E-Mail-Entwurf. / Create an email draft.
 - Liste Anhänge einer E-Mail. / List attachments of an email.

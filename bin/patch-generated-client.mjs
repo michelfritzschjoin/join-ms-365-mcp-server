@@ -55,26 +55,51 @@ if (content.includes("path: '/chats/:chatId'")) {
   const pathIdx = content.indexOf("path: '/chats/:chatId'");
   const alreadyFixed = content.includes('response: z.lazy(() => microsoft_graph_chat)', pathIdx);
   if (!alreadyFixed) {
+    // Find start of get-chat endpoint block (generator may use 2 or 4 spaces).
     let blockStart = content.lastIndexOf('\n  {', pathIdx);
+    if (blockStart < 0) blockStart = content.lastIndexOf('\n    {', pathIdx);
     if (blockStart < 0) blockStart = content.lastIndexOf('{\n    method:', pathIdx);
+    if (blockStart < 0) {
+      const beforePath = content.slice(0, pathIdx);
+      const re = /\n\s*\{\s*\n\s*method: 'get'/g;
+      let m;
+      let lastMatch;
+      while ((m = re.exec(beforePath)) !== null) lastMatch = m;
+      if (lastMatch) blockStart = lastMatch.index;
+    }
     if (blockStart < 0) blockStart = content.lastIndexOf('{', pathIdx);
-    // End of get-chat block: next endpoint "\n  {" or end of array "\n]);"
-    const nextBlock = content.indexOf('\n  {', blockStart + 10);
-    const endOfArray = content.indexOf('\n]);', blockStart);
-    const blockEnd =
-      nextBlock !== -1 && (endOfArray === -1 || nextBlock < endOfArray)
-        ? nextBlock
-        : endOfArray !== -1
-          ? endOfArray
-          : null;
-    const prefix =
-      content.slice(0, blockStart >= 0 ? blockStart : pathIdx - 100) +
-      (blockStart >= 0 ? '\n  ' : '');
-    if (blockEnd !== null) {
-      content = prefix + fixedGetChatBlockContent.trimEnd() + '\n' + content.slice(blockEnd);
-      console.log('patch-generated-client: patched get-chat endpoint (normalized).');
+    // Never use pathIdx - 100: it can leave an unclosed template literal in the prefix.
+    if (blockStart < 0) {
+      console.warn(
+        'patch-generated-client: could not find get-chat block start, skipping get-chat patch.'
+      );
     } else {
-      const suffix = `]);
+      // End of get-chat block: next endpoint "\n  {" or "\n    {" or end of array "\n]);"
+      const nextBlock2 = content.indexOf('\n  {', blockStart + 10);
+      const nextBlock4 = content.indexOf('\n    {', blockStart + 10);
+      const nextBlock =
+        nextBlock2 !== -1 && (nextBlock4 === -1 || nextBlock2 <= nextBlock4)
+          ? nextBlock2
+          : nextBlock4;
+      const endOfArray = content.indexOf('\n]);', blockStart);
+      const blockEnd =
+        nextBlock !== -1 && (endOfArray === -1 || nextBlock < endOfArray)
+          ? nextBlock
+          : endOfArray !== -1
+            ? endOfArray
+            : null;
+      const prefix = content.slice(0, blockStart);
+      const blockPrefix = content[blockStart] === '\n' ? '\n  ' : '';
+      if (blockEnd !== null) {
+        content =
+          prefix +
+          blockPrefix +
+          fixedGetChatBlockContent.trimEnd() +
+          '\n' +
+          content.slice(blockEnd);
+        console.log('patch-generated-client: patched get-chat endpoint (normalized).');
+      } else {
+        const suffix = `]);
 
 export const api = new Zodios(endpoints);
 
@@ -82,8 +107,9 @@ export function createApiClient(baseUrl: string, options?: ZodiosOptions) {
   return new Zodios(baseUrl, endpoints, options);
 }
 `;
-      content = prefix + fixedGetChatBlockContent.trimEnd() + '\n' + suffix;
-      console.log('patch-generated-client: patched get-chat endpoint (normalized, truncated).');
+        content = prefix + blockPrefix + fixedGetChatBlockContent.trimEnd() + '\n' + suffix;
+        console.log('patch-generated-client: patched get-chat endpoint (normalized, truncated).');
+      }
     }
   }
 }

@@ -21,10 +21,13 @@ import {
   formatCalendarResponse,
   formatCalendarEvent,
   calendarResponseToText,
+  calendarResponseToMarkdown,
   formatMailResponse,
   mailResponseToText,
+  mailResponseToMarkdown,
   isCalendarResponse,
   isMailResponse,
+  getResponseFormat,
 } from './response-formatter.js';
 import NLPEnhancer, { type DecomposedQuery, type ExtractedEntity } from './nlp-enhancer.js';
 import DataAggregator, { type AggregationResult, type AggregatedItem } from './data-aggregator.js';
@@ -46,6 +49,7 @@ import {
   getUserId,
 } from './request-context.js';
 import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
+import { applyResponseLimit } from './utils/response-limiter.js';
 import {
   formatEmailSearchQuery,
   extractEmailFromSearch,
@@ -970,7 +974,7 @@ function formatAndReturnToolResponse(response: string | unknown, thinking?: stri
       parsed = JSON.parse(response);
     } catch {
       // Not JSON, return as is (but still format if it's a JSON string in text)
-      return response;
+      return applyResponseLimit(response);
     }
   } else {
     parsed = response;
@@ -994,12 +998,12 @@ function formatAndReturnToolResponse(response: string | unknown, thinking?: stri
     formattedString = JSON.stringify(formatted, null, 2);
   }
 
-  // Add thinking if provided
+  // Add thinking if provided; apply optional response length limit
   if (thinking && thinking.length > 0) {
-    return addThinkingToResponse(formattedString, thinking);
+    return applyResponseLimit(addThinkingToResponse(formattedString, thinking));
   }
 
-  return formattedString;
+  return applyResponseLimit(formattedString);
 }
 
 /**
@@ -1662,13 +1666,14 @@ async function handleEmail(
       // Extract pagination info
       const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
 
-      // Format mail response with profession-specific formatting
+      // Format mail response with profession-specific or Markdown formatting
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
-        // Use profession-specific text formatting
-        const formattedText = mailResponseToTextByProfession(formatted);
+        const formattedText =
+          getResponseFormat() === 'markdown'
+            ? mailResponseToMarkdown(formatted)
+            : mailResponseToTextByProfession(formatted);
 
-        // Add metadata to response
         const responseWithMetadata = formatStandardResponse(
           { formatted: formattedText, raw: parsedResult },
           {
@@ -1922,8 +1927,27 @@ async function handleEmail(
         thinking.push(`📊 Detected intent: ${optimized.nlpAnalysis.intent}`);
       }
 
+      const searchQueryTrimmed = (optimized.optimizedQuery || input.search || '').trim();
+      let searchForMessages: string;
+
+      // Step 1: If query looks like a person name, resolve to email first, then search by email
+      if (looksLikePersonName(searchQueryTrimmed)) {
+        const user = await findUser(graphClient, searchQueryTrimmed);
+        const resolvedEmail = user?.mail || user?.userPrincipalName;
+        if (resolvedEmail) {
+          thinking.push(
+            `👤 Resolved "${searchQueryTrimmed}" to email: ${resolvedEmail}; searching emails from that address.`
+          );
+          searchForMessages = formatEmailSearchQuery(`from:${resolvedEmail}`);
+        } else {
+          searchForMessages = formatSearchQuery(optimized.optimizedQuery, 'displayName', 'email');
+        }
+      } else {
+        searchForMessages = formatSearchQuery(optimized.optimizedQuery, 'displayName', 'email');
+      }
+
       const params: Record<string, string> = {
-        $search: formatSearchQuery(optimized.optimizedQuery, 'displayName', 'email'),
+        $search: searchForMessages,
         $top: String(input.top || 25),
       };
 
@@ -2004,13 +2028,14 @@ async function handleEmail(
         );
       }
 
-      // Format mail response with profession-specific formatting
+      // Format mail response with profession-specific or Markdown formatting
       if (isMailResponse(parsedResult)) {
         const formatted = formatMailResponse(parsedResult);
-        // Use profession-specific text formatting
-        const formattedText = mailResponseToTextByProfession(formatted);
+        const formattedText =
+          getResponseFormat() === 'markdown'
+            ? mailResponseToMarkdown(formatted)
+            : mailResponseToTextByProfession(formatted);
 
-        // Add NLP insights to response
         const responseWithMetadata = formatStandardResponse(
           { formatted: formattedText, raw: parsedResult },
           {
@@ -2194,14 +2219,14 @@ async function handleCalendar(
       // Extract pagination info
       const pagination = extractPaginationInfo(parsedResult, input.skip, input.top);
 
-      // Format calendar response with quick summary
-      // Use profession-based formatting if available
+      // Format calendar response with profession-based or Markdown formatting
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult);
-        // Use profession-specific text formatting
-        const formattedText = calendarResponseToTextByProfession(formatted);
+        const formattedText =
+          getResponseFormat() === 'markdown'
+            ? calendarResponseToMarkdown(formatted)
+            : calendarResponseToTextByProfession(formatted);
 
-        // Add metadata to response
         const responseWithMetadata = formatStandardResponse(
           { formatted: formattedText, raw: parsedResult },
           {
@@ -2273,11 +2298,13 @@ async function handleCalendar(
       );
       const parsedResult = JSON.parse(result);
 
-      // Format calendar response with profession-specific formatting
+      // Format calendar response with profession-specific or Markdown formatting
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult, startDateTime, endDateTime);
-        // Use profession-specific text formatting
-        const formattedText = calendarResponseToTextByProfession(formatted);
+        const formattedText =
+          getResponseFormat() === 'markdown'
+            ? calendarResponseToMarkdown(formatted)
+            : calendarResponseToTextByProfession(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
 
@@ -2306,11 +2333,13 @@ async function handleCalendar(
       );
       const parsedResult = JSON.parse(result);
 
-      // Format calendar response with profession-specific formatting
+      // Format calendar response with profession-specific or Markdown formatting
       if (isCalendarResponse(parsedResult)) {
         const formatted = formatCalendarResponse(parsedResult);
-        // Use profession-specific text formatting
-        const formattedText = calendarResponseToTextByProfession(formatted);
+        const formattedText =
+          getResponseFormat() === 'markdown'
+            ? calendarResponseToMarkdown(formatted)
+            : calendarResponseToTextByProfession(formatted);
         return addThinkingToResponse(formattedText, thinking);
       }
 
@@ -4759,6 +4788,29 @@ async function handleSearch(
         }
       } catch (error) {
         logger.debug('Learning system entity type recommendation failed', { error });
+      }
+    }
+  }
+
+  // Intent-based entity filter from NLP searchScopes (when enabled)
+  const intentEntityFilterEnabled =
+    process.env.MS365_MCP_INTENT_ENTITY_FILTER === 'true' ||
+    process.env.MS365_MCP_INTENT_ENTITY_FILTER === '1';
+  if (
+    entityTypes.length === 0 &&
+    intentEntityFilterEnabled &&
+    decomposed.ms365Context?.searchScopes?.length
+  ) {
+    const scopes = decomposed.ms365Context.searchScopes.filter((s) =>
+      searchEntityTypes.includes(s as (typeof searchEntityTypes)[number])
+    );
+    if (scopes.length > 0) {
+      const validated = validateEntityTypeCombinations(scopes);
+      if (validated.length > 0) {
+        entityTypes = validated as Array<(typeof searchEntityTypes)[number]>;
+        thinking.push(
+          `🎯 Intent-based entity types from NLP: ${entityTypes.join(', ')} (service: ${decomposed.ms365Context.service})`
+        );
       }
     }
   }
