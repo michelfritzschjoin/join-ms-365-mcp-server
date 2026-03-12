@@ -417,7 +417,7 @@ class GraphClient {
   /**
    * Execute multiple Graph API requests in a single HTTP call using JSON batching.
    * Uses POST /v1.0/$batch (max 20 requests per batch). Each request url must be
-   * relative to /v1.0 (e.g. /me/calendarView?startDateTime=...).
+   * relative to /v1.0 (e.g. /me/calendar/calendarView?startDateTime=...).
    *
    * @param requests - Array of batch requests (id, method, url, optional body/headers)
    * @returns Array of responses in the same order as requests (id, status, body)

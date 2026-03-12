@@ -1,0 +1,58 @@
+name: Update Graph API
+
+on:
+  schedule:
+    # Every Sunday at 00:00 UTC
+    - cron: '0 0 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-graph-api:
+    name: Download OpenAPI and regenerate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate client code (force download OpenAPI)
+        run: npm run generate -- --force-download
+
+      - name: Patch generated client
+        run: node bin/patch-generated-client.mjs
+
+      - name: Force-add OpenAPI artifacts for diff
+        run: |
+          git add -f openapi/openapi.yaml openapi/openapi-trimmed.yaml 2>/dev/null || true
+          git diff --staged --quiet && echo "CHANGED=0" >> "$GITHUB_ENV" || echo "CHANGED=1" >> "$GITHUB_ENV"
+
+      - name: Create branch, commit and open PR on changes
+        if: env.CHANGED == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="update/graph-api-$(date +%Y-%m-%d)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git commit -m "chore(openapi): update Graph API spec from upstream"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "chore: Update Graph API OpenAPI spec ($(date +%Y-%m-%d))" \
+            --body "Automated update from scheduled workflow. Please review and merge."

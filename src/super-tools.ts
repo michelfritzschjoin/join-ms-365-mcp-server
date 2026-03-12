@@ -108,6 +108,9 @@ const dataAggregator = new DataAggregator();
 // Initialize UQAS for bilingual support
 const uqas = getUQAS();
 
+/** Primary calendar only (no shared calendars) - use for "my appointments" / "meine Termine" to avoid mixing other users' events */
+const PRIMARY_CALENDAR_VIEW_PATH = '/me/calendar/calendarView';
+
 /**
  * Format search query for Microsoft Graph API endpoints that require property:value format
  * @param searchValue - The search query string
@@ -2302,7 +2305,7 @@ async function handleCalendar(
       const result = await callGraph(
         graphClient,
         'GET',
-        '/me/calendarView',
+        PRIMARY_CALENDAR_VIEW_PATH,
         params,
         undefined,
         headers
@@ -2431,6 +2434,7 @@ const teamsActions = z.enum([
   'channel-messages', // List channel messages
   'chats', // List chats
   'chat-messages', // List chat messages
+  'unreplied-chat-messages', // Messages I sent with no reply, or messages from others I haven't replied to
 ]);
 
 const teamsSchema = z.object({
@@ -2458,6 +2462,13 @@ const teamsSchema = z.object({
     .optional()
     .describe(
       'Filter chats by person name or email. When provided, the system will first resolve the person, then fetch only chats with that person.'
+    ),
+  unrepliedType: z
+    .enum(['waiting_for_reply', 'need_to_reply'])
+    .optional()
+    .default('waiting_for_reply')
+    .describe(
+      'For unreplied-chat-messages: "waiting_for_reply" = messages I sent that have no reply yet; "need_to_reply" = messages from others I have not yet replied to'
     ),
   // Filters
   ...filterSchema,
@@ -2740,6 +2751,205 @@ async function handleTeams(
       }
 
       return formatAndReturnToolResponse(result, thinking);
+    }
+
+    case 'unreplied-chat-messages': {
+      const unrepliedType = input.unrepliedType ?? 'waiting_for_reply';
+      const maxChats = Math.min(input.top ?? 15, 20);
+      const maxMessagesPerChat = 15;
+
+      thinking.push(
+        unrepliedType === 'waiting_for_reply'
+          ? 'Finding Teams messages I sent that have no reply yet.'
+          : 'Finding Teams messages from others I have not yet replied to.'
+      );
+
+      // Resolve current user's Graph ID (required to compare message authors)
+      let currentUserId: string;
+      try {
+        const meResult = await callGraph(graphClient, 'GET', '/me', { $select: 'id' });
+        const me = JSON.parse(meResult);
+        currentUserId = me.id;
+        if (!currentUserId) throw new Error('Could not get current user id');
+      } catch (err) {
+        const errorResponse = {
+          error: 'Could not identify current user',
+          message:
+            'Unable to load your user identity from Microsoft Graph. Please ensure you are signed in.',
+          details: (err as Error).message,
+        };
+        thinking.push('Failed to get current user id');
+        return addThinkingToResponse(JSON.stringify(errorResponse, null, 2), thinking);
+      }
+
+      let chatsToScan: Array<{ id: string; topic?: string; chatType?: string; webUrl?: string }>;
+      if (input.person) {
+        thinking.push(`Resolving person: ${input.person}`);
+        const user = await findUser(graphClient, input.person);
+        if (!user) {
+          const errorResponse = {
+            error: 'User not found',
+            message: `Could not find a user matching "${input.person}".`,
+            suggestion: 'Use a full name or email address.',
+          };
+          return addThinkingToResponse(JSON.stringify(errorResponse, null, 2), thinking);
+        }
+        const matchingChats = await findChatsWithUser(
+          graphClient,
+          user.id,
+          user.mail || user.userPrincipalName,
+          user.displayName
+        );
+        chatsToScan = matchingChats.map((c) => ({
+          id: c.id,
+          topic: c.topic,
+          chatType: c.chatType,
+          webUrl: c.webUrl,
+        }));
+      } else {
+        const chatsResult = await callGraph(graphClient, 'GET', '/me/chats', {
+          $top: String(maxChats),
+        });
+        const chatsData = JSON.parse(chatsResult);
+        chatsToScan = (chatsData.value || []).map((c: any) => ({
+          id: c.id,
+          topic: c.topic,
+          chatType: c.chatType,
+          webUrl: c.webUrl,
+        }));
+      }
+
+      if (chatsToScan.length === 0) {
+        const emptyResponse = {
+          unrepliedType,
+          message:
+            unrepliedType === 'waiting_for_reply'
+              ? 'No Teams chats found, or no messages match (messages you sent with no reply yet).'
+              : 'No Teams chats found, or no messages match (messages from others you have not replied to).',
+          unrepliedMessages: [],
+          chatsScanned: 0,
+        };
+        return addThinkingToResponse(JSON.stringify(emptyResponse, null, 2), thinking);
+      }
+
+      thinking.push(`Scanning ${chatsToScan.length} chat(s) for unreplied messages...`);
+      const unreplied: Array<{
+        chatId: string;
+        chatTopic?: string;
+        chatType?: string;
+        webUrl?: string;
+        messageId: string;
+        from: string;
+        bodyPreview: string;
+        createdDateTime: string;
+      }> = [];
+
+      for (const chat of chatsToScan) {
+        try {
+          const messagesResult = await callGraph(
+            graphClient,
+            'GET',
+            `/me/chats/${chat.id}/messages`,
+            { $top: String(maxMessagesPerChat), $orderby: 'createdDateTime desc' }
+          );
+          const messagesData = JSON.parse(messagesResult);
+          const messages = messagesData.value || [];
+
+          for (const msg of messages) {
+            const fromId = msg.from?.user?.id ?? msg.from?.application?.id;
+            const fromName =
+              msg.from?.user?.displayName ??
+              msg.from?.user?.userPrincipalName ??
+              msg.from?.application?.displayName ??
+              'Unknown';
+            const rawContent = msg.body?.content ?? '';
+            const bodyPreview =
+              typeof rawContent === 'string'
+                ? rawContent
+                    .replace(/<[^>]*>/g, ' ')
+                    .replace(/\s+/g, ' ')
+                    .trim()
+                    .slice(0, 200)
+                : '';
+
+            if (unrepliedType === 'waiting_for_reply') {
+              if (fromId !== currentUserId) continue;
+              let repliesData: { value?: any[] };
+              try {
+                const repliesResult = await callGraph(
+                  graphClient,
+                  'GET',
+                  `/me/chats/${chat.id}/messages/${msg.id}/replies`,
+                  { $top: '1' }
+                );
+                repliesData = JSON.parse(repliesResult);
+              } catch {
+                repliesData = { value: [] };
+              }
+              const replyCount = Array.isArray(repliesData.value) ? repliesData.value.length : 0;
+              if (replyCount === 0) {
+                unreplied.push({
+                  chatId: chat.id,
+                  chatTopic: chat.topic,
+                  chatType: chat.chatType,
+                  webUrl: chat.webUrl,
+                  messageId: msg.id,
+                  from: fromName,
+                  bodyPreview,
+                  createdDateTime: msg.createdDateTime ?? '',
+                });
+              }
+            } else {
+              if (fromId === currentUserId) continue;
+              let repliesData: { value?: any[] };
+              try {
+                const repliesResult = await callGraph(
+                  graphClient,
+                  'GET',
+                  `/me/chats/${chat.id}/messages/${msg.id}/replies`,
+                  { $top: '50' }
+                );
+                repliesData = JSON.parse(repliesResult);
+              } catch {
+                repliesData = { value: [] };
+              }
+              const replies = repliesData.value || [];
+              const iReplied = replies.some((r: any) => r.from?.user?.id === currentUserId);
+              if (!iReplied) {
+                unreplied.push({
+                  chatId: chat.id,
+                  chatTopic: chat.topic,
+                  chatType: chat.chatType,
+                  webUrl: chat.webUrl,
+                  messageId: msg.id,
+                  from: fromName,
+                  bodyPreview,
+                  createdDateTime: msg.createdDateTime ?? '',
+                });
+              }
+            }
+          }
+        } catch (chatErr) {
+          logger.warn(
+            `Failed to scan chat ${chat.id} for unreplied messages: ${(chatErr as Error).message}`
+          );
+        }
+      }
+
+      const output = {
+        unrepliedType,
+        summary:
+          unrepliedType === 'waiting_for_reply'
+            ? 'Messages you sent in Teams that have not received a reply yet.'
+            : 'Messages from others in Teams that you have not replied to yet.',
+        chatsScanned: chatsToScan.length,
+        unrepliedCount: unreplied.length,
+        unrepliedMessages: unreplied,
+      };
+      thinking.push(
+        `Found ${unreplied.length} unreplied message(s) in ${chatsToScan.length} chat(s)`
+      );
+      return addThinkingToResponse(JSON.stringify(output, null, 2), thinking);
     }
 
     default:
@@ -3772,7 +3982,7 @@ const PRODUCT_MAPPINGS: ProductMapping[] = [
   {
     product: 'Calendar',
     entityTypes: ['event'],
-    apiEndpoint: '/me/calendarView',
+    apiEndpoint: PRIMARY_CALENDAR_VIEW_PATH,
     requiresDirectApi: true,
   },
   {
@@ -4645,7 +4855,7 @@ async function handleSearch(
     }
 
     try {
-      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
+      const eventsResult = await callGraph(graphClient, 'GET', PRIMARY_CALENDAR_VIEW_PATH, {
         startDateTime: startDate.toISOString(),
         endDateTime: endDate.toISOString(),
         $top: String(requestedSize),
@@ -5388,8 +5598,31 @@ async function handleSearch(
       driveId?: string;
       itemId?: string;
       reason: string;
+      unrepliedType?: 'waiting_for_reply' | 'need_to_reply';
     };
     const suggestedNextTools: SuggestedNextTool[] = [];
+
+    // If user asks about unreplied Teams messages, suggest teams unreplied-chat-messages first
+    const unrepliedQueryPattern =
+      /\b(keine\s+antwort|noch\s+keine\s+antwort|nicht\s+beantwortet|unbeantwortet|no\s+reply|not\s+replied|unreplied|waiting\s+for\s+reply|no\s+response|ohne\s+antwort)\b/i;
+    const querySuggestsUnreplied = unrepliedQueryPattern.test(input.query);
+    const hasTeamsInQuery = /\b(teams|chat|nachricht|message)\b/i.test(input.query);
+    if (
+      querySuggestsUnreplied &&
+      (hasTeamsInQuery || Object.keys(formattedResults).some((k) => k.includes('chat')))
+    ) {
+      suggestedNextTools.push({
+        tool: 'teams',
+        action: 'unreplied-chat-messages',
+        reason:
+          'List Teams messages you sent with no reply, or messages from others you have not replied to',
+        unrepliedType: /nicht\s+beantwortet|not\s+replied|need\s+to\s+reply|noch\s+antworten/i.test(
+          input.query
+        )
+          ? 'need_to_reply'
+          : 'waiting_for_reply',
+      });
+    }
 
     for (const entityType of Object.keys(formattedResults)) {
       const items = formattedResults[entityType] as Array<Record<string, unknown>>;
@@ -6010,7 +6243,7 @@ async function searchProduct(
       ).toISOString();
       const endDate = new Date(now.getFullYear() + 1, now.getMonth(), now.getDate()).toISOString();
 
-      const result = await callGraph(graphClient, 'GET', '/me/calendarView', {
+      const result = await callGraph(graphClient, 'GET', PRIMARY_CALENDAR_VIEW_PATH, {
         startDateTime: startDate,
         endDateTime: endDate,
         $top: String(topResults),
@@ -6772,7 +7005,7 @@ async function handleAssistant(
         {
           id: 'calendar',
           method: 'GET',
-          url: buildGraphBatchUrl('/me/calendarView', {
+          url: buildGraphBatchUrl(PRIMARY_CALENDAR_VIEW_PATH, {
             startDateTime: today.toISOString(),
             endDateTime: todayEnd.toISOString(),
           }),
@@ -6846,7 +7079,7 @@ async function handleAssistant(
         {
           id: 'calendar',
           method: 'GET',
-          url: buildGraphBatchUrl('/me/calendarView', {
+          url: buildGraphBatchUrl(PRIMARY_CALENDAR_VIEW_PATH, {
             startDateTime: today.toISOString(),
             endDateTime: weekEndTime.toISOString(),
           }),
@@ -6958,7 +7191,7 @@ async function handleAssistant(
       const today = setStartOfDay(new Date());
       const todayEnd = setEndOfDay(new Date());
 
-      const eventsResult = await callGraph(graphClient, 'GET', '/me/calendarView', {
+      const eventsResult = await callGraph(graphClient, 'GET', PRIMARY_CALENDAR_VIEW_PATH, {
         startDateTime: today.toISOString(),
         endDateTime: todayEnd.toISOString(),
       });
@@ -7164,8 +7397,8 @@ async function handleDiscoverPerson(
         $top: String(limit),
         $orderby: 'receivedDateTime desc',
       }),
-      // Calendar events with this person
-      callGraph(graphClient, 'GET', '/me/calendarView', {
+      // Calendar events with this person (primary calendar only)
+      callGraph(graphClient, 'GET', PRIMARY_CALENDAR_VIEW_PATH, {
         startDateTime: startDate.toISOString(),
         endDateTime: endDate.toISOString(),
         $top: String(limit),
@@ -8779,7 +9012,7 @@ export function registerSuperTools(
   // 3. Teams
   server.tool(
     'teams',
-    'Unified Teams operations: list teams, channels, chats, and chat messages. When to use: after search finds chatMessage results, or when user asks for Teams chats/channels by name.',
+    'Unified Teams operations: list teams, channels, chats, chat messages, and unreplied messages. Use action "unreplied-chat-messages" for questions like "which Teams message have I not received a reply to?" or "which messages have I not replied to?". Use "chats" or "chat-messages" after search finds chatMessage results, or when user asks for Teams chats/channels by name.',
     teamsSchema.shape,
     async (input: TeamsInput) => {
       try {

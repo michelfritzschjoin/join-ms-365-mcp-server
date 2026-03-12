@@ -34,6 +34,8 @@
 - Zeig meine Teams. / List my Teams.
 - Zeig die letzten Chats / Nachrichten mit [Person]. / Show recent chats / messages with [person].
 - Sende eine Chat-Nachricht in [Chat]. / Send a chat message in [chat].
+- **Auf welche Teamsnachricht habe ich noch keine Antwort erhalten?** / **To which Teams message have I not yet received a reply?**
+- Welche Teams-Nachrichten habe ich noch nicht beantwortet? / Which Teams messages have I not replied to yet?
 - Gib mir eine Übersicht aller Interaktionen mit [Person] (E-Mails, Chats, Termine). / Give me an overview of all interactions with [person] (emails, chats, meetings).
 
 ---

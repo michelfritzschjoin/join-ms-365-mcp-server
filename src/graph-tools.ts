@@ -11,9 +11,11 @@ import type KnowledgeBase from './knowledge-base.js';
 import { formatGraphResponse } from './response-formatter.js';
 import { formatToolResponse } from './super-tools.js';
 import { formatEmailSearchQuery } from './utils/search-query-format.js';
+import { applyResponseLimit } from './utils/response-limiter.js';
 import { createThinkingProcess } from './thinking-process.js';
 import { encode as toonEncode } from '@toon-format/toon';
 import { getMaxPages, getDefaultPageSize } from './perf-config.js';
+import { getDateRangeFromTimeframe } from './compound-tools.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -152,591 +154,695 @@ async function executeGraphTool(
   thinking.addReasoning('intent', `Processing tool call: ${tool.alias}`);
 
   try {
-    const parameterDefinitions = tool.parameters || [];
-    thinking.addInfo('parameters', `Received ${Object.keys(params).length} parameter(s)`, {
-      paramNames: Object.keys(params),
-    });
+    try {
+      const parameterDefinitions = tool.parameters || [];
+      thinking.addInfo('parameters', `Received ${Object.keys(params).length} parameter(s)`, {
+        paramNames: Object.keys(params),
+      });
 
-    // Apply default $select for detailed content - no date filter by default
-    // Date filters are only applied when user explicitly specifies a time range
-    const isCalendarTool = tool.path.includes('/events') || tool.path.includes('calendar');
-    const isMailTool = tool.path.includes('/messages') || tool.path.includes('/mail');
+      // Apply default $select for detailed content - no date filter by default
+      // Date filters are only applied when user explicitly specifies a time range
+      const isCalendarTool = tool.path.includes('/events') || tool.path.includes('calendar');
+      const isMailTool = tool.path.includes('/messages') || tool.path.includes('/mail');
 
-    // Track tool type for thinking
-    if (isCalendarTool) {
-      thinking.addDecision('intent', 'Identified as calendar-related operation');
-    } else if (isMailTool) {
-      thinking.addDecision('intent', 'Identified as mail-related operation');
-    }
-
-    // Apply default $top for calendar events (MS Graph default is only 10); use perf-config for faster first response
-    if (isCalendarTool && !params['$top'] && !params['top']) {
-      const pageSize = getDefaultPageSize();
-      params['$top'] = pageSize;
-      logger.info(
-        `Applied default $top=${pageSize} for calendar events (MS Graph default is only 10)`
-      );
-      thinking.addDecision('optimization', `Applied default $top=${pageSize} for calendar events`);
-    }
-
-    // For calendarView, add default date range if not provided (required parameters)
-    if (tool.path.includes('/calendarView') || tool.alias === 'get-calendar-view') {
-      if (!params['startDateTime']) {
-        // Default to start of current day (UTC)
-        const now = new Date();
-        const startOfToday = new Date(
-          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
-        );
-        params['startDateTime'] = startOfToday.toISOString();
-        logger.info('Applied default startDateTime (start of current day) for calendarView');
-      }
-      if (!params['endDateTime']) {
-        // Default to end of current day (UTC)
-        const now = new Date();
-        const endOfToday = new Date(
-          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
-        );
-        params['endDateTime'] = endOfToday.toISOString();
-        logger.info('Applied default endDateTime (end of current day) for calendarView');
-      }
-    }
-
-    if (!params['$select']) {
-      // Calendar events - return detailed content
+      // Track tool type for thinking
       if (isCalendarTool) {
-        params['$select'] = [
-          'id',
-          'subject',
-          'bodyPreview',
-          'body',
-          'start',
-          'end',
-          'location',
-          'attendees',
-          'organizer',
-          'isOnlineMeeting',
-          'onlineMeeting',
-          'webLink',
-          'isAllDay',
-          'isCancelled',
-          'importance',
-          'sensitivity',
-          'showAs',
-          'responseStatus',
-          'categories',
-        ];
-        logger.info('Applied default $select for detailed calendar content');
-      }
-      // Mail messages - return detailed content
-      else if (tool.path.includes('/messages') || tool.path.includes('/mail')) {
-        params['$select'] = [
-          'id',
-          'subject',
-          'bodyPreview',
-          'body',
-          'from',
-          'toRecipients',
-          'ccRecipients',
-          'receivedDateTime',
-          'sentDateTime',
-          'hasAttachments',
-          'importance',
-          'isRead',
-          'isDraft',
-          'webLink',
-          'categories',
-          'flag',
-        ];
-        logger.info('Applied default $select for detailed mail content');
-      }
-      // Files/Drive items - return detailed content
-      else if (tool.path.includes('/drive') || tool.path.includes('/items')) {
-        params['$select'] = [
-          'id',
-          'name',
-          'size',
-          'createdDateTime',
-          'lastModifiedDateTime',
-          'webUrl',
-          'createdBy',
-          'lastModifiedBy',
-          'file',
-          'folder',
-          'parentReference',
-        ];
-        logger.info('Applied default $select for detailed file content');
-      }
-      // Tasks - return detailed content
-      else if (tool.path.includes('/tasks') || tool.path.includes('/todo')) {
-        params['$select'] = [
-          'id',
-          'title',
-          'body',
-          'importance',
-          'status',
-          'createdDateTime',
-          'lastModifiedDateTime',
-          'dueDateTime',
-          'completedDateTime',
-          'reminderDateTime',
-          'categories',
-        ];
-        logger.info('Applied default $select for detailed task content');
-      }
-      // Contacts - return detailed content
-      else if (tool.path.includes('/contacts')) {
-        params['$select'] = [
-          'id',
-          'displayName',
-          'givenName',
-          'surname',
-          'emailAddresses',
-          'businessPhones',
-          'mobilePhone',
-          'companyName',
-          'jobTitle',
-          'department',
-          'officeLocation',
-        ];
-        logger.info('Applied default $select for detailed contact content');
-      }
-      // Users - return detailed content
-      else if (tool.path.includes('/users')) {
-        params['$select'] = [
-          'id',
-          'displayName',
-          'givenName',
-          'surname',
-          'mail',
-          'userPrincipalName',
-          'jobTitle',
-          'department',
-          'officeLocation',
-          'mobilePhone',
-          'businessPhones',
-        ];
-        logger.info('Applied default $select for detailed user content');
-      }
-    }
-
-    let path = tool.path;
-    const queryParams: Record<string, string> = {};
-    const headers: Record<string, string> = {};
-    let body: unknown = null;
-
-    for (const [paramName, paramValue] of Object.entries(params)) {
-      // Skip control parameters - not part of the Microsoft Graph API
-      if (['fetchAllPages', 'includeHeaders', 'excludeResponse', 'timezone'].includes(paramName)) {
-        continue;
+        thinking.addDecision('intent', 'Identified as calendar-related operation');
+      } else if (isMailTool) {
+        thinking.addDecision('intent', 'Identified as mail-related operation');
       }
 
-      // Ok, so, MCP clients (such as claude code) doesn't support $ in parameter names,
-      // and others might not support __, so we strip them in hack.ts and restore them here
-      const odataParams = [
-        'filter',
-        'select',
-        'expand',
-        'orderby',
-        'skip',
-        'top',
-        'count',
-        'search',
-        'format',
-      ];
-      // Handle both "top" and "$top" formats - strip $ if present, then re-add it
-      const normalizedParamName = paramName.startsWith('$') ? paramName.slice(1) : paramName;
-      const isOdataParam = odataParams.includes(normalizedParamName.toLowerCase());
-      const fixedParamName = isOdataParam ? `$${normalizedParamName.toLowerCase()}` : paramName;
-      // Look up param definition using normalized name (without $) for OData params
-      const paramDef = parameterDefinitions.find(
-        (p) => p.name === paramName || (isOdataParam && p.name === normalizedParamName)
-      );
+      // Apply default $top for calendar events (MS Graph default is only 10); use perf-config for faster first response
+      if (isCalendarTool && !params['$top'] && !params['top']) {
+        const pageSize = getDefaultPageSize();
+        params['$top'] = pageSize;
+        logger.info(
+          `Applied default $top=${pageSize} for calendar events (MS Graph default is only 10)`
+        );
+        thinking.addDecision(
+          'optimization',
+          `Applied default $top=${pageSize} for calendar events`
+        );
+      }
 
-      if (paramDef) {
-        switch (paramDef.type) {
-          case 'Path':
-            path = path
-              .replace(`{${paramName}}`, encodeURIComponent(paramValue as string))
-              .replace(`:${paramName}`, encodeURIComponent(paramValue as string));
-            break;
+      // For calendarView: resolve timeframe first (server-side date), then default to today if needed
+      if (tool.path.includes('/calendarView') || tool.alias === 'get-calendar-view') {
+        const timeframe = params['timeframe'] as string | undefined;
+        if (timeframe && typeof timeframe === 'string') {
+          try {
+            const range = getDateRangeFromTimeframe(timeframe.trim().toLowerCase());
+            params['startDateTime'] = range.start.toISOString();
+            params['endDateTime'] = range.end.toISOString();
+            delete params['timeframe'];
+            logger.info(
+              `Resolved timeframe "${timeframe}" to ${range.start.toISOString().slice(0, 10)} - ${range.end.toISOString().slice(0, 10)}`
+            );
+            thinking.addDecision(
+              'parameters',
+              `Timeframe "${timeframe}" resolved to server date range`
+            );
+          } catch (err) {
+            logger.warn(
+              `Invalid timeframe "${timeframe}", falling back to default: ${(err as Error).message}`
+            );
+          }
+        }
+        if (!params['startDateTime']) {
+          const now = new Date();
+          const startOfToday = new Date(
+            Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
+          );
+          params['startDateTime'] = startOfToday.toISOString();
+          logger.info('Applied default startDateTime (start of current day) for calendarView');
+        }
+        if (!params['endDateTime']) {
+          const now = new Date();
+          const endOfToday = new Date(
+            Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
+          );
+          params['endDateTime'] = endOfToday.toISOString();
+          logger.info('Applied default endDateTime (end of current day) for calendarView');
+        }
+      }
 
-          case 'Query':
-            queryParams[fixedParamName] = `${paramValue}`;
-            break;
+      if (!params['$select']) {
+        // Calendar events - return detailed content
+        if (isCalendarTool) {
+          params['$select'] = [
+            'id',
+            'subject',
+            'bodyPreview',
+            'body',
+            'start',
+            'end',
+            'location',
+            'attendees',
+            'organizer',
+            'isOnlineMeeting',
+            'onlineMeeting',
+            'webLink',
+            'isAllDay',
+            'isCancelled',
+            'importance',
+            'sensitivity',
+            'showAs',
+            'responseStatus',
+            'categories',
+          ];
+          logger.info('Applied default $select for detailed calendar content');
+        }
+        // Mail messages - return detailed content
+        else if (tool.path.includes('/messages') || tool.path.includes('/mail')) {
+          params['$select'] = [
+            'id',
+            'subject',
+            'bodyPreview',
+            'body',
+            'from',
+            'toRecipients',
+            'ccRecipients',
+            'receivedDateTime',
+            'sentDateTime',
+            'hasAttachments',
+            'importance',
+            'isRead',
+            'isDraft',
+            'webLink',
+            'categories',
+            'flag',
+          ];
+          logger.info('Applied default $select for detailed mail content');
+        }
+        // Files/Drive items - return detailed content
+        else if (tool.path.includes('/drive') || tool.path.includes('/items')) {
+          params['$select'] = [
+            'id',
+            'name',
+            'size',
+            'createdDateTime',
+            'lastModifiedDateTime',
+            'webUrl',
+            'createdBy',
+            'lastModifiedBy',
+            'file',
+            'folder',
+            'parentReference',
+          ];
+          logger.info('Applied default $select for detailed file content');
+        }
+        // Tasks - return detailed content
+        else if (tool.path.includes('/tasks') || tool.path.includes('/todo')) {
+          params['$select'] = [
+            'id',
+            'title',
+            'body',
+            'importance',
+            'status',
+            'createdDateTime',
+            'lastModifiedDateTime',
+            'dueDateTime',
+            'completedDateTime',
+            'reminderDateTime',
+            'categories',
+          ];
+          logger.info('Applied default $select for detailed task content');
+        }
+        // Contacts - return detailed content
+        else if (tool.path.includes('/contacts')) {
+          params['$select'] = [
+            'id',
+            'displayName',
+            'givenName',
+            'surname',
+            'emailAddresses',
+            'businessPhones',
+            'mobilePhone',
+            'companyName',
+            'jobTitle',
+            'department',
+            'officeLocation',
+          ];
+          logger.info('Applied default $select for detailed contact content');
+        }
+        // Users - return detailed content
+        else if (tool.path.includes('/users')) {
+          params['$select'] = [
+            'id',
+            'displayName',
+            'givenName',
+            'surname',
+            'mail',
+            'userPrincipalName',
+            'jobTitle',
+            'department',
+            'officeLocation',
+            'mobilePhone',
+            'businessPhones',
+          ];
+          logger.info('Applied default $select for detailed user content');
+        }
+      }
 
-          case 'Body':
-            if (paramDef.schema) {
-              const parseResult = paramDef.schema.safeParse(paramValue);
-              if (!parseResult.success) {
-                const wrapped = { [paramName]: paramValue };
-                const wrappedResult = paramDef.schema.safeParse(wrapped);
-                if (wrappedResult.success) {
-                  logger.info(
-                    `Auto-corrected parameter '${paramName}': AI passed nested field directly, wrapped it as {${paramName}: ...}`
-                  );
-                  body = wrapped;
+      let path = tool.path;
+      const queryParams: Record<string, string> = {};
+      const headers: Record<string, string> = {};
+      let body: unknown = null;
+
+      for (const [paramName, paramValue] of Object.entries(params)) {
+        // Skip control parameters - not part of the Microsoft Graph API
+        if (
+          ['fetchAllPages', 'includeHeaders', 'excludeResponse', 'timezone'].includes(paramName)
+        ) {
+          continue;
+        }
+
+        // Ok, so, MCP clients (such as claude code) doesn't support $ in parameter names,
+        // and others might not support __, so we strip them in hack.ts and restore them here
+        const odataParams = [
+          'filter',
+          'select',
+          'expand',
+          'orderby',
+          'skip',
+          'top',
+          'count',
+          'search',
+          'format',
+        ];
+        // Handle both "top" and "$top" formats - strip $ if present, then re-add it
+        const normalizedParamName = paramName.startsWith('$') ? paramName.slice(1) : paramName;
+        const isOdataParam = odataParams.includes(normalizedParamName.toLowerCase());
+        const fixedParamName = isOdataParam ? `$${normalizedParamName.toLowerCase()}` : paramName;
+        // Look up param definition using normalized name (without $) for OData params
+        const paramDef = parameterDefinitions.find(
+          (p) => p.name === paramName || (isOdataParam && p.name === normalizedParamName)
+        );
+
+        if (paramDef) {
+          switch (paramDef.type) {
+            case 'Path':
+              path = path
+                .replace(`{${paramName}}`, encodeURIComponent(paramValue as string))
+                .replace(`:${paramName}`, encodeURIComponent(paramValue as string));
+              break;
+
+            case 'Query':
+              queryParams[fixedParamName] = `${paramValue}`;
+              break;
+
+            case 'Body':
+              if (paramDef.schema) {
+                const parseResult = paramDef.schema.safeParse(paramValue);
+                if (!parseResult.success) {
+                  const wrapped = { [paramName]: paramValue };
+                  const wrappedResult = paramDef.schema.safeParse(wrapped);
+                  if (wrappedResult.success) {
+                    logger.info(
+                      `Auto-corrected parameter '${paramName}': AI passed nested field directly, wrapped it as {${paramName}: ...}`
+                    );
+                    body = wrapped;
+                  } else {
+                    body = paramValue;
+                  }
                 } else {
                   body = paramValue;
                 }
               } else {
                 body = paramValue;
               }
-            } else {
-              body = paramValue;
-            }
-            break;
+              break;
 
-          case 'Header':
-            headers[fixedParamName] = `${paramValue}`;
-            break;
+            case 'Header':
+              headers[fixedParamName] = `${paramValue}`;
+              break;
+          }
+        } else if (paramName === 'body') {
+          body = paramValue;
+          logger.info(`Set body param: ${JSON.stringify(body)}`);
         }
-      } else if (paramName === 'body') {
-        body = paramValue;
-        logger.info(`Set body param: ${JSON.stringify(body)}`);
       }
-    }
 
-    // Handle search parameter for directory endpoints that require special formatting
-    // Microsoft Graph API requirements:
-    // - /users: requires property:value format (e.g., "displayName:John") + ConsistencyLevel: eventual
-    // - /groups: requires property:value format (e.g., "displayName:Team") + ConsistencyLevel: eventual
-    // - /sites: requires ConsistencyLevel: eventual (but supports free-text search)
+      // Handle search parameter for directory endpoints that require special formatting
+      // Microsoft Graph API requirements:
+      // - /users: requires property:value format (e.g., "displayName:John") + ConsistencyLevel: eventual
+      // - /groups: requires property:value format (e.g., "displayName:Team") + ConsistencyLevel: eventual
+      // - /sites: requires ConsistencyLevel: eventual (but supports free-text search)
 
-    // Endpoints that require ConsistencyLevel: eventual header for $search
-    const requiresConsistencyLevelHeader = ['list-users', 'search-sharepoint-sites'];
+      // Endpoints that require ConsistencyLevel: eventual header for $search
+      const requiresConsistencyLevelHeader = ['list-users', 'search-sharepoint-sites'];
 
-    // Endpoints that require property:value format for $search
-    const requiresPropertyValueFormat = ['list-users'];
+      // Endpoints that require property:value format for $search
+      const requiresPropertyValueFormat = ['list-users'];
 
-    if (queryParams['$search']) {
-      let searchValue = queryParams['$search'];
+      if (queryParams['$search']) {
+        let searchValue = queryParams['$search'];
 
-      // Remove surrounding quotes if present (handles both single and double quotes)
-      const quotePattern = /^(["'])(.*)\1$/;
-      const match = searchValue.match(quotePattern);
-      const cleanSearchValue = match ? match[2] : searchValue;
+        // Remove surrounding quotes if present (handles both single and double quotes)
+        const quotePattern = /^(["'])(.*)\1$/;
+        const match = searchValue.match(quotePattern);
+        const cleanSearchValue = match ? match[2] : searchValue;
 
-      // Check if this endpoint requires property:value format
-      if (requiresPropertyValueFormat.includes(tool.alias)) {
-        // Check if search value is already in property:value format
-        const propertyValuePattern = /^[a-zA-Z]+:/i;
+        // Check if this endpoint requires property:value format
+        if (requiresPropertyValueFormat.includes(tool.alias)) {
+          // Check if search value is already in property:value format
+          const propertyValuePattern = /^[a-zA-Z]+:/i;
 
-        if (!propertyValuePattern.test(cleanSearchValue)) {
-          // Auto-format: prepend displayName: if not already formatted
-          queryParams['$search'] = `"displayName:${cleanSearchValue}"`;
+          if (!propertyValuePattern.test(cleanSearchValue)) {
+            // Auto-format: prepend displayName: if not already formatted
+            queryParams['$search'] = `"displayName:${cleanSearchValue}"`;
+            logger.info(
+              `Auto-formatted search query for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
+            );
+          } else {
+            // Already in property:value format, ensure it's wrapped in double quotes
+            queryParams['$search'] = `"${cleanSearchValue}"`;
+            logger.info(
+              `Search query already formatted, ensuring quotes: "${searchValue}" -> "${queryParams['$search']}"`
+            );
+          }
+        } else if (isMailTool) {
+          // Intelligent email search: person name → from:, "an X"/"to X" → to:
+          queryParams['$search'] = formatEmailSearchQuery(searchValue);
           logger.info(
-            `Auto-formatted search query for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
+            `Applied intelligent email search for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
           );
         } else {
-          // Already in property:value format, ensure it's wrapped in double quotes
-          queryParams['$search'] = `"${cleanSearchValue}"`;
-          logger.info(
-            `Search query already formatted, ensuring quotes: "${searchValue}" -> "${queryParams['$search']}"`
-          );
-        }
-      } else if (isMailTool) {
-        // Intelligent email search: person name → from:, "an X"/"to X" → to:
-        queryParams['$search'] = formatEmailSearchQuery(searchValue);
-        logger.info(
-          `Applied intelligent email search for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
-        );
-      } else {
-        // For endpoints that don't require property:value format (like SharePoint sites)
-        // Just ensure the value is wrapped in double quotes
-        if (!searchValue.startsWith('"') || !searchValue.endsWith('"')) {
-          queryParams['$search'] = `"${cleanSearchValue}"`;
-          logger.info(
-            `Wrapped search query in quotes for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
-          );
-        }
-      }
-
-      // Set ConsistencyLevel header if required for this endpoint
-      if (requiresConsistencyLevelHeader.includes(tool.alias)) {
-        headers['ConsistencyLevel'] = 'eventual';
-        logger.info(`Setting ConsistencyLevel header to "eventual" for ${tool.alias} search`);
-      }
-
-      // Microsoft Graph API limitation: $orderby is NOT supported with $search
-      // When both are present, remove $orderby (search results use relevance ranking)
-      if (queryParams['$orderby']) {
-        logger.warn(
-          `Removing $orderby parameter for ${tool.alias}: Microsoft Graph API does not support $orderby with $search. ` +
-            `Search results will be ordered by relevance instead of "${queryParams['$orderby']}".`
-        );
-        delete queryParams['$orderby'];
-      }
-    }
-
-    // Handle timezone parameter for calendar endpoints
-    if (config?.supportsTimezone && params.timezone) {
-      headers['Prefer'] = `outlook.timezone="${params.timezone}"`;
-      logger.info(`Setting timezone header: Prefer: outlook.timezone="${params.timezone}"`);
-    }
-
-    if (Object.keys(queryParams).length > 0) {
-      const queryString = Object.entries(queryParams)
-        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
-        .join('&');
-      path = `${path}${path.includes('?') ? '&' : '?'}${queryString}`;
-    }
-
-    const options: {
-      method: string;
-      headers: Record<string, string>;
-      body?: string;
-      rawResponse?: boolean;
-      includeHeaders?: boolean;
-      excludeResponse?: boolean;
-      queryParams?: Record<string, string>;
-    } = {
-      method: tool.method.toUpperCase(),
-      headers,
-    };
-
-    if (options.method !== 'GET' && body) {
-      options.body = typeof body === 'string' ? body : JSON.stringify(body);
-    }
-
-    const isProbablyMediaContent =
-      tool.errors?.some((error) => error.description === 'Retrieved media content') ||
-      path.endsWith('/content');
-
-    if (config?.returnDownloadUrl && path.endsWith('/content')) {
-      path = path.replace(/\/content$/, '');
-      logger.info(
-        `Auto-returning download URL for ${tool.alias} (returnDownloadUrl=true in endpoints.json)`
-      );
-    } else if (isProbablyMediaContent) {
-      options.rawResponse = true;
-    }
-
-    // Set includeHeaders if requested
-    if (params.includeHeaders === true) {
-      options.includeHeaders = true;
-    }
-
-    // Set excludeResponse if requested
-    if (params.excludeResponse === true) {
-      options.excludeResponse = true;
-    }
-
-    logger.info(`Making graph request to ${path} with options: ${JSON.stringify(options)}`);
-    thinking.startAction(
-      'api-call',
-      `Calling Microsoft Graph API: ${tool.method.toUpperCase()} ${path.split('?')[0]}`
-    );
-    let response = await graphClient.graphRequest(path, options);
-    thinking.completeAction('api-call', 'Graph API call completed');
-
-    const fetchAllPages = params.fetchAllPages === true;
-    if (fetchAllPages && response?.content?.[0]?.text) {
-      thinking.addDecision(
-        'optimization',
-        'fetchAllPages enabled - will retrieve all paginated results'
-      );
-      try {
-        let combinedResponse = JSON.parse(response.content[0].text);
-        let allItems = combinedResponse.value || [];
-        let nextLink = combinedResponse['@odata.nextLink'];
-        let pageCount = 1;
-
-        const maxPages = getMaxPages();
-        thinking.addInfo(
-          'processing',
-          `Pagination: starting with ${allItems.length} items, max ${maxPages} pages`
-        );
-
-        while (nextLink && pageCount < maxPages) {
-          logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);
-
-          const url = new URL(nextLink);
-          const nextPath = url.pathname.replace('/v1.0', '');
-          const nextOptions = { ...options };
-
-          const nextQueryParams: Record<string, string> = {};
-          for (const [key, value] of url.searchParams.entries()) {
-            nextQueryParams[key] = value;
+          // For endpoints that don't require property:value format (like SharePoint sites)
+          // Just ensure the value is wrapped in double quotes
+          if (!searchValue.startsWith('"') || !searchValue.endsWith('"')) {
+            queryParams['$search'] = `"${cleanSearchValue}"`;
+            logger.info(
+              `Wrapped search query in quotes for ${tool.alias}: "${searchValue}" -> "${queryParams['$search']}"`
+            );
           }
-          nextOptions.queryParams = nextQueryParams;
+        }
 
-          const nextResponse = await graphClient.graphRequest(nextPath, nextOptions);
-          if (nextResponse?.content?.[0]?.text) {
-            const nextJsonResponse = JSON.parse(nextResponse.content[0].text);
-            if (nextJsonResponse.value && Array.isArray(nextJsonResponse.value)) {
-              allItems = allItems.concat(nextJsonResponse.value);
+        // Set ConsistencyLevel header if required for this endpoint
+        if (requiresConsistencyLevelHeader.includes(tool.alias)) {
+          headers['ConsistencyLevel'] = 'eventual';
+          logger.info(`Setting ConsistencyLevel header to "eventual" for ${tool.alias} search`);
+        }
+
+        // Microsoft Graph API limitation: $orderby is NOT supported with $search
+        // When both are present, remove $orderby (search results use relevance ranking)
+        if (queryParams['$orderby']) {
+          logger.warn(
+            `Removing $orderby parameter for ${tool.alias}: Microsoft Graph API does not support $orderby with $search. ` +
+              `Search results will be ordered by relevance instead of "${queryParams['$orderby']}".`
+          );
+          delete queryParams['$orderby'];
+        }
+      }
+
+      // Handle timezone parameter for calendar endpoints
+      if (config?.supportsTimezone && params.timezone) {
+        headers['Prefer'] = `outlook.timezone="${params.timezone}"`;
+        logger.info(`Setting timezone header: Prefer: outlook.timezone="${params.timezone}"`);
+      }
+
+      if (Object.keys(queryParams).length > 0) {
+        const queryString = Object.entries(queryParams)
+          .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+          .join('&');
+        path = `${path}${path.includes('?') ? '&' : '?'}${queryString}`;
+      }
+
+      const options: {
+        method: string;
+        headers: Record<string, string>;
+        body?: string;
+        rawResponse?: boolean;
+        includeHeaders?: boolean;
+        excludeResponse?: boolean;
+        queryParams?: Record<string, string>;
+      } = {
+        method: tool.method.toUpperCase(),
+        headers,
+      };
+
+      if (options.method !== 'GET' && body) {
+        options.body = typeof body === 'string' ? body : JSON.stringify(body);
+      }
+
+      const isProbablyMediaContent =
+        tool.errors?.some((error) => error.description === 'Retrieved media content') ||
+        path.endsWith('/content');
+
+      if (config?.returnDownloadUrl && path.endsWith('/content')) {
+        path = path.replace(/\/content$/, '');
+        logger.info(
+          `Auto-returning download URL for ${tool.alias} (returnDownloadUrl=true in endpoints.json)`
+        );
+      } else if (isProbablyMediaContent) {
+        options.rawResponse = true;
+      }
+
+      // Set includeHeaders if requested
+      if (params.includeHeaders === true) {
+        options.includeHeaders = true;
+      }
+
+      // Set excludeResponse if requested
+      if (params.excludeResponse === true) {
+        options.excludeResponse = true;
+      }
+
+      logger.info(`Making graph request to ${path} with options: ${JSON.stringify(options)}`);
+      thinking.startAction(
+        'api-call',
+        `Calling Microsoft Graph API: ${tool.method.toUpperCase()} ${path.split('?')[0]}`
+      );
+      let response;
+      try {
+        response = await graphClient.graphRequest(path, options);
+      } catch (firstError) {
+        logger.warn(`Graph request failed, retrying once: ${(firstError as Error).message}`);
+        thinking.addInfo('api-call', `Retrying after error: ${(firstError as Error).message}`);
+        response = await graphClient.graphRequest(path, options);
+      }
+      thinking.completeAction('api-call', 'Graph API call completed');
+
+      const fetchAllPages = params.fetchAllPages === true;
+      if (fetchAllPages && response?.content?.[0]?.text) {
+        thinking.addDecision(
+          'optimization',
+          'fetchAllPages enabled - will retrieve all paginated results'
+        );
+        try {
+          let combinedResponse = JSON.parse(response.content[0].text);
+          let allItems = combinedResponse.value || [];
+          let nextLink = combinedResponse['@odata.nextLink'];
+          let pageCount = 1;
+
+          const maxPages = getMaxPages();
+          thinking.addInfo(
+            'processing',
+            `Pagination: starting with ${allItems.length} items, max ${maxPages} pages`
+          );
+
+          while (nextLink && pageCount < maxPages) {
+            logger.info(`Fetching page ${pageCount + 1} from: ${nextLink}`);
+
+            const url = new URL(nextLink);
+            const nextPath = url.pathname.replace('/v1.0', '');
+            const nextOptions = { ...options };
+
+            const nextQueryParams: Record<string, string> = {};
+            for (const [key, value] of url.searchParams.entries()) {
+              nextQueryParams[key] = value;
             }
-            nextLink = nextJsonResponse['@odata.nextLink'];
-            pageCount++;
-          } else {
-            break;
+            nextOptions.queryParams = nextQueryParams;
+
+            const nextResponse = await graphClient.graphRequest(nextPath, nextOptions);
+            if (nextResponse?.content?.[0]?.text) {
+              const nextJsonResponse = JSON.parse(nextResponse.content[0].text);
+              if (nextJsonResponse.value && Array.isArray(nextJsonResponse.value)) {
+                allItems = allItems.concat(nextJsonResponse.value);
+              }
+              nextLink = nextJsonResponse['@odata.nextLink'];
+              pageCount++;
+            } else {
+              break;
+            }
           }
+
+          if (pageCount >= maxPages) {
+            logger.warn(`Reached maximum page limit (${maxPages}) for pagination`);
+            thinking.addInfo('processing', `Reached maximum page limit (${maxPages})`);
+          }
+
+          combinedResponse.value = allItems;
+          if (combinedResponse['@odata.count']) {
+            combinedResponse['@odata.count'] = allItems.length;
+          }
+          delete combinedResponse['@odata.nextLink'];
+
+          response.content[0].text = JSON.stringify(combinedResponse);
+
+          logger.info(
+            `Pagination complete: collected ${allItems.length} items across ${pageCount} pages`
+          );
+          thinking.completeAction(
+            'processing',
+            `Pagination complete: ${allItems.length} items from ${pageCount} pages`
+          );
+        } catch (e) {
+          logger.error(`Error during pagination: ${e}`);
+          thinking.addError('processing', `Pagination error: ${(e as Error).message}`);
         }
-
-        if (pageCount >= maxPages) {
-          logger.warn(`Reached maximum page limit (${maxPages}) for pagination`);
-          thinking.addInfo('processing', `Reached maximum page limit (${maxPages})`);
-        }
-
-        combinedResponse.value = allItems;
-        if (combinedResponse['@odata.count']) {
-          combinedResponse['@odata.count'] = allItems.length;
-        }
-        delete combinedResponse['@odata.nextLink'];
-
-        response.content[0].text = JSON.stringify(combinedResponse);
-
-        logger.info(
-          `Pagination complete: collected ${allItems.length} items across ${pageCount} pages`
-        );
-        thinking.completeAction(
-          'processing',
-          `Pagination complete: ${allItems.length} items from ${pageCount} pages`
-        );
-      } catch (e) {
-        logger.error(`Error during pagination: ${e}`);
-        thinking.addError('processing', `Pagination error: ${(e as Error).message}`);
       }
-    }
 
-    if (response?.content?.[0]?.text) {
-      const responseText = response.content[0].text;
-      logger.info(`Response size: ${responseText.length} characters`);
-      thinking.addInfo('processing', `Response received: ${responseText.length} characters`);
+      if (response?.content?.[0]?.text) {
+        const responseText = response.content[0].text;
+        logger.info(`Response size: ${responseText.length} characters`);
+        thinking.addInfo('processing', `Response received: ${responseText.length} characters`);
 
-      try {
-        const jsonResponse = JSON.parse(responseText);
-        if (jsonResponse.value && Array.isArray(jsonResponse.value)) {
-          logger.info(`Response contains ${jsonResponse.value.length} items`);
-          thinking.addInfo('processing', `Response contains ${jsonResponse.value.length} items`);
-        }
-        if (jsonResponse['@odata.nextLink']) {
-          logger.info(`Response has pagination nextLink: ${jsonResponse['@odata.nextLink']}`);
-          thinking.addInfo('processing', 'Response has additional pages available');
-        }
+        try {
+          const jsonResponse = JSON.parse(responseText);
+          if (jsonResponse.value && Array.isArray(jsonResponse.value)) {
+            logger.info(`Response contains ${jsonResponse.value.length} items`);
+            thinking.addInfo('processing', `Response contains ${jsonResponse.value.length} items`);
+          }
+          if (jsonResponse['@odata.nextLink']) {
+            logger.info(`Response has pagination nextLink: ${jsonResponse['@odata.nextLink']}`);
+            thinking.addInfo('processing', 'Response has additional pages available');
+          }
 
-        // Format calendar, mail, and files responses with structured output and local time
-        const isFilesTool = tool.alias?.includes('file') || tool.alias?.includes('drive');
-        if (isCalendarTool || isMailTool || isFilesTool) {
-          thinking.startAction(
-            'formatting',
-            `Formatting ${isCalendarTool ? 'calendar' : isMailTool ? 'mail' : 'files'} response`
-          );
-          const { formatted, isFormatted, type } = formatGraphResponse(
-            jsonResponse,
-            tool.alias,
-            params
-          );
-          if (isFormatted) {
-            // Format as Tool output and remove unnecessary information
-            const toolFormatted = formatToolResponse(formatted);
+          // Format calendar, mail, and files responses with structured output and local time
+          const isFilesTool = tool.alias?.includes('file') || tool.alias?.includes('drive');
+          if (isCalendarTool || isMailTool || isFilesTool) {
+            thinking.startAction(
+              'formatting',
+              `Formatting ${isCalendarTool ? 'calendar' : isMailTool ? 'mail' : 'files'} response`
+            );
+            const { formatted, isFormatted, type } = formatGraphResponse(
+              jsonResponse,
+              tool.alias,
+              params
+            );
+            if (isFormatted) {
+              // Format as Tool output and remove unnecessary information
+              const toolFormatted = formatToolResponse(formatted) as Record<string, unknown>;
+              const suggestions = isCalendarTool
+                ? [
+                    'Use get-calendar-event with event-id to get full event details',
+                    'Use calendar tool with action "view" for a different date range',
+                  ]
+                : isMailTool
+                  ? [
+                      'Use get-mail-message with message-id to read full body and attachments',
+                      'Use list-mail-folder-messages to browse by folder',
+                    ]
+                  : isFilesTool
+                    ? [
+                        'Use get-drive-item or open webUrl to open or download the file',
+                        'Use list-drive-root-children to browse folder contents',
+                      ]
+                    : [];
+              if (suggestions.length > 0) {
+                toolFormatted.suggestions = suggestions;
+              }
+              toolFormatted.context = {
+                today: new Date().toISOString().slice(0, 10),
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              };
 
-            // Use TOON format if enabled, otherwise JSON
-            const outputFormat = process.env.MS365_MCP_OUTPUT_FORMAT === 'toon' ? 'toon' : 'json';
-            let formattedText: string;
+              // Use TOON format if enabled, otherwise JSON
+              const outputFormat = process.env.MS365_MCP_OUTPUT_FORMAT === 'toon' ? 'toon' : 'json';
+              let formattedText: string;
 
-            if (outputFormat === 'toon') {
-              try {
-                formattedText = toonEncode(toolFormatted);
-              } catch (error) {
-                logger.warn(`Failed to encode as TOON, falling back to JSON: ${error}`);
+              if (outputFormat === 'toon') {
+                try {
+                  formattedText = toonEncode(toolFormatted);
+                } catch (error) {
+                  logger.warn(`Failed to encode as TOON, falling back to JSON: ${error}`);
+                  formattedText = JSON.stringify(toolFormatted, null, 2);
+                }
+              } else {
                 formattedText = JSON.stringify(toolFormatted, null, 2);
               }
-            } else {
-              formattedText = JSON.stringify(toolFormatted, null, 2);
+
+              // Summary-first: put human-readable summary at the top for LLM (default: true)
+              const summaryFirst =
+                process.env.MS365_MCP_RESPONSE_SUMMARY_FIRST !== 'false' &&
+                process.env.MS365_MCP_RESPONSE_SUMMARY_FIRST !== '0';
+              const humanReadable =
+                typeof toolFormatted === 'object' &&
+                toolFormatted !== null &&
+                '_humanReadable' in toolFormatted &&
+                typeof (toolFormatted as { _humanReadable?: string })._humanReadable === 'string'
+                  ? (toolFormatted as { _humanReadable: string })._humanReadable
+                  : '';
+              if (summaryFirst && humanReadable) {
+                const useEnvelope =
+                  process.env.MS365_MCP_RESPONSE_ENVELOPE === 'true' ||
+                  process.env.MS365_MCP_RESPONSE_ENVELOPE === '1';
+                if (useEnvelope && outputFormat !== 'toon') {
+                  const context = {
+                    today: new Date().toISOString().slice(0, 10),
+                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                  };
+                  response.content[0].text = JSON.stringify(
+                    { summary: humanReadable, data: toolFormatted, suggestions, context },
+                    null,
+                    2
+                  );
+                } else {
+                  const dataBlock =
+                    outputFormat === 'toon'
+                      ? formattedText
+                      : JSON.stringify(toolFormatted, null, 2);
+                  response.content[0].text = `${humanReadable}\n\n---\n\n${dataBlock}`;
+                }
+              } else {
+                response.content[0].text = formattedText;
+              }
+              logger.info(`Applied structured ${type} formatting`);
+              thinking.completeAction('formatting', `Applied ${type} formatting`);
             }
-
-            response.content[0].text = formattedText;
-            logger.info(`Applied structured ${type} formatting`);
-            thinking.completeAction('formatting', `Applied ${type} formatting`);
           }
+        } catch {
+          // Non-JSON response
+          thinking.addInfo('processing', 'Response is non-JSON (binary or raw data)');
         }
-      } catch {
-        // Non-JSON response
-        thinking.addInfo('processing', 'Response is non-JSON (binary or raw data)');
       }
-    }
 
-    // Convert McpResponse to CallToolResult with the correct structure
-    const content: ContentItem[] = response.content.map((item) => ({
-      type: 'text' as const,
-      text: item.text,
-    }));
+      // Convert McpResponse to CallToolResult with the correct structure; apply optional length limit
+      const content: ContentItem[] = response.content.map((item) => ({
+        type: 'text' as const,
+        text: applyResponseLimit(item.text ?? ''),
+      }));
 
-    // Track tool usage for learning
-    if (toolUsageTracker.knowledgeBase) {
-      const executionTime = Date.now() - startTime;
-      const success = !response.isError;
+      // Track tool usage for learning
+      if (toolUsageTracker.knowledgeBase) {
+        const executionTime = Date.now() - startTime;
+        const success = !response.isError;
 
-      // Count results if available
-      let resultsCount = 0;
-      try {
-        const responseText = response.content[0]?.text;
-        if (responseText) {
-          const jsonResponse = JSON.parse(responseText);
-          if (Array.isArray(jsonResponse.value)) {
-            resultsCount = jsonResponse.value.length;
-          } else if (jsonResponse.value && typeof jsonResponse.value === 'object') {
-            resultsCount = 1;
+        // Count results if available
+        let resultsCount = 0;
+        try {
+          const responseText = response.content[0]?.text;
+          if (responseText) {
+            const jsonResponse = JSON.parse(responseText);
+            if (Array.isArray(jsonResponse.value)) {
+              resultsCount = jsonResponse.value.length;
+            } else if (jsonResponse.value && typeof jsonResponse.value === 'object') {
+              resultsCount = 1;
+            }
           }
+        } catch {
+          // Non-JSON or parse error - ignore
         }
-      } catch {
-        // Non-JSON or parse error - ignore
+
+        // Record tool usage with other tools in current session
+        const usedWith = toolUsageTracker.currentSession.filter((t) => t !== tool.alias);
+        toolUsageTracker.knowledgeBase.recordToolUsage(tool.alias, usedWith, success, resultsCount);
+
+        // Add to current session
+        if (!toolUsageTracker.currentSession.includes(tool.alias)) {
+          toolUsageTracker.currentSession.push(tool.alias);
+        }
+        toolUsageTracker.sessionStartTime = Date.now();
       }
 
-      // Record tool usage with other tools in current session
-      const usedWith = toolUsageTracker.currentSession.filter((t) => t !== tool.alias);
-      toolUsageTracker.knowledgeBase.recordToolUsage(tool.alias, usedWith, success, resultsCount);
+      // Build final response with thinking process
+      const thinkingResult = thinking.formatForResponse();
+      thinking.addDecision('processing', `Tool execution completed successfully`);
 
-      // Add to current session
-      if (!toolUsageTracker.currentSession.includes(tool.alias)) {
-        toolUsageTracker.currentSession.push(tool.alias);
+      return {
+        content,
+        _meta: response._meta,
+        isError: response.isError,
+        ...(thinkingResult.thinking
+          ? { thinking: thinkingResult.thinking as ThinkingProcessResult }
+          : {}),
+      };
+    } catch (error) {
+      const errorMessage = (error as Error).message;
+      logger.error(`Error in tool ${tool.alias}: ${errorMessage}`);
+      thinking.addError('error-handling', `Tool execution failed: ${errorMessage}`);
+
+      // Check if this is an authentication error and provide a clear message
+      const isAuthError =
+        errorMessage.includes('AUTHENTICATION REQUIRED') ||
+        errorMessage.includes('No access token') ||
+        errorMessage.includes('not logged in') ||
+        (error as { name?: string }).name === 'AuthenticationError';
+
+      // Build thinking result even for errors
+      const thinkingResult = thinking.formatForResponse();
+
+      if (isAuthError) {
+        thinking.addDecision('error-handling', 'Authentication required - user must login first');
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                error: 'AUTHENTICATION REQUIRED',
+                message:
+                  'You must authenticate with Microsoft 365 before using this tool. ' +
+                  'If your MCP client supports OAuth (for example Open WebUI), complete the OAuth login flow. ' +
+                  'If you are using CLI/stdio mode, call the "login" tool to authenticate via device code flow.',
+                action_required:
+                  'Complete OAuth login in your MCP client OR call the "login" tool (CLI/stdio mode)',
+                tool_to_call: 'login',
+              }),
+            },
+          ],
+          isError: true,
+          ...(thinkingResult.thinking
+            ? { thinking: thinkingResult.thinking as ThinkingProcessResult }
+            : {}),
+        };
       }
-      toolUsageTracker.sessionStartTime = Date.now();
-    }
 
-    // Build final response with thinking process
-    const thinkingResult = thinking.formatForResponse();
-    thinking.addDecision('processing', `Tool execution completed successfully`);
-
-    return {
-      content,
-      _meta: response._meta,
-      isError: response.isError,
-      ...(thinkingResult.thinking
-        ? { thinking: thinkingResult.thinking as ThinkingProcessResult }
-        : {}),
-    };
-  } catch (error) {
-    const errorMessage = (error as Error).message;
-    logger.error(`Error in tool ${tool.alias}: ${errorMessage}`);
-    thinking.addError('error-handling', `Tool execution failed: ${errorMessage}`);
-
-    // Check if this is an authentication error and provide a clear message
-    const isAuthError =
-      errorMessage.includes('AUTHENTICATION REQUIRED') ||
-      errorMessage.includes('No access token') ||
-      errorMessage.includes('not logged in') ||
-      (error as { name?: string }).name === 'AuthenticationError';
-
-    // Build thinking result even for errors
-    const thinkingResult = thinking.formatForResponse();
-
-    if (isAuthError) {
-      thinking.addDecision('error-handling', 'Authentication required - user must login first');
       return {
         content: [
           {
             type: 'text',
             text: JSON.stringify({
-              error: 'AUTHENTICATION REQUIRED',
-              message:
-                'You must authenticate with Microsoft 365 before using this tool. ' +
-                'If your MCP client supports OAuth (for example Open WebUI), complete the OAuth login flow. ' +
-                'If you are using CLI/stdio mode, call the "login" tool to authenticate via device code flow.',
-              action_required:
-                'Complete OAuth login in your MCP client OR call the "login" tool (CLI/stdio mode)',
-              tool_to_call: 'login',
+              error: `Error in tool ${tool.alias}: ${errorMessage}`,
             }),
           },
         ],
@@ -746,20 +852,21 @@ async function executeGraphTool(
           : {}),
       };
     }
-
+  } catch (unexpected) {
+    const msg = unexpected instanceof Error ? unexpected.message : String(unexpected);
+    logger.error(`Unexpected error in graph tool ${tool.alias}: ${msg}`, unexpected);
     return {
       content: [
         {
           type: 'text',
           text: JSON.stringify({
-            error: `Error in tool ${tool.alias}: ${errorMessage}`,
+            error: 'Tool execution failed',
+            message: msg,
+            tool: tool.alias,
           }),
         },
       ],
       isError: true,
-      ...(thinkingResult.thinking
-        ? { thinking: thinkingResult.thinking as ThinkingProcessResult }
-        : {}),
     };
   }
 }
@@ -896,11 +1003,26 @@ export function registerGraphTools(
         .optional();
     }
 
+    // For get-calendar-view: add optional timeframe so "today"/"tomorrow" are resolved server-side (correct date)
+    if (tool.alias === 'get-calendar-view') {
+      paramSchema['timeframe'] = z
+        .string()
+        .describe(
+          "Relative date range. Prefer this over startDateTime/endDateTime for 'today', 'tomorrow', 'yesterday', 'thisWeek', 'nextWeek', 'lastWeek', 'thisMonth', 'nextMonth', 'lastMonth'. Server uses current date; avoids wrong year/day."
+        )
+        .optional();
+    }
+
     // Build the tool description, optionally appending LLM tips
     let toolDescription =
       tool.description || `Execute ${tool.method.toUpperCase()} request to ${tool.path}`;
     if (endpointConfig?.llmTip) {
       toolDescription += `\n\n💡 TIP: ${endpointConfig.llmTip}`;
+    }
+    // For calendar view: add current server date so LLM can use correct dates when passing start/end
+    if (tool.alias === 'get-calendar-view') {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      toolDescription += `\n\n📅 Server date (use for relative dates): ${todayIso}. Prefer parameter "timeframe" (e.g. tomorrow, today) over startDateTime/endDateTime.`;
     }
 
     // Add authentication reminder to tool description

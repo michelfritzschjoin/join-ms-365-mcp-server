@@ -266,7 +266,7 @@ describe('Graph API Validation', () => {
 
     it('should have calendar view endpoint', () => {
       const calendarEndpoint = endpointsData.find(
-        (e) => e.pathPattern === '/me/calendarView' && e.method.toLowerCase() === 'get'
+        (e) => e.pathPattern === '/me/calendar/calendarView' && e.method.toLowerCase() === 'get'
       );
       expect(calendarEndpoint).toBeDefined();
     });
@@ -290,7 +290,7 @@ describe('Graph API Validation', () => {
       const criticalEndpoints = [
         { path: '/me', method: 'get' },
         { path: '/me/messages', method: 'get' },
-        { path: '/me/calendarView', method: 'get' },
+        { path: '/me/calendar/calendarView', method: 'get' },
       ];
 
       for (const critical of criticalEndpoints) {
@@ -318,7 +318,7 @@ describe('Graph API Validation', () => {
       const requiredEndpoints = [
         { path: '/me', method: 'get' },
         { path: '/me/messages', method: 'get' },
-        { path: '/me/calendarView', method: 'get' },
+        { path: '/me/calendar/calendarView', method: 'get' },
         { path: '/search/query', method: 'post' },
       ];
 

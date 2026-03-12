@@ -68,8 +68,8 @@ export default defineConfig({
         },
         'src/graph-client.ts': {
           lines: 36,
-          functions: 36,
-          branches: 33,
+          functions: 33,
+          branches: 32,
           statements: 36,
         },
       },

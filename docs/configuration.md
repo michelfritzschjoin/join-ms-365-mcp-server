@@ -20,13 +20,16 @@ All configuration is done through environment variables. Copy `.example.env` to 
 
 ### Server Mode & Behavior
 
-| Variable                           | Description                            | Default   | Required |
-| ---------------------------------- | -------------------------------------- | --------- | -------- |
-| `READ_ONLY`                        | Disable write operations               | `false`   | No       |
-| `MS365_MCP_ORG_MODE`               | Enable Teams, SharePoint features      | `false`   | No       |
-| `ENABLED_TOOLS`                    | Regex pattern to filter tools          | All tools | No       |
-| `MS365_MCP_OUTPUT_FORMAT`          | Output format (`toon` for compression) | Default   | No       |
-| `MS365_MCP_ENABLE_DISCOVERY_TOOLS` | Enable deep research tools             | `false`   | No       |
+| Variable                           | Description                                                                                                                                                                                                  | Default    | Required |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------- | -------- |
+| `READ_ONLY`                        | Disable write operations                                                                                                                                                                                     | `false`    | No       |
+| `MS365_MCP_ORG_MODE`               | Enable Teams, SharePoint features                                                                                                                                                                            | `false`    | No       |
+| `ENABLED_TOOLS`                    | Regex pattern to filter tools                                                                                                                                                                                | All tools  | No       |
+| `MS365_MCP_OUTPUT_FORMAT`          | Output format (`toon` for compression)                                                                                                                                                                       | Default    | No       |
+| `MS365_MCP_RESPONSE_FORMAT`        | Human-readable format for calendar/mail/files: `markdown` (default) = structured Markdown (headings, tables, lists); `text` = plain text with Unicode symbols. Use `markdown` for rich rendering in clients. | `markdown` | No       |
+| `MS365_MCP_RESPONSE_SUMMARY_FIRST` | Put human-readable summary at top of response, then `---` and data (calendar/mail/files)                                                                                                                     | `true`     | No       |
+| `MS365_MCP_RESPONSE_ENVELOPE`      | Use envelope format `{ summary, data, suggestions }` for calendar/mail/files (requires summary-first)                                                                                                        | `false`    | No       |
+| `MS365_MCP_ENABLE_DISCOVERY_TOOLS` | Enable deep research tools                                                                                                                                                                                   | `false`    | No       |
 
 ### Performance & Limits
 
@@ -55,12 +58,13 @@ When **fast mode** is enabled: timeout 6s, max pages 5, max results 50, max aggr
 
 ### LLM Optimization & Search Results
 
-| Variable                         | Description                                      | Default | Required |
-| -------------------------------- | ------------------------------------------------ | ------- | -------- |
-| `MS365_MCP_LLM_OPTIMIZE`         | Enable LLM optimization (60-80% token reduction) | `true`  | No       |
-| `MS365_MCP_MAX_SUMMARY_LENGTH`   | Maximum summary length in characters             | `150`   | No       |
-| `MS365_MCP_RELEVANCE_THRESHOLD`  | Minimum relevance score (0-100, 0 = no filter)   | `0`     | No       |
-| `MS365_MCP_MAX_ITEMS_PER_SOURCE` | Max items per source in summaries                | `10`    | No       |
+| Variable                         | Description                                                                             | Default | Required |
+| -------------------------------- | --------------------------------------------------------------------------------------- | ------- | -------- |
+| `MS365_MCP_LLM_OPTIMIZE`         | Enable LLM optimization (60-80% token reduction)                                        | `true`  | No       |
+| `MS365_MCP_MAX_SUMMARY_LENGTH`   | Maximum summary length in characters                                                    | `150`   | No       |
+| `MS365_MCP_RELEVANCE_THRESHOLD`  | Minimum relevance score (0-100, 0 = no filter)                                          | `0`     | No       |
+| `MS365_MCP_MAX_ITEMS_PER_SOURCE` | Max items per source in summaries                                                       | `10`    | No       |
+| `MS365_MCP_MAX_RESPONSE_CHARS`   | Max characters per tool response (0 = no limit); truncation marker appended if exceeded | `0`     | No       |
 
 > **Note**: LLM optimization intelligently summarizes search results, extracting only the most relevant fields per entity type. This significantly reduces token usage while maintaining information quality. Set `MS365_MCP_LLM_OPTIMIZE=false` to disable and return full result objects.
 
@@ -77,6 +81,7 @@ When **fast mode** is enabled: timeout 6s, max pages 5, max results 50, max aggr
 | `MS365_MCP_SEARCH_SIMPLIFIED_FALLBACK`     | Add simplified sub-queries (drop-one-word, key terms) when no results         | `true`  | No       |
 | `MS365_MCP_SEARCH_USE_OR_QUERY`            | When no results, try one broad request with "q1 OR q2 OR q3"                  | `true`  | No       |
 | `MS365_MCP_SEARCH_PARALLEL_MERGE_COUNT`    | How many variant queries to run in parallel when merging few results          | `3`     | No       |
+| `MS365_MCP_INTENT_ENTITY_FILTER`           | Use NLP intent to restrict search entity types (e.g. mail-only → message)     | `false` | No       |
 
 Search intelligence: **learned variants** (knowledge base), **UQAS cross-language** (BilingualThesaurus), **optimizer** (typos, abbreviations, NLP), **SynonymExpander** (business terms), **simplified queries** (shorter sub-phrases), **OR-query** (single broad call when no results), and **parallel merge** when the first query returns few hits.
 

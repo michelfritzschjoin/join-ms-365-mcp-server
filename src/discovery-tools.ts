@@ -20,6 +20,8 @@ import DownloadLinkGenerator from './download-link-generator.js';
 import DeepResearchEngine from './deep-research-engine.js';
 import type { AppSecrets } from './secrets.js';
 import { getMaxResults, getMaxAggregateItems } from './perf-config.js';
+import { getQueryOptimizer } from './query-optimizer.js';
+import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
 
 let searchStrategy: SearchFirstStrategy | null = null;
 let deepResearchEngine: DeepResearchEngine | null = null;
@@ -269,6 +271,76 @@ Even if no results are found, this confirms the information is not in the user's
           {
             type: 'text',
             text: JSON.stringify(response, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // Intent Router: get recommendation for which tool and entity types to use for a question
+  server.tool(
+    'get-query-recommendation',
+    `Get an intent-based recommendation for how to answer a user question with Microsoft 365.
+Use this before calling search or other tools to get: suggested tools, recommended entity types, and an optimized query.
+Returns suggestedTools (e.g. smart-query, get-calendar-view, list-mail-messages), recommendedEntityTypes for /search/query, optimizedQuery, and queryAnalysisMarkdown.`,
+    {
+      question: z.string().describe('The user question or search intent'),
+    },
+    async ({ question }) => {
+      const nlpEnhancer = new NLPEnhancer();
+      const decomposed = nlpEnhancer.decomposeQuery(question);
+      const optimizer = getQueryOptimizer();
+      const entityTypesFromContext = decomposed.ms365Context?.searchScopes?.length
+        ? decomposed.ms365Context.searchScopes.filter((s) =>
+            [
+              'message',
+              'event',
+              'driveItem',
+              'site',
+              'list',
+              'listItem',
+              'chatMessage',
+              'person',
+            ].includes(s)
+          )
+        : undefined;
+      const optimized = optimizer.optimizeQuery(question, {
+        tool: 'search',
+        entityTypes: entityTypesFromContext,
+      });
+
+      const recommendedEntityTypes =
+        entityTypesFromContext && entityTypesFromContext.length > 0
+          ? validateEntityTypeCombinations(entityTypesFromContext)
+          : undefined;
+
+      const recommendation = {
+        question,
+        suggestedTools: decomposed.ms365Context?.suggestedTools ?? [
+          'smart-query',
+          'search-content',
+        ],
+        recommendedEntityTypes: recommendedEntityTypes ?? undefined,
+        optimizedQuery: optimized.optimizedQuery,
+        queryVariants: optimized.variants,
+        queryAnalysisMarkdown: decomposed.markdown,
+        subQueries: decomposed.subQueries,
+        intent: decomposed.intent.type,
+        service: decomposed.ms365Context?.service ?? 'search',
+        confidence: decomposed.confidence,
+        nlpAnalysis: {
+          intent: decomposed.intent.type,
+          entity: decomposed.entity,
+          temporal: decomposed.temporal,
+          confidence: decomposed.confidence,
+        },
+      };
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(recommendation, null, 2),
           },
         ],
       };

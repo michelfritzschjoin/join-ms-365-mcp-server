@@ -1,12 +1,16 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { UserProfile, ProfessionProfile } from './user-profile.js';
 
 /**
  * Request context that is passed through async operations
- * Contains authentication tokens and chat session information
+ * Contains authentication tokens, a unique session ID, and chat session information.
+ * Each MCP request gets its own sessionId so that concurrent requests from different
+ * users never share or mix content.
  */
 export interface RequestContext {
+  /** Unique session ID for this request (one per request, prevents cross-request mixing). Set by HTTP handlers; optional for tests/stdio. */
+  sessionId?: string;
   /** Microsoft Graph API access token */
   accessToken: string;
   /** Microsoft Graph API refresh token */
@@ -19,6 +23,14 @@ export interface RequestContext {
   tokenHash?: string;
   /** User profile with job title, department, and profession profile */
   userProfile?: UserProfile;
+}
+
+/**
+ * Generate a unique session ID for each MCP request.
+ * Used to isolate concurrent requests so that two employees never see mixed content.
+ */
+export function generateSessionId(): string {
+  return randomUUID();
 }
 
 /**
@@ -65,6 +77,15 @@ export function getRequestTokens(): RequestContext | undefined {
 }
 
 /**
+ * Get the current request session ID from context.
+ * Every MCP request has a unique sessionId; use for logging and transport isolation.
+ * @returns Session ID or undefined if not in request context
+ */
+export function getSessionId(): string | undefined {
+  return requestContext.getStore()?.sessionId;
+}
+
+/**
  * Get the current chat ID from context
  * @returns Chat ID or undefined if not available
  */
@@ -103,6 +124,7 @@ export function requireUserId(): string {
  * Returns an object suitable for logging without exposing sensitive data.
  */
 export function getSecureLogContext(): {
+  sessionId?: string;
   hasAuth: boolean;
   hasUserId: boolean;
   userIdPrefix?: string;
@@ -112,6 +134,7 @@ export function getSecureLogContext(): {
 } {
   const ctx = requestContext.getStore();
   return {
+    sessionId: ctx?.sessionId,
     hasAuth: hasValidAuth(),
     hasUserId: hasUserIdentity(),
     userIdPrefix: ctx?.userId?.substring(0, 8),

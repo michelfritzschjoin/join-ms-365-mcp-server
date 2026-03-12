@@ -181,12 +181,12 @@
     "scopes": ["Calendars.ReadWrite"]
   },
   {
-    "pathPattern": "/me/calendarView",
+    "pathPattern": "/me/calendar/calendarView",
     "method": "get",
     "toolName": "get-calendar-view",
     "scopes": ["Calendars.Read"],
     "supportsTimezone": true,
-    "llmTip": "PREFERRED for viewing all events! Shows ALL events (including recurring instances and shared calendars) within a date range. Requires startDateTime and endDateTime (defaults: start and end of current day when omitted). Returns events where user is organizer OR attendee. Use $top=200 or fetchAllPages=true for large calendars."
+    "llmTip": "PREFERRED for viewing MY events (primary calendar only). For relative dates use timeframe or startDateTime/endDateTime in ISO 8601. Does NOT include shared calendars (use list-calendars + list-specific-calendar-events for shared). Use $top=200 or fetchAllPages=true for large calendars."
   },
   {
     "pathPattern": "/me/calendars",

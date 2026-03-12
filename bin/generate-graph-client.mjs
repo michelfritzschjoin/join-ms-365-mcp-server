@@ -3,6 +3,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 import { downloadGraphOpenAPI } from './modules/download-openapi.mjs';
 import { generateMcpTools } from './modules/generate-mcp-tools.mjs';
 import { createAndSaveSimplifiedOpenAPI } from './modules/simplified-openapi.mjs';
@@ -20,7 +21,7 @@ const endpointsFile = path.join(srcDir, 'endpoints.json');
 const generatedDir = path.join(srcDir, 'generated');
 
 const args = process.argv.slice(2);
-const forceDownload = args.includes('--force');
+const forceDownload = args.includes('--force') || args.includes('--force-download');
 
 async function main() {
   console.log('Microsoft Graph API OpenAPI Processor');
@@ -66,6 +67,13 @@ async function main() {
       } else {
         throw genError;
       }
+    }
+
+    const clientPath = path.join(generatedDir, 'client.ts');
+    if (fs.existsSync(clientPath)) {
+      console.log('\n🔧 Step 4: Patching generated client');
+      execSync('node bin/patch-generated-client.mjs', { stdio: 'inherit', cwd: rootDir });
+      console.log('✅ Patched generated client');
     }
   } catch (error) {
     console.error('\n❌ Error processing OpenAPI specification:', error.message);

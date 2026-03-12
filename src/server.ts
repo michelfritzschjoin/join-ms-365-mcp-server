@@ -36,9 +36,13 @@ import {
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
-import { requestContext, createTokenHash } from './request-context.js';
+import {
+  requestContext,
+  createTokenHash,
+  generateSessionId,
+  getSessionId,
+} from './request-context.js';
 import type { RequestContext } from './request-context.js';
-import { randomUUID } from 'crypto';
 import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
 import { getQueryStore } from './query-store.js';
 import { z } from 'zod';
@@ -74,9 +78,9 @@ function extractChatId(req: Request): string {
     return chatId;
   }
 
-  // Generate a UUID for this request if no chat ID provided
+  // Generate a unique ID for this request if no chat ID provided
   // This ensures each "anonymous" session still gets tracked
-  return `anon-${randomUUID()}`;
+  return `anon-${generateSessionId()}`;
 }
 
 /**
@@ -2263,9 +2267,12 @@ class MicrosoftGraphServer {
             });
           }
 
+          // Unique session ID per request so concurrent requests never mix content
+          const sessionId = generateSessionId();
+
           const handler = async () => {
             const transport = new StreamableHTTPServerTransport({
-              sessionIdGenerator: undefined, // Stateless mode
+              sessionIdGenerator: () => getSessionId() ?? sessionId,
             });
 
             res.on('close', () => {
@@ -2281,7 +2288,11 @@ class MicrosoftGraphServer {
             const chatId = extractChatId(req);
             const userId = extractUserId(req);
 
-            logger.debug('MCP GET request context', { chatId, userId: userId?.substring(0, 8) });
+            logger.debug('MCP GET request context', {
+              sessionId,
+              chatId,
+              userId: userId?.substring(0, 8),
+            });
 
             if (req.microsoftAuth) {
               // SECURITY: Include token hash for secure logging/correlation
@@ -2299,6 +2310,7 @@ class MicrosoftGraphServer {
               }
 
               const context: RequestContext = {
+                sessionId,
                 accessToken: req.microsoftAuth.accessToken,
                 refreshToken: req.microsoftAuth.refreshToken,
                 chatId,
@@ -2308,9 +2320,15 @@ class MicrosoftGraphServer {
               };
               await requestContext.run(context, handler);
             } else {
-              // Even without auth, provide chat context
+              // Even without auth, provide chat context and session isolation
               await requestContext.run(
-                { accessToken: '', chatId, userId, tokenHash: 'no-auth' },
+                {
+                  sessionId,
+                  accessToken: '',
+                  chatId,
+                  userId,
+                  tokenHash: 'no-auth',
+                },
                 handler
               );
             }
@@ -2470,7 +2488,7 @@ class MicrosoftGraphServer {
 
           const handler = async () => {
             const transport = new StreamableHTTPServerTransport({
-              sessionIdGenerator: undefined, // Stateless mode
+              sessionIdGenerator: () => getSessionId() ?? generateSessionId(),
             });
 
             res.on('close', () => {
@@ -2506,6 +2524,9 @@ class MicrosoftGraphServer {
           };
 
           try {
+            // Unique session ID per request so concurrent requests never mix content
+            const sessionId = generateSessionId();
+
             // Extract chat ID and user ID for memory context
             const chatId = extractChatId(req);
             const userId = extractUserId(req);
@@ -2541,7 +2562,11 @@ class MicrosoftGraphServer {
               });
             }
 
-            logger.debug('MCP POST request context', { chatId, userId: userId?.substring(0, 8) });
+            logger.debug('MCP POST request context', {
+              sessionId,
+              chatId,
+              userId: userId?.substring(0, 8),
+            });
 
             if (req.microsoftAuth) {
               // SECURITY: Include token hash for secure logging/correlation
@@ -2559,6 +2584,7 @@ class MicrosoftGraphServer {
               }
 
               const context: RequestContext = {
+                sessionId,
                 accessToken: req.microsoftAuth.accessToken,
                 refreshToken: req.microsoftAuth.refreshToken,
                 chatId,
@@ -2568,9 +2594,15 @@ class MicrosoftGraphServer {
               };
               await requestContext.run(context, handler);
             } else {
-              // Even without auth, provide chat context
+              // Even without auth, provide chat context and session isolation
               await requestContext.run(
-                { accessToken: '', chatId, userId, tokenHash: 'no-auth' },
+                {
+                  sessionId,
+                  accessToken: '',
+                  chatId,
+                  userId,
+                  tokenHash: 'no-auth',
+                },
                 handler
               );
             }

@@ -1,0 +1,3 @@
+# Ensure LF for scripts and configs so Prettier format:check passes on all platforms
+*.mjs text eol=lf
+*.cjs text eol=lf

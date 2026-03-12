@@ -1107,7 +1107,7 @@ async function findMeetingsWithPerson(
     };
 
     const response = await graphClient.makeRequest(
-      `/me/calendarView?${buildGraphQueryString(queryParams)}`,
+      `/me/calendar/calendarView?${buildGraphQueryString(queryParams)}`,
       {
         method: 'GET',
       }
@@ -1304,7 +1304,7 @@ async function findUpcomingMeetingsRollingWindow(params: {
     };
 
     const rawResponse = await params.graphClient.makeRequest(
-      `/me/calendarView?${buildGraphQueryString(queryParams)}`,
+      `/me/calendar/calendarView?${buildGraphQueryString(queryParams)}`,
       {
         method: 'GET',
         headers: params.timezone ? { Prefer: `outlook.timezone="${params.timezone}"` } : undefined,
@@ -3235,7 +3235,7 @@ export function registerCompoundTools(
           const endDate = dateRange.end;
 
           const response = await graphClient.makeRequest(
-            `/me/calendarView?startDateTime=${startDate.toISOString()}&endDateTime=${endDate.toISOString()}`,
+            `/me/calendar/calendarView?startDateTime=${startDate.toISOString()}&endDateTime=${endDate.toISOString()}`,
             {
               method: 'GET',
               queryParams: {
@@ -6040,39 +6040,62 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
         const topResults: unknown[] = [];
         const categories: Record<string, unknown> = {};
 
-        // Overall summary
-        summaryLines.push(`## Search Results for "${results.query}"`);
-        summaryLines.push(`**Total Results:** ${results.totalHits}`);
-        summaryLines.push(`**Search Duration:** ${results.metadata.searchDuration}ms`);
+        // Aligned with shared Markdown schema: # Title, ## Zusammenfassung, ## Category, ## Metadaten
+        summaryLines.push('# Suchergebnisse');
+        summaryLines.push('');
+        summaryLines.push('## Zusammenfassung');
+        summaryLines.push('');
+        summaryLines.push(`- **Suchanfrage:** "${results.query}"`);
+        summaryLines.push(`- **Anzahl Treffer:** ${results.totalHits}`);
+        summaryLines.push(`- **Suchdauer:** ${results.metadata.searchDuration}ms`);
         summaryLines.push('');
 
-        // Process each category
         const categoryProcessors: Array<{
           key: string;
           items: SearchHit[];
-          label: string;
+          sectionTitle: string;
           entityType: 'email' | 'event' | 'file' | 'site' | 'listItem' | 'chat' | 'person';
         }> = [
-          { key: 'emails', items: results.results.emails, label: '📧 Emails', entityType: 'email' },
-          { key: 'events', items: results.results.events, label: '📅 Events', entityType: 'event' },
-          { key: 'files', items: results.results.files, label: '📁 Files', entityType: 'file' },
-          { key: 'sites', items: results.results.sites, label: '🌐 Sites', entityType: 'site' },
+          {
+            key: 'emails',
+            items: results.results.emails,
+            sectionTitle: 'E-Mails',
+            entityType: 'email',
+          },
+          {
+            key: 'events',
+            items: results.results.events,
+            sectionTitle: 'Termine',
+            entityType: 'event',
+          },
+          {
+            key: 'files',
+            items: results.results.files,
+            sectionTitle: 'Dateien',
+            entityType: 'file',
+          },
+          {
+            key: 'sites',
+            items: results.results.sites,
+            sectionTitle: 'Websites',
+            entityType: 'site',
+          },
           {
             key: 'listItems',
             items: results.results.listItems,
-            label: '📋 List Items',
+            sectionTitle: 'Listeneinträge',
             entityType: 'listItem',
           },
           {
             key: 'chats',
             items: results.results.chats,
-            label: '💬 Teams Messages',
+            sectionTitle: 'Teams-Nachrichten',
             entityType: 'chat',
           },
           {
             key: 'people',
             items: results.results.people,
-            label: '👥 People',
+            sectionTitle: 'Personen',
             entityType: 'person',
           },
         ];
@@ -6083,7 +6106,8 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
               .sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0))
               .slice(0, Math.min(maxItems, processor.items.length));
 
-            summaryLines.push(`### ${processor.label} (${processor.items.length})`);
+            summaryLines.push(`## ${processor.sectionTitle} (${processor.items.length})`);
+            summaryLines.push('');
 
             const formattedItems = topItems.map((hit, idx) => {
               const fields = extractKeyFields(hit, processor.entityType);
@@ -6093,19 +6117,24 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
             });
 
             if (processor.items.length > maxItems) {
-              summaryLines.push(`   ... and ${processor.items.length - maxItems} more`);
+              summaryLines.push(`   ... und ${processor.items.length - maxItems} weitere`);
             }
             summaryLines.push('');
 
             categories[processor.key] = {
               count: processor.items.length,
-              topItems: formattedItems.slice(0, 5), // Top 5 for details
+              topItems: formattedItems.slice(0, 5),
             };
 
-            // Add top 3 to overall top results
             topResults.push(...formattedItems.slice(0, 3));
           }
         }
+
+        summaryLines.push('## Metadaten');
+        summaryLines.push('');
+        summaryLines.push(`- Suchanfrage: ${results.query}`);
+        summaryLines.push(`- Anzahl Treffer: ${results.totalHits}`);
+        summaryLines.push(`- Suchdauer: ${results.metadata.searchDuration}ms`);
 
         return {
           summary: summaryLines.join('\n'),
@@ -6222,6 +6251,59 @@ This tool uses the **Microsoft Search API** to search across ALL Microsoft 365 p
         };
       }
 
+      const formattedSummary = formatSearchResultsForLLM(searchResult, { maxItems: 10 });
+      response.summaryMarkdown = formattedSummary.summary;
+
+      // Top findings per category (top 3–5 with title + relevance) for LLM prioritization
+      const topN = 5;
+      const topFindings: Record<string, Array<{ title: string; relevance?: number }>> = {};
+      const categorySources: Array<{
+        key: string;
+        items: SearchHit[];
+        getTitle: (hit: SearchHit) => string;
+      }> = [
+        {
+          key: 'emails',
+          items: searchResult.results.emails,
+          getTitle: (h) => h.resource?.subject || h.name || '',
+        },
+        {
+          key: 'events',
+          items: searchResult.results.events,
+          getTitle: (h) => h.resource?.subject || h.name || '',
+        },
+        {
+          key: 'files',
+          items: searchResult.results.files,
+          getTitle: (h) => h.resource?.name || h.name || '',
+        },
+        {
+          key: 'sites',
+          items: searchResult.results.sites,
+          getTitle: (h) => h.resource?.displayName || h.resource?.name || h.name || '',
+        },
+        { key: 'people', items: searchResult.results.people, getTitle: (h) => h.name || '' },
+        {
+          key: 'teamsMessages',
+          items: searchResult.results.chats,
+          getTitle: (h) => h.resource?.subject || h.name || '',
+        },
+      ];
+      for (const { key, items, getTitle } of categorySources) {
+        if (items.length > 0) {
+          const sorted = [...items]
+            .sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0))
+            .slice(0, topN);
+          topFindings[key] = sorted.map((hit) => ({
+            title: getTitle(hit).substring(0, 80) || '(no title)',
+            relevance: hit.relevanceScore,
+          }));
+        }
+      }
+      if (Object.keys(topFindings).length > 0) {
+        response.topFindings = topFindings;
+      }
+
       return {
         content: [
           {
@@ -6282,7 +6364,7 @@ Use this when someone asks "Prepare me for my meeting with [person/topic]" or "W
         };
 
         const calendarResponse = await graphClient.makeRequest(
-          `/me/calendarView?${buildGraphQueryString(queryParams)}`,
+          `/me/calendar/calendarView?${buildGraphQueryString(queryParams)}`,
           {
             method: 'GET',
           }
@@ -6387,7 +6469,7 @@ Use this when someone asks "Prepare me for my meeting with [person/topic]" or "W
             };
 
             const pastMeetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(pastQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(pastQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -6539,7 +6621,7 @@ Use this for "What did I do this week?", "Give me my weekly summary", or "Summar
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(weekQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(weekQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -7006,7 +7088,7 @@ Use this for "What's the status of Project Apollo?", "Give me an overview of the
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(projectQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(projectQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -7681,7 +7763,7 @@ Use this for "What needs my attention?", "Show me items I need to follow up on",
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(upcomingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(upcomingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -7901,7 +7983,7 @@ Note: Transcripts are only available for meetings where transcription was enable
         };
 
         const calendarResponse = await graphClient.makeRequest(
-          `/me/calendarView?${buildGraphQueryString(onlineQueryParams)}`,
+          `/me/calendar/calendarView?${buildGraphQueryString(onlineQueryParams)}`,
           {
             method: 'GET',
           }
@@ -8541,7 +8623,7 @@ Note: Only meetings with transcription enabled will have transcript content. Loo
         };
 
         const calendarResponse = await graphClient.makeRequest(
-          `/me/calendarView?${buildGraphQueryString(onlineQueryParams)}`,
+          `/me/calendar/calendarView?${buildGraphQueryString(onlineQueryParams)}`,
           {
             method: 'GET',
           }
@@ -9270,7 +9352,7 @@ Use this for "How is my team collaborating?", "Who are the most active team memb
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(analysisQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(analysisQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -9980,7 +10062,7 @@ Use this for "Am I in too many meetings?", "Analyze my meeting load", or "Show m
         };
 
         const meetingsResponse = await graphClient.makeRequest(
-          `/me/calendarView?${buildGraphQueryString(exportQueryParams)}`,
+          `/me/calendar/calendarView?${buildGraphQueryString(exportQueryParams)}`,
           {
             method: 'GET',
           }
@@ -10519,7 +10601,7 @@ Use this for "When did we decide on X?", "What was the context for decision Y?",
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(topicQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(topicQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -10710,7 +10792,7 @@ Use this for "Who is involved in Project X?", "List stakeholders for [project]",
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(projectFilterQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(projectFilterQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -10984,7 +11066,7 @@ Use this for "What am I forgetting to respond to?", "Find unanswered requests", 
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(responseQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(responseQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -11208,7 +11290,7 @@ Use this for "Who do I work with most?", "Map my professional network", or "Anal
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(attendanceQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(attendanceQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -11911,7 +11993,7 @@ Use this for "What action items do I have from recent emails?", "Extract tasks f
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -12392,7 +12474,7 @@ Use this for "What decisions were made about [topic]?", "Extract all decisions f
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -12660,7 +12742,7 @@ Use this for "How strong is my relationship with [person]?", "Who do I communica
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -12884,7 +12966,7 @@ Use this for "Who do I know in common with [person]?", "Find mutual connections 
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -13218,7 +13300,7 @@ Use this for "Who do I email most often?", "Show my communication frequency", or
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -13520,7 +13602,7 @@ Use this for "Find documents related to [topic]", "Show files related to this me
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -13777,7 +13859,7 @@ Use this for "Build a knowledge graph for [topic]", "Show connections for [proje
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -15014,7 +15096,7 @@ Use this for "Analyze my business metrics this quarter", "Show team collaboratio
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -15264,7 +15346,7 @@ Use this for "Show my business intelligence dashboard", "What are the key trends
             };
 
             const meetingsResponse = await graphClient.makeRequest(
-              `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+              `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
               {
                 method: 'GET',
               }
@@ -15373,7 +15455,7 @@ Use this for "Analyze team performance", "How effective is our team collaboratio
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -15941,7 +16023,7 @@ Use this for "Summarize my week", "What happened this month?", or "Give me a dai
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -16546,7 +16628,7 @@ Use this for "How does our team collaborate?", "Identify collaboration bottlenec
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }
@@ -16675,7 +16757,7 @@ Use this for "How can we collaborate better?", "Suggest improvements to our work
               };
 
               const meetingsResponse = await graphClient.makeRequest(
-                `/me/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
+                `/me/calendar/calendarView?${buildGraphQueryString(meetingQueryParams)}`,
                 {
                   method: 'GET',
                 }

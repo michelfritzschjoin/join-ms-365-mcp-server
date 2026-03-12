@@ -13,6 +13,29 @@ const TO_INTENT_PATTERN = /^(an|to)\s+(.+)$/i;
 const COMPOSITE_OR_PATTERN = /\s+OR\s+/i;
 /** Extract email from text (simple RFC-style) */
 const EMAIL_IN_QUERY_PATTERN = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+/** German umlauts/ß to ASCII for search index (Exchange often stores display names as ASCII) */
+const UMLAUT_TO_ASCII: [RegExp, string][] = [
+  [/ä/g, 'ae'],
+  [/ö/g, 'oe'],
+  [/ü/g, 'ue'],
+  [/ß/g, 'ss'],
+  [/Ä/g, 'Ae'],
+  [/Ö/g, 'Oe'],
+  [/Ü/g, 'Ue'],
+];
+const HAS_UMLAUT = /[äöüßÄÖÜ]/;
+
+/**
+ * Expands German umlauts/ß to ASCII (e.g. Görnhardt → Goernhardt).
+ * Used so "from:Markus Görnhardt" also matches when Exchange indexes the display name as ASCII.
+ */
+export function umlautToAscii(value: string): string {
+  let result = value;
+  for (const [re, replacement] of UMLAUT_TO_ASCII) {
+    result = result.replace(re, replacement);
+  }
+  return result;
+}
 
 /**
  * Returns true if the value looks like a person name (no KQL prefix, 1–4 words, letters/umlauts).
@@ -110,6 +133,14 @@ export function formatEmailSearchQuery(rawValue: string): string {
 
   // Person-like → sender ("letzte E-Mail von Maria Müller" etc.)
   if (looksLikePersonName(trimmed)) {
+    // If name contains umlauts, also search ASCII form (Exchange often indexes display names as ASCII)
+    if (HAS_UMLAUT.test(trimmed)) {
+      const asciiName = umlautToAscii(trimmed);
+      if (asciiName !== trimmed) {
+        const inner = `from:${trimmed} OR from:${asciiName}`;
+        return `"${inner.replace(/"/g, '\\"')}"`;
+      }
+    }
     return `"from:${trimmed}"`;
   }
 
