@@ -270,4 +270,39 @@ describe('Graph API Change Detection', () => {
       expect(potentiallyBetaEndpoints.length).toBeGreaterThanOrEqual(0);
     });
   });
+
+  describe('getBinaryContent', () => {
+    it('returns ArrayBuffer when response is ok', async () => {
+      const buf = new Uint8Array([1, 2, 3]);
+      const mockArrayBuffer = buf.buffer;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          arrayBuffer: () => Promise.resolve(mockArrayBuffer),
+          text: () => Promise.resolve(''),
+        })
+      );
+      try {
+        const result = await graphClient.getBinaryContent('/me/drive/items/abc/content');
+        expect(result).toBe(mockArrayBuffer);
+        expect(result.byteLength).toBe(3);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('throws when not authenticated', async () => {
+      const noTokenAuth = {
+        getToken: vi.fn().mockRejectedValue(new Error('No token')),
+      } as unknown as AuthManager;
+      const client = new GraphClient(noTokenAuth, mockSecrets);
+      vi.stubGlobal('fetch', vi.fn());
+      await expect(client.getBinaryContent('/me/drive/items/abc/content')).rejects.toThrow(
+        /AUTHENTICATION REQUIRED/
+      );
+      vi.unstubAllGlobals();
+    });
+  });
 });

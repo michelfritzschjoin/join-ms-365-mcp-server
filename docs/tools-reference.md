@@ -91,6 +91,8 @@ Use `get-example-questions` when the user asks "What can you do?", "Was kannst d
 | `upload-file-content`            | Upload file           | All  |
 | `delete-onedrive-file`           | Delete file           | All  |
 
+When using **Super-Tools** (`files` tool with `action`): Use `get-content` to get readable text from Word, Excel, and PowerPoint files (after locating the file via search or list). Use `fetchAllPages: true` (default) to load all pages for large folders or SharePoint lists.
+
 ### Excel Tools
 
 | Tool                    | Description         | Mode |
@@ -164,6 +166,8 @@ Use `get-example-questions` when the user asks "What can you do?", "Was kannst d
 | `list-sharepoint-site-list-items` | List list items  | Org Mode |
 | `get-sharepoint-site-list-item`   | Get list item    | Org Mode |
 | `get-sharepoint-sites-delta`      | Get site changes | Org Mode |
+
+When using **Super-Tools** (`sharepoint` tool): For large lists, list-items and site-items automatically follow `@odata.nextLink` and merge pages (up to `MS365_MCP_MAX_PAGES`). Use `fetchAllPages: false` to get only the first page.
 
 ### Search Tools
 

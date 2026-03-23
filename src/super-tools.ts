@@ -56,12 +56,15 @@ import {
   looksLikePersonName,
 } from './utils/search-query-format.js';
 import { getGraphMaxRetries, getGraphRetryMaxDelayMs } from './perf-config.js';
+import { fetchAllODataPages } from './utils/graph-pagination.js';
 import {
   isLoopFile,
   detectLoopFile,
   parseLoopContent,
   formatLoopFileInfo,
 } from './utils/loop-detector.js';
+import { applyOfficeDetection, detectOfficeFile } from './utils/office-file-detector.js';
+import { getExcelContent, getWordContent, getPowerPointContent } from './office-content.js';
 // Query Pattern Learning
 import { getQueryStore } from './query-store.js';
 // Automatic Query Optimization
@@ -1468,6 +1471,13 @@ function buildOptimizationSummary(result: OptimizedQuery): string {
 const paginationSchema = {
   top: z.number().optional().default(25).describe('Maximum number of items to return'),
   skip: z.number().optional().default(0).describe('Number of items to skip for pagination'),
+  fetchAllPages: z
+    .boolean()
+    .optional()
+    .default(true)
+    .describe(
+      'When true, follow @odata.nextLink and merge all pages (list-items, site-items, file list)'
+    ),
 };
 
 const filterSchema = {
@@ -2202,6 +2212,63 @@ const calendarSchema = z.object({
 /** Input type for calendar tool; use z.input so partial objects (e.g. auto-execution) are accepted. */
 type CalendarInput = z.input<typeof calendarSchema>;
 
+/**
+ * Microsoft Graph does not support filtering calendar events by attendees
+ * (attendees/any(...) causes ErrorInvalidUrlQueryFilter). This helper extracts
+ * date range and attendee from the filter so we can use calendar view + client-side filtering.
+ */
+function parseCalendarFilter(filter: string): {
+  apiFilter: string | null;
+  attendeeFilter: string | null;
+  startDateTime?: string;
+  endDateTime?: string;
+} {
+  let apiFilter: string | null = filter;
+  let attendeeFilter: string | null = null;
+  let startDateTime: string | undefined;
+  let endDateTime: string | undefined;
+
+  // Extract date range: start/dateTime ge '...' and end/dateTime le '...'
+  const startMatch = filter.match(/start\/dateTime\s+ge\s+'([^']+)'/);
+  const endMatch = filter.match(/end\/dateTime\s+le\s+'([^']+)'/);
+  if (startMatch) startDateTime = startMatch[1];
+  if (endMatch) endDateTime = endMatch[1];
+
+  // Extract and remove unsupported attendees/any(...) - Graph returns ErrorInvalidUrlQueryFilter for this
+  const attendeesAnyRe =
+    /\s*and\s+attendees\/any\s*\([^)]*\/emailAddress\/(?:address|name)\s+eq\s+'([^']*)'\)/i;
+  const m = filter.match(attendeesAnyRe);
+  if (m) {
+    attendeeFilter = m[1]?.trim() ?? null;
+    apiFilter = filter
+      .replace(attendeesAnyRe, '')
+      .replace(/^\s*and\s+/i, '')
+      .trim();
+  }
+
+  if (apiFilter === '' || apiFilter === 'and') apiFilter = null;
+  return { apiFilter, attendeeFilter, startDateTime, endDateTime };
+}
+
+/**
+ * Filter calendar events client-side by attendee (name or email).
+ * Resolves person name via findUser when needed; matches attendee email or display name.
+ */
+function eventHasAttendee(
+  event: { attendees?: Array<{ emailAddress?: { address?: string; name?: string } }> },
+  attendeeEmail: string,
+  attendeeName: string
+): boolean {
+  const attendees = event.attendees ?? [];
+  const addrLower = attendeeEmail.toLowerCase();
+  const nameLower = attendeeName.toLowerCase();
+  return attendees.some((a) => {
+    const address = (a.emailAddress?.address ?? '').toLowerCase();
+    const name = (a.emailAddress?.name ?? '').toLowerCase();
+    return address === addrLower || name.includes(nameLower) || nameLower.includes(name);
+  });
+}
+
 async function handleCalendar(
   input: CalendarInput,
   graphClient: GraphClient,
@@ -2222,12 +2289,78 @@ async function handleCalendar(
     case 'list': {
       const startTime = Date.now();
       thinking.push('Listing calendar events');
-      const params: Record<string, string> = { $top: String(input.top || 25) };
-      if (input.filter) params.$filter = input.filter;
-      if (input.orderby) params.$orderby = input.orderby;
-      if (input.skip) params.$skip = String(input.skip);
-      const result = await callGraph(graphClient, 'GET', '/me/events', params, undefined, headers);
-      const parsedResult = JSON.parse(result);
+
+      // Graph API does not support $filter with attendees/any(...). Parse filter to strip
+      // attendee clause and apply client-side filtering when needed.
+      let parsed: ReturnType<typeof parseCalendarFilter> = {
+        apiFilter: null,
+        attendeeFilter: null,
+      };
+      if (input.filter) {
+        parsed = parseCalendarFilter(input.filter);
+        if (parsed.attendeeFilter) {
+          thinking.push(
+            `Filtering by attendee "${parsed.attendeeFilter}" (client-side; Graph does not support attendee $filter)`
+          );
+        }
+      }
+
+      let parsedResult: unknown;
+      if (parsed.attendeeFilter !== null) {
+        // Use calendar view with date range, then filter by attendee client-side
+        const now = new Date();
+        const startOfToday = new Date(
+          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
+        );
+        const endOfToday = new Date(
+          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
+        );
+        const startDateTime =
+          parsed.startDateTime ?? input.startDateTime ?? startOfToday.toISOString();
+        const endDateTime = parsed.endDateTime ?? input.endDateTime ?? endOfToday.toISOString();
+        const viewParams: Record<string, string> = {
+          startDateTime,
+          endDateTime,
+          $top: String(input.top || 50),
+        };
+        if (input.orderby) viewParams.$orderby = input.orderby;
+        const viewResult = await callGraph(
+          graphClient,
+          'GET',
+          PRIMARY_CALENDAR_VIEW_PATH,
+          viewParams,
+          undefined,
+          headers
+        );
+        const viewParsed = JSON.parse(viewResult) as { value?: unknown[] };
+        const resolvedUser = await findUser(graphClient, parsed.attendeeFilter);
+        const attendeeEmail = resolvedUser?.mail ?? resolvedUser?.userPrincipalName ?? '';
+        const attendeeName = resolvedUser?.displayName ?? parsed.attendeeFilter;
+        const filteredValue = (viewParsed.value ?? []).filter((evt: unknown) =>
+          eventHasAttendee(
+            evt as { attendees?: Array<{ emailAddress?: { address?: string; name?: string } }> },
+            attendeeEmail,
+            attendeeName
+          )
+        );
+        parsedResult = { ...viewParsed, value: filteredValue };
+      } else {
+        const params: Record<string, string> = { $top: String(input.top || 25) };
+        const filterToUse = parsed.apiFilter ?? input.filter;
+        if (filterToUse) params.$filter = filterToUse;
+        if (input.orderby) params.$orderby = input.orderby;
+        if (input.skip) params.$skip = String(input.skip);
+        const result = await callGraph(
+          graphClient,
+          'GET',
+          '/me/events',
+          params,
+          undefined,
+          headers
+        );
+        parsedResult = JSON.parse(result);
+      }
+
       const executionTime = Date.now() - startTime;
 
       // Extract pagination info
@@ -2235,7 +2368,7 @@ async function handleCalendar(
 
       // Format calendar response with profession-based or Markdown formatting
       if (isCalendarResponse(parsedResult)) {
-        const formatted = formatCalendarResponse(parsedResult);
+        const formatted = formatCalendarResponse(parsedResult as Record<string, unknown>);
         const formattedText =
           getResponseFormat() === 'markdown'
             ? calendarResponseToMarkdown(formatted)
@@ -2336,7 +2469,12 @@ async function handleCalendar(
         throw new Error('calendarId is required for action "specific-calendar"');
       thinking.push(`Listing events from calendar: ${input.calendarId}`);
       const params: Record<string, string> = { $top: String(input.top || 25) };
-      if (input.filter) params.$filter = input.filter;
+      if (input.filter) {
+        const parsed = parseCalendarFilter(input.filter);
+        if (parsed.apiFilter) params.$filter = parsed.apiFilter;
+        // Graph does not support attendees/any; attendee filtering would require
+        // calendarView + client-side filter (same as list) - not implemented for specific-calendar yet
+      }
       const result = await callGraph(
         graphClient,
         'GET',
@@ -2965,6 +3103,7 @@ const filesActions = z.enum([
   'list', // List files in folder
   'get', // Get file metadata
   'download', // Download file content
+  'get-content', // Get readable content from Word/Excel/PowerPoint
   'root', // Get drive root
   'search', // Search files
 ]);
@@ -2975,6 +3114,9 @@ const filesSchema = z.object({
   driveId: z.string().optional().describe('Drive ID'),
   itemId: z.string().optional().describe('Item (file/folder) ID'),
   path: z.string().optional().describe('Path to file/folder'),
+  // get-content options
+  sheetName: z.string().optional().describe('Excel: sheet name to read (default: all sheets)'),
+  maxLength: z.number().optional().describe('Max characters for text content (default: 100000)'),
   // Filters
   ...filterSchema,
   ...paginationSchema,
@@ -3006,9 +3148,18 @@ async function handleFiles(
           ? `/me/drive/items/${itemId}/children`
           : `/drives/${driveId}/items/${itemId}/children`;
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await callGraph(graphClient, 'GET', endpoint, params);
+      let result = await callGraph(graphClient, 'GET', endpoint, params);
 
-      // Check for Loop files in the listing and mark them
+      // Optionally follow @odata.nextLink and merge pages
+      if (input.fetchAllPages) {
+        const parsed = JSON.parse(result) as { value?: unknown[]; '@odata.nextLink'?: string };
+        if (Array.isArray(parsed?.value) && parsed['@odata.nextLink']) {
+          const combined = await fetchAllODataPages(graphClient, parsed, undefined, thinking);
+          result = JSON.stringify(combined);
+        }
+      }
+
+      // Check for Loop and Office files in the listing and mark them
       try {
         const parsedResult = JSON.parse(result);
         if (parsedResult.value && Array.isArray(parsedResult.value)) {
@@ -3023,6 +3174,7 @@ async function handleFiles(
               };
               loopFileCount++;
             }
+            applyOfficeDetection(item);
           }
           if (loopFileCount > 0) {
             thinking.push(`📋 Found ${loopFileCount} Loop file(s) in listing`);
@@ -3046,7 +3198,7 @@ async function handleFiles(
           : `/drives/${driveId}/items/${input.itemId}`;
       const result = await callGraph(graphClient, 'GET', endpoint);
 
-      // Check if this is a Loop file and add detection info
+      // Check if this is a Loop file and add detection info; mark Office types
       try {
         const parsedResult = JSON.parse(result);
         const loopDetection = detectLoopFile(parsedResult);
@@ -3058,6 +3210,8 @@ async function handleFiles(
           parsedResult.loopDetection = loopDetection;
           return addThinkingToResponse(JSON.stringify(parsedResult, null, 2), thinking);
         }
+        applyOfficeDetection(parsedResult);
+        return formatAndReturnToolResponse(JSON.stringify(parsedResult), thinking);
       } catch {
         // If parsing fails, just return the original result
       }
@@ -3129,6 +3283,53 @@ async function handleFiles(
       }
 
       return formatAndReturnToolResponse(result, thinking);
+    }
+
+    case 'get-content': {
+      if (!input.itemId) throw new Error('itemId is required for get-content');
+      const driveId = input.driveId || 'me';
+      thinking.push(`Getting content for file: ${input.itemId}`);
+      const metadataEndpoint =
+        driveId === 'me'
+          ? `/me/drive/items/${input.itemId}`
+          : `/drives/${driveId}/items/${input.itemId}`;
+      const metadataResult = await callGraph(graphClient, 'GET', metadataEndpoint);
+      const metadata = JSON.parse(metadataResult) as Record<string, unknown>;
+      const detection = detectOfficeFile(metadata);
+      const fileName = (metadata.name as string) || '';
+
+      if (detection.isExcel) {
+        thinking.push('📊 Extracting Excel content via Workbook API');
+        const content = await getExcelContent(graphClient, driveId, input.itemId, {
+          sheetName: input.sheetName,
+        });
+        content.fileName = fileName;
+        if (content.error) thinking.push(`⚠️ ${content.error}`);
+        return formatAndReturnToolResponse(JSON.stringify(content, null, 2), thinking);
+      }
+      if (detection.isWord) {
+        thinking.push('📄 Extracting Word content');
+        const content = await getWordContent(graphClient, driveId, input.itemId, input.maxLength);
+        content.fileName = fileName;
+        if (content.error) thinking.push(`⚠️ ${content.error}`);
+        return formatAndReturnToolResponse(JSON.stringify(content, null, 2), thinking);
+      }
+      if (detection.isPowerPoint) {
+        thinking.push('📽️ Extracting PowerPoint content');
+        const content = await getPowerPointContent(
+          graphClient,
+          driveId,
+          input.itemId,
+          input.maxLength
+        );
+        content.fileName = fileName;
+        if (content.error) thinking.push(`⚠️ ${content.error}`);
+        return formatAndReturnToolResponse(JSON.stringify(content, null, 2), thinking);
+      }
+
+      throw new Error(
+        'get-content only supports Word, Excel, and PowerPoint files. Use "get" for metadata or "download" for raw file.'
+      );
     }
 
     case 'root': {
@@ -3688,7 +3889,14 @@ async function handleSharePoint(
       thinking.push('Searching SharePoint sites');
       const params: Record<string, string> = { $top: String(input.top || 25) };
       if (input.search) params.search = input.search;
-      const result = await callGraph(graphClient, 'GET', '/sites', params);
+      let result = await callGraph(graphClient, 'GET', '/sites', params);
+      if (input.fetchAllPages) {
+        const parsed = JSON.parse(result) as { value?: unknown[]; '@odata.nextLink'?: string };
+        if (Array.isArray(parsed?.value) && parsed['@odata.nextLink']) {
+          const combined = await fetchAllODataPages(graphClient, parsed, undefined, thinking);
+          result = JSON.stringify(combined);
+        }
+      }
       return formatAndReturnToolResponse(result, thinking);
     }
 
@@ -3706,7 +3914,14 @@ async function handleSharePoint(
       if (!siteIdOrName) throw new Error('siteId is required');
       const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
       thinking.push(`Listing drives for site: ${siteId}`);
-      const result = await callGraph(graphClient, 'GET', `/sites/${siteId}/drives`);
+      let result = await callGraph(graphClient, 'GET', `/sites/${siteId}/drives`);
+      if (input.fetchAllPages) {
+        const parsed = JSON.parse(result) as { value?: unknown[]; '@odata.nextLink'?: string };
+        if (Array.isArray(parsed?.value) && parsed['@odata.nextLink']) {
+          const combined = await fetchAllODataPages(graphClient, parsed, undefined, thinking);
+          result = JSON.stringify(combined);
+        }
+      }
       return formatAndReturnToolResponse(result, thinking);
     }
 
@@ -3715,7 +3930,14 @@ async function handleSharePoint(
       if (!siteIdOrName) throw new Error('siteId is required');
       const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
       thinking.push(`Listing lists for site: ${siteId}`);
-      const result = await callGraph(graphClient, 'GET', `/sites/${siteId}/lists`);
+      let result = await callGraph(graphClient, 'GET', `/sites/${siteId}/lists`);
+      if (input.fetchAllPages) {
+        const parsed = JSON.parse(result) as { value?: unknown[]; '@odata.nextLink'?: string };
+        if (Array.isArray(parsed?.value) && parsed['@odata.nextLink']) {
+          const combined = await fetchAllODataPages(graphClient, parsed, undefined, thinking);
+          result = JSON.stringify(combined);
+        }
+      }
       return formatAndReturnToolResponse(result, thinking);
     }
 
@@ -3728,12 +3950,19 @@ async function handleSharePoint(
       thinking.push(`Listing items in list: ${input.listId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
       if (input.filter) params.$filter = input.filter;
-      const result = await callGraph(
+      let result = await callGraph(
         graphClient,
         'GET',
         `/sites/${siteId}/lists/${input.listId}/items`,
         params
       );
+      if (input.fetchAllPages) {
+        const parsed = JSON.parse(result) as { value?: unknown[]; '@odata.nextLink'?: string };
+        if (Array.isArray(parsed?.value) && parsed['@odata.nextLink']) {
+          const combined = await fetchAllODataPages(graphClient, parsed, undefined, thinking);
+          result = JSON.stringify(combined);
+        }
+      }
       return formatAndReturnToolResponse(result, thinking);
     }
 
@@ -3743,7 +3972,14 @@ async function handleSharePoint(
       const siteId = await resolveSharePointSiteId(graphClient, siteIdOrName, thinking);
       thinking.push(`Listing items in site: ${siteId}`);
       const params: Record<string, string> = { $top: String(input.top || 50) };
-      const result = await callGraph(graphClient, 'GET', `/sites/${siteId}/items`, params);
+      let result = await callGraph(graphClient, 'GET', `/sites/${siteId}/items`, params);
+      if (input.fetchAllPages) {
+        const parsed = JSON.parse(result) as { value?: unknown[]; '@odata.nextLink'?: string };
+        if (Array.isArray(parsed?.value) && parsed['@odata.nextLink']) {
+          const combined = await fetchAllODataPages(graphClient, parsed, undefined, thinking);
+          result = JSON.stringify(combined);
+        }
+      }
       return formatAndReturnToolResponse(result, thinking);
     }
 
@@ -9035,7 +9271,7 @@ export function registerSuperTools(
   // 4. Files
   server.tool(
     'files',
-    'Unified OneDrive/file operations: list drives, list files, get file, download, search. When to use: after search finds driveItem/listItem, or when user asks for files in a folder or by name.',
+    'Unified OneDrive/file operations: list drives, list files, get file, download, search, get-content. Use get-content for Word/Excel/PowerPoint to get readable text. When to use: after search finds driveItem/listItem, or when user asks for files or document content.',
     filesSchema.shape,
     async (input: FilesInput) => {
       try {

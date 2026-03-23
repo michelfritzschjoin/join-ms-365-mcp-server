@@ -51,9 +51,22 @@ const fixedGetChatBlockContent = `{
 
 // Always normalize get-chat block when present: find its boundaries and replace with fixed block.
 // This fixes broken codegen (unterminated template literal, merged send_mail) regardless of format.
-if (content.includes("path: '/chats/:chatId'")) {
-  const pathIdx = content.indexOf("path: '/chats/:chatId'");
-  const alreadyFixed = content.includes('response: z.lazy(() => microsoft_graph_chat)', pathIdx);
+//
+// Use path: '/chats/:chatId', — NOT path: '/chats/:chatId' alone — or indexOf matches the prefix of
+// path: '/chats/:chatId/messages' and pathIdx points at the wrong endpoint. Also, only treat the
+// block as fixed if *this* endpoint's slice contains z.lazy (not any later endpoint after pathIdx).
+const getChatPathNeedle = "path: '/chats/:chatId',";
+if (content.includes(getChatPathNeedle)) {
+  const pathIdx = content.indexOf(getChatPathNeedle);
+  const nextEndpointAt = content.indexOf('\n  {\n    method:', pathIdx + getChatPathNeedle.length);
+  const endOfMakeApi = content.indexOf('\n]);', pathIdx);
+  const blockEndForCheck =
+    nextEndpointAt !== -1 && (endOfMakeApi === -1 || nextEndpointAt < endOfMakeApi)
+      ? nextEndpointAt
+      : endOfMakeApi;
+  const getChatSlice =
+    blockEndForCheck !== -1 ? content.slice(pathIdx, blockEndForCheck) : content.slice(pathIdx);
+  const alreadyFixed = /response:\s*z\.lazy\(\(\)\s*=>\s*microsoft_graph_chat\)/.test(getChatSlice);
   if (!alreadyFixed) {
     // Find start of get-chat endpoint block (generator may use 2 or 4 spaces).
     let blockStart = content.lastIndexOf('\n  {', pathIdx);

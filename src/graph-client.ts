@@ -301,6 +301,43 @@ class GraphClient {
   }
 
   /**
+   * Fetch binary content from a Graph endpoint (e.g. /me/drive/items/{id}/content).
+   * Use for Office file downloads (Word, PowerPoint) for content extraction.
+   */
+  async getBinaryContent(endpoint: string): Promise<ArrayBuffer> {
+    const contextTokens = getRequestTokens();
+    let accessToken: string | null = null;
+    try {
+      accessToken = contextTokens?.accessToken ?? (await this.authManager.getToken());
+    } catch {
+      logger.debug('Token acquisition failed for binary content');
+    }
+    const refreshToken = contextTokens?.refreshToken;
+    if (!accessToken) {
+      throw new AuthenticationError(
+        'AUTHENTICATION REQUIRED: You are not logged in to Microsoft 365.'
+      );
+    }
+    let response = await this.performRequest(endpoint, accessToken, { method: 'GET' });
+    if (response.status === 401 && refreshToken) {
+      const newTokens = await this.refreshAccessToken(refreshToken);
+      accessToken = newTokens.accessToken;
+      response = await this.performRequest(endpoint, accessToken, { method: 'GET' });
+    }
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new GraphApiError(
+        `Graph API error ${response.status}: ${errorText.slice(0, 200)}`,
+        response.status,
+        false,
+        undefined,
+        response
+      );
+    }
+    return response.arrayBuffer();
+  }
+
+  /**
    * Calculate exponential backoff delay (capped by perf-config max delay).
    */
   private calculateBackoff(attempt: number, retryAfter?: number): number {

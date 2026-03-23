@@ -33,15 +33,15 @@ All configuration is done through environment variables. Copy `.example.env` to 
 
 ### Performance & Limits
 
-| Variable                            | Description           | Default | Required |
-| ----------------------------------- | --------------------- | ------- | -------- |
-| `MS365_MCP_MAX_RESULTS`             | Max results per query | `500`   | No       |
-| `MS365_MCP_MAX_AGGREGATE_ITEMS`     | Max aggregate items   | `500`   | No       |
-| `MS365_MCP_MAX_PAGES`               | Max pagination pages  | `20`    | No       |
-| `MS365_MCP_MAX_CONCURRENT_TOOLS`    | Max concurrent tools  | `5`     | No       |
-| `MS365_MCP_DEEP_RESEARCH_MAX_DEPTH` | Research depth        | `5`     | No       |
-| `MS365_MCP_MAX_RESEARCH_ITERATIONS` | Research iterations   | `5`     | No       |
-| `MS365_MCP_STOP_ON_ERROR`           | Stop on tool error    | `false` | No       |
+| Variable                            | Description                                                         | Default | Required |
+| ----------------------------------- | ------------------------------------------------------------------- | ------- | -------- |
+| `MS365_MCP_MAX_RESULTS`             | Max results per query                                               | `500`   | No       |
+| `MS365_MCP_MAX_AGGREGATE_ITEMS`     | Max aggregate items                                                 | `500`   | No       |
+| `MS365_MCP_MAX_PAGES`               | Max pagination pages (SharePoint/list-items, site-items, file list) | `20`    | No       |
+| `MS365_MCP_MAX_CONCURRENT_TOOLS`    | Max concurrent tools                                                | `5`     | No       |
+| `MS365_MCP_DEEP_RESEARCH_MAX_DEPTH` | Research depth                                                      | `5`     | No       |
+| `MS365_MCP_MAX_RESEARCH_ITERATIONS` | Research iterations                                                 | `5`     | No       |
+| `MS365_MCP_STOP_ON_ERROR`           | Stop on tool error                                                  | `false` | No       |
 
 ### Response time and fast mode
 

@@ -47,6 +47,9 @@
 - Lade den Inhalt von [Datei] herunter. / Download content of [file].
 - Welche Dateien hat [Person] mit mir geteilt? / What files did [person] share with me?
 - Zeig SharePoint-Standorte / Listen zu "[Suchbegriff]". / Show SharePoint sites / lists for "[search term]".
+- **Lies den Inhalt aus [Word-/Excel-/PowerPoint-Datei].** / **Read the content from [Word/Excel/PowerPoint file].**
+- **Was steht in der Excel-Datei [Name]?** / **What does the Excel file [name] contain?**
+- Alle Listeneinträge in SharePoint-Liste [Name] auflisten. / List all items in SharePoint list [name].
 
 ---
 
