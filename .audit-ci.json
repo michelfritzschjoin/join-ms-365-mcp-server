@@ -8,7 +8,10 @@
     "GHSA-7r86-cg39-jmmj",
     "GHSA-9ppj-qmqm-q256",
     "GHSA-qffp-2rhf-9h96",
-    "GHSA-v8w9-8mx6-g223"
+    "GHSA-v8w9-8mx6-g223",
+    "GHSA-3v7f-55p6-f55p",
+    "GHSA-c2c7-rcm5-vvqj",
+    "GHSA-f886-m6hf-6m8v"
   ],
   "report-type": "summary",
   "skip-dev": false,

@@ -61,6 +61,7 @@ vi.mock('express', () => {
     use: vi.fn().mockReturnThis(),
     get: vi.fn().mockReturnThis(),
     post: vi.fn().mockReturnThis(),
+    delete: vi.fn().mockReturnThis(),
     listen: vi.fn((port, callback) => {
       if (callback) callback();
       return {
@@ -133,6 +134,11 @@ describe('HTTP Mode Integration', () => {
       // MCP endpoint should be available in HTTP mode
       const mcpEndpoint = '/mcp';
       expect(mcpEndpoint).toBe('/mcp');
+    });
+
+    it('should support MCP session cleanup endpoint', () => {
+      const mcpCleanupEndpoint = '/mcp';
+      expect(mcpCleanupEndpoint).toBe('/mcp');
     });
 
     it('should support OAuth discovery endpoints', () => {

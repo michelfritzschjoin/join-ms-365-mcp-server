@@ -84,6 +84,20 @@ function extractChatId(req: Request): string {
 }
 
 /**
+ * Extract MCP session ID from request headers.
+ * Prioritizes the protocol header used by streamable HTTP clients.
+ */
+function extractMcpSessionId(req: Request): string | undefined {
+  const sessionId =
+    req.get('mcp-session-id') ||
+    req.get('MCP-Session-Id') ||
+    req.get('x-session-id') ||
+    req.get('X-Session-ID');
+
+  return sessionId || undefined;
+}
+
+/**
  * Extract user ID from Microsoft auth context or token
  * @param req - Express request with microsoftAuth
  * @returns User ID string or undefined
@@ -2248,9 +2262,15 @@ class MicrosoftGraphServer {
           }).catch(() => {});
           // #endregion
 
-          // Handle simple verification requests (GET requests without query params are likely verification)
+          // Handle simple verification requests (GET without MCP protocol headers and without query params)
           const hasQueryParams = Object.keys(req.query).length > 0;
-          const isVerificationRequest = !hasQueryParams || req.query.verify === 'true';
+          const acceptHeader = req.get('Accept') || '';
+          const protocolVersion = req.get('mcp-protocol-version');
+          const inboundSessionId = extractMcpSessionId(req);
+          const isMcpProtocolRequest =
+            acceptHeader.includes('text/event-stream') || !!protocolVersion || !!inboundSessionId;
+          const isVerificationRequest =
+            req.query.verify === 'true' || (!hasQueryParams && !isMcpProtocolRequest);
 
           if (isVerificationRequest) {
             logger.info(
@@ -2267,8 +2287,8 @@ class MicrosoftGraphServer {
             });
           }
 
-          // Unique session ID per request so concurrent requests never mix content
-          const sessionId = generateSessionId();
+          // Reuse MCP session ID from the client when provided, otherwise generate one.
+          const sessionId = inboundSessionId ?? generateSessionId();
 
           const handler = async () => {
             const transport = new StreamableHTTPServerTransport({
@@ -2524,8 +2544,8 @@ class MicrosoftGraphServer {
           };
 
           try {
-            // Unique session ID per request so concurrent requests never mix content
-            const sessionId = generateSessionId();
+            // Reuse MCP session ID from the client when provided, otherwise generate one.
+            const sessionId = extractMcpSessionId(req) ?? generateSessionId();
 
             // Extract chat ID and user ID for memory context
             const chatId = extractChatId(req);
@@ -2641,6 +2661,29 @@ class MicrosoftGraphServer {
               });
             }
           }
+        }
+      );
+
+      app.delete(
+        '/mcp',
+        requireOAuthMiddleware,
+        async (
+          req: Request & { microsoftAuth?: { accessToken: string; refreshToken: string } },
+          res: Response
+        ) => {
+          const sessionId = extractMcpSessionId(req) ?? generateSessionId();
+          const chatId = extractChatId(req);
+          const userId = extractUserId(req);
+
+          logger.info('MCP session cleanup request received', {
+            sessionId,
+            chatId,
+            userId: userId?.substring(0, 8),
+          });
+
+          // Streamable HTTP clients often send DELETE for session cleanup.
+          // Acknowledge cleanup even if no server-side state exists.
+          return res.status(204).end();
         }
       );
 
