@@ -10,6 +10,18 @@ if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir);
 }
 
+/** ANSI colors break some Docker/log aggregators; only use on interactive stderr. */
+function buildConsoleFormat(): winston.Logform.Format {
+  const useColor =
+    process.stderr.isTTY && process.env.NO_COLOR == null && process.env.FORCE_COLOR !== '0';
+  const parts: winston.Logform.Format[] = [];
+  if (useColor) {
+    parts.push(winston.format.colorize());
+  }
+  parts.push(winston.format.simple());
+  return winston.format.combine(...parts);
+}
+
 // Determine log format
 const logFormat = process.env.LOG_FORMAT || 'text';
 const useJsonFormat = logFormat.toLowerCase() === 'json';
@@ -51,7 +63,7 @@ if (!isSilent) {
       // CRITICAL: MCP STDIO servers MUST write to stderr, not stdout
       // Writing to stdout corrupts JSON-RPC messages
       stderrLevels: ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'],
-      format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
+      format: buildConsoleFormat(),
     })
   );
 }
@@ -68,7 +80,7 @@ export const enableConsoleLogging = (): void => {
         // CRITICAL: MCP STDIO servers MUST write to stderr, not stdout
         // Writing to stdout corrupts JSON-RPC messages
         stderrLevels: ['error', 'warn', 'info', 'http', 'verbose', 'debug', 'silly'],
-        format: winston.format.combine(winston.format.colorize(), winston.format.simple()),
+        format: buildConsoleFormat(),
         silent: process.env.SILENT === 'true' || process.env.SILENT === '1',
       })
     );

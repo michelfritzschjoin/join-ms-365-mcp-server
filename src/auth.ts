@@ -182,7 +182,7 @@ class AuthManager {
   private selectedAccountId: string | null;
 
   constructor(config: Configuration, scopes: string[] = buildScopesFromEndpoints()) {
-    logger.info(`And scopes are ${scopes.join(', ')}`, scopes);
+    logger.info(`And scopes are ${scopes.join(', ')}`);
     this.config = config;
     this.scopes = scopes;
     this.msalApp = new PublicClientApplication(this.config);

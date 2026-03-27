@@ -76,3 +76,16 @@ export function validateEntityTypeCombinations(entityTypes: string[]): string[] 
 
   return filtered.length > 0 ? filtered : entityTypes.slice(0, 1); // Fallback to first type
 }
+
+/**
+ * When the user asks about SharePoint in natural language, Graph search must use
+ * site/list/listItem/driveItem — not mail/Teams-only entity sets from NLP.
+ */
+export function preferSharePointEntityTypesForQuery(query: string): string[] | null {
+  const sharePointKeywordIntent =
+    /\bsharepoint\b/i.test(query) || /\b(?:im|auf)\s+sharepoint\b/i.test(query);
+  if (!sharePointKeywordIntent) {
+    return null;
+  }
+  return validateEntityTypeCombinations(['site', 'list', 'listItem', 'driveItem']);
+}

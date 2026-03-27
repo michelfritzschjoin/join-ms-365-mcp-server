@@ -48,7 +48,10 @@ import {
   getUserProfile,
   getUserId,
 } from './request-context.js';
-import { validateEntityTypeCombinations } from './utils/entity-type-validator.js';
+import {
+  preferSharePointEntityTypesForQuery,
+  validateEntityTypeCombinations,
+} from './utils/entity-type-validator.js';
 import { applyResponseLimit } from './utils/response-limiter.js';
 import {
   formatEmailSearchQuery,
@@ -5314,6 +5317,15 @@ async function handleSearch(
     }
   }
 
+  // Natural-language SharePoint questions must search sites/lists/files, not mail/Teams-only NLP narrow
+  const spPreferred = preferSharePointEntityTypesForQuery(input.query);
+  if (spPreferred !== null) {
+    entityTypes = spPreferred as Array<(typeof searchEntityTypes)[number]>;
+    thinking.push(
+      '💡 SharePoint query — using entity types site, list, listItem, driveItem (not mail/Teams-only)'
+    );
+  }
+
   // Validate entity types - Microsoft Graph API has strict restrictions on combinations
   // Check for person queries first (special handling)
   const hasPerson = entityTypes.includes('person');
@@ -9184,7 +9196,7 @@ export function registerSuperTools(
   // 0. SEARCH (Microsoft 365 Unified Search - RECOMMENDED FIRST TOOL)
   server.tool(
     'search',
-    'Recommended first tool for any Microsoft 365 question. Use search before email, calendar, files, or teams to find content across all M365 services (emails, calendar events, files, SharePoint, Teams messages, people). Returns unified results and suggestedNextTools with exact parameters for the next call. When to use: start here for "find X", "emails about Y", "meetings with Z", or cross-product discovery. Entity types: message, event, driveItem, site, list, listItem, chatMessage, person.',
+    'Recommended first tool for any Microsoft 365 question. Use search before email, calendar, files, or teams to find content across all M365 services (emails, calendar events, files, SharePoint, Teams messages, people). Returns unified results and suggestedNextTools with exact parameters for the next call. When to use: start here for "find X", "emails about Y", "meetings with Z", or cross-product discovery. Entity types: message, event, driveItem, site, list, listItem, chatMessage, person. For SharePoint questions, pass entityTypes including site, list, listItem (and driveItem as needed), or call the sharepoint tool — do not tell the user you lack access without calling a tool first; if Microsoft Graph returns an error, quote it (e.g. missing Sites.Read.All or enable MS365_MCP_ORG_MODE on the server).',
     searchSchema.shape,
     async (input: SearchInput) => {
       try {
@@ -9368,7 +9380,7 @@ export function registerSuperTools(
   // 8. SharePoint
   server.tool(
     'sharepoint',
-    'Unified SharePoint operations: search sites, get site, site drives, site lists. When to use: after search finds site/listItem, or when user asks for SharePoint sites or lists.',
+    'Unified SharePoint operations: search sites, get site, site drives, site lists. When to use: after search finds site/listItem, or when user asks for SharePoint sites or lists. Do not refuse SharePoint questions without calling this tool or search — if the API denies access, relay the error; full site access typically needs delegated Sites.Read.All and MS365_MCP_ORG_MODE=true on the MCP server with admin consent.',
     sharepointSchema.shape,
     async (input: SharePointInput) => {
       try {

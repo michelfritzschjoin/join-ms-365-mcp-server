@@ -2743,7 +2743,7 @@ class MicrosoftGraphServer {
           process.env.MS365_MCP_ORG_MODE === 'true' || process.env.MS365_MCP_ORG_MODE === '1';
         res.json({
           toolUsageGuide:
-            'Use search first for any Microsoft 365 question; then use suggestedNextTools or domain tools (email, calendar, files, teams, tasks, sharepoint, notes, contacts, meetings, assistant) with the suggested action and parameters. For daily/weekly summaries use assistant with action my-day or my-week.',
+            'Use search first for any Microsoft 365 question; then use suggestedNextTools or domain tools (email, calendar, files, teams, tasks, sharepoint, notes, contacts, meetings, assistant) with the suggested action and parameters. For daily/weekly summaries use assistant with action my-day or my-week. For SharePoint: call search (entityTypes site, list, listItem, driveItem) or sharepoint — never claim you cannot access M365 data without attempting tools; if Graph returns 403/permission errors, explain Sites.Read.All / org mode (MS365_MCP_ORG_MODE) instead of a generic refusal.',
           firstTool: 'search',
           supportedEntityTypes: [
             'message',
@@ -2760,7 +2760,9 @@ class MicrosoftGraphServer {
             'externalItem',
           ],
           readOnly,
-          orgMode: orgMode ? 'Teams and SharePoint available' : 'Personal scope only',
+          orgMode: orgMode
+            ? 'Teams and SharePoint (Sites.Read.All work scopes included in consent)'
+            : 'MS365_MCP_ORG_MODE off: work scopes like Sites.Read.All may be absent — SharePoint tools still exist; call them and surface API errors instead of denying access',
           superToolsMode: useSuperTools,
           toolRegistrationMode,
           exampleQuestions: exampleQuestionsCategories.map((cat) => ({

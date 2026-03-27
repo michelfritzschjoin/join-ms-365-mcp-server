@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { validateEntityTypeCombinations } from '../../src/utils/entity-type-validator.js';
+import {
+  preferSharePointEntityTypesForQuery,
+  validateEntityTypeCombinations,
+} from '../../src/utils/entity-type-validator.js';
 
 describe('validateEntityTypeCombinations', () => {
   describe('Empty input', () => {
@@ -155,5 +158,18 @@ describe('validateEntityTypeCombinations', () => {
       const result = validateEntityTypeCombinations(['unknownType']);
       expect(result).toEqual(['unknownType']);
     });
+  });
+});
+
+describe('preferSharePointEntityTypesForQuery', () => {
+  it('returns SharePoint search entity set for German SharePoint phrasing', () => {
+    const r = preferSharePointEntityTypesForQuery('Was steht im SharePoint?');
+    expect(r).not.toBeNull();
+    expect(r).toEqual(expect.arrayContaining(['site', 'list', 'listItem', 'driveItem']));
+    expect(r?.length).toBe(4);
+  });
+
+  it('returns null when SharePoint is not the topic', () => {
+    expect(preferSharePointEntityTypesForQuery('Last email from Alice')).toBeNull();
   });
 });
