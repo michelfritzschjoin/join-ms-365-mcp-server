@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **server:** bind initial mcp chat id to session ([9986fd9](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/9986fd93518279d191a33014c79f1eecff862dbd))
+- **server:** bind initial mcp chat id to session ([9986fd9](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/9986fd93518279d191a33014c79f1eecff862dbd))
 
 ### Code Refactoring
 
-* **mcp:** harden intelligent tool routing and scope governance ([400aed1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/400aed170dcb13ce49c0f02980df4bc49889d1a8))
+- **mcp:** harden intelligent tool routing and scope governance ([400aed1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/400aed170dcb13ce49c0f02980df4bc49889d1a8))
 
 ## [1.23.1](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.23.0...v1.23.1) (2026-03-27)
 

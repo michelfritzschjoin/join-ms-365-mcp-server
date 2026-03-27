@@ -36,12 +36,7 @@ import {
 import type { CommandOptions } from './cli.ts';
 import { getSecrets, type AppSecrets } from './secrets.js';
 import { getCloudEndpoints } from './cloud-config.js';
-import {
-  requestContext,
-  createTokenHash,
-  generateSessionId,
-  getSessionId,
-} from './request-context.js';
+import { requestContext, createTokenHash, generateSessionId } from './request-context.js';
 import type { RequestContext } from './request-context.js';
 import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
 import { resolveToolRegistrationMode } from './tool-registration-policy.js';
@@ -2297,8 +2292,12 @@ class MicrosoftGraphServer {
           const sessionId = inboundSessionId ?? generateSessionId();
 
           const handler = async () => {
+            // Stateless Streamable HTTP: one new transport per HTTP request (SDK contract).
+            // Stateful mode (sessionIdGenerator set) requires the *same* transport instance for
+            // every POST/GET in a session; a fresh transport per request breaks session validation
+            // and yields "Server not initialized" / 404 session errors on tools/call and GET /mcp.
             const transport = new StreamableHTTPServerTransport({
-              sessionIdGenerator: () => getSessionId() ?? sessionId,
+              sessionIdGenerator: undefined,
             });
 
             res.on('close', () => {
@@ -2513,8 +2512,9 @@ class MicrosoftGraphServer {
           // #endregion
 
           const handler = async () => {
+            // Stateless Streamable HTTP (same rationale as GET /mcp).
             const transport = new StreamableHTTPServerTransport({
-              sessionIdGenerator: () => getSessionId() ?? generateSessionId(),
+              sessionIdGenerator: undefined,
             });
 
             res.on('close', () => {
