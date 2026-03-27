@@ -44,6 +44,7 @@ import {
 } from './request-context.js';
 import type { RequestContext } from './request-context.js';
 import { createDashboardRouter, isDashboardEnabled } from './query-dashboard.js';
+import { resolveToolRegistrationMode } from './tool-registration-policy.js';
 import { getQueryStore } from './query-store.js';
 import { z } from 'zod';
 import { isThinkingEnabled, getThinkingLevel } from './thinking-process.js';
@@ -701,14 +702,12 @@ class MicrosoftGraphServer {
         this.options.orgMode
       );
     } else {
-      // Check if Super-Tools mode is enabled (consolidated 10 tools instead of 126+)
-      const useSuperTools =
-        process.env.MS365_MCP_USE_SUPER_TOOLS === 'true' ||
-        process.env.MS365_MCP_USE_SUPER_TOOLS === '1';
+      const toolRegistrationMode = resolveToolRegistrationMode(process.env);
 
-      if (useSuperTools) {
-        // Super-Tools mode: 10 consolidated tools instead of 126+
-        logger.info('Super-Tools mode enabled - registering 10 consolidated tools');
+      if (toolRegistrationMode === 'super' || toolRegistrationMode === 'hybrid') {
+        logger.info(
+          `Tool registration mode: ${toolRegistrationMode} - registering consolidated super tools`
+        );
         const learningEnabled =
           process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
           process.env.MS365_MCP_LEARNING_ENABLED !== '0';
@@ -716,9 +715,10 @@ class MicrosoftGraphServer {
           ensureLearningSystemInitialized();
         }
         registerSuperTools(this.server, this.graphClient, this.options.readOnly, this.secrets);
-      } else {
-        // Classic mode: register all individual tools
-        // Initialize knowledge base for tool usage learning
+      }
+
+      if (toolRegistrationMode === 'classic') {
+        // Classic mode: register all individual graph tools
         const knowledgeBase = new KnowledgeBase();
         registerGraphTools(
           this.server,
@@ -728,15 +728,17 @@ class MicrosoftGraphServer {
           this.options.orgMode,
           knowledgeBase
         );
+      }
 
-        // Register compound tools (multi-step contextual tools)
-        // These are always enabled as they provide essential functionality for natural language queries
+      if (toolRegistrationMode === 'classic' || toolRegistrationMode === 'hybrid') {
         const compoundToolCount = registerCompoundTools(
           this.server,
           this.graphClient,
           this.options.readOnly
         );
-        logger.info(`Registered ${compoundToolCount} compound tools (multi-step contextual tools)`);
+        logger.info(
+          `Registered ${compoundToolCount} compound tools (mode: ${toolRegistrationMode})`
+        );
       }
     }
 
@@ -756,12 +758,10 @@ class MicrosoftGraphServer {
       const learningEnabled =
         process.env.MS365_MCP_LEARNING_ENABLED !== 'false' &&
         process.env.MS365_MCP_LEARNING_ENABLED !== '0';
-      const useSuperTools =
-        process.env.MS365_MCP_USE_SUPER_TOOLS === 'true' ||
-        process.env.MS365_MCP_USE_SUPER_TOOLS === '1';
-      if (learningEnabled && !useSuperTools) {
+      const toolRegistrationMode = resolveToolRegistrationMode(process.env);
+      if (learningEnabled && toolRegistrationMode === 'classic') {
         logger.info(
-          'Learning is enabled. For Learning with Super-Tools only, use MS365_MCP_USE_SUPER_TOOLS=true. ' +
+          'Learning is enabled. For Learning with Super-Tools, use MS365_MCP_TOOL_MODE=super (or MS365_MCP_USE_SUPER_TOOLS=true). ' +
             'For full Discovery + Learning, set MS365_MCP_ENABLE_DISCOVERY_TOOLS=true.'
         );
       }
@@ -2733,9 +2733,8 @@ class MicrosoftGraphServer {
 
       // MCP capability guide (for LLMs and clients: tool usage, entity types, read-only/org-mode, example questions)
       app.get('/capabilities', (_req, res) => {
-        const useSuperTools =
-          process.env.MS365_MCP_USE_SUPER_TOOLS === 'true' ||
-          process.env.MS365_MCP_USE_SUPER_TOOLS === '1';
+        const toolRegistrationMode = resolveToolRegistrationMode(process.env);
+        const useSuperTools = toolRegistrationMode === 'super' || toolRegistrationMode === 'hybrid';
         const readOnly =
           process.env.READ_ONLY === '1' ||
           process.env.READ_ONLY === 'true' ||
@@ -2763,6 +2762,7 @@ class MicrosoftGraphServer {
           readOnly,
           orgMode: orgMode ? 'Teams and SharePoint available' : 'Personal scope only',
           superToolsMode: useSuperTools,
+          toolRegistrationMode,
           exampleQuestions: exampleQuestionsCategories.map((cat) => ({
             id: cat.id,
             nameDe: cat.nameDe,

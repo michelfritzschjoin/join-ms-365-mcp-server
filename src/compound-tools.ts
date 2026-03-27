@@ -29,7 +29,14 @@ import {
 import { createThinkingProcess } from './thinking-process.js';
 import { isLoopFile, detectLoopFile, parseLoopContent } from './utils/loop-detector.js';
 import { formatEmailSearchQuery } from './utils/search-query-format.js';
+import {
+  buildContainsFilter,
+  buildEqFilter,
+  buildStartsWithFilter,
+  joinOrFilters,
+} from './utils/odata-filter.js';
 import { getMaxPages } from './perf-config.js';
+import { INTENT_REQUIRED_SCOPES, type Intent } from './intent-scope-policy.js';
 
 /**
  * SECURITY: Properly sanitize HTML content to prevent XSS
@@ -613,7 +620,10 @@ export async function findUser(
         const response = await graphClient.makeRequest('/users', {
           method: 'GET',
           queryParams: {
-            $filter: `mail eq '${searchQuery}' or userPrincipalName eq '${searchQuery}'`,
+            $filter: joinOrFilters([
+              buildEqFilter('mail', searchQuery),
+              buildEqFilter('userPrincipalName', searchQuery),
+            ]),
             $top: '5',
           },
         });
@@ -1473,7 +1483,7 @@ async function queryToDo(graphClient: GraphClient, query: string): Promise<any[]
       const tasksResponse = await graphClient.makeRequest(`/me/todo/lists/${list.id}/tasks`, {
         method: 'GET',
         queryParams: {
-          $filter: `contains(title,'${query.replace(/'/g, "''")}')`,
+          $filter: buildContainsFilter('title', query),
           $top: '10',
         },
       });
@@ -1665,7 +1675,7 @@ async function detectCustomerType(
     const contactsResponse = await graphClient.makeRequest('/me/contacts', {
       method: 'GET',
       queryParams: {
-        $filter: `contains(companyName, '${searchQuery.replace(/'/g, "''")}')`,
+        $filter: buildContainsFilter('companyName', searchQuery),
         $top: '20',
         $select: 'displayName,emailAddresses,companyName,jobTitle,department',
       },
@@ -2717,24 +2727,6 @@ export function registerCompoundTools(
     },
   };
 
-  // Intent classification for intelligent routing
-  type Intent =
-    | 'email'
-    | 'calendar'
-    | 'files'
-    | 'people'
-    | 'teams'
-    | 'tasks'
-    | 'search'
-    | 'mixed'
-    | 'sharepoint'
-    | 'notes'
-    | 'planner'
-    | 'contacts'
-    | 'meetings'
-    | 'bookings'
-    | 'insights';
-
   interface IntentResult {
     primary: Intent;
     secondary: Intent | null;
@@ -3001,25 +2993,6 @@ export function registerCompoundTools(
   };
 
   // Convert timeframe to date range - use exported function
-
-  // Required scopes for each intent
-  const INTENT_REQUIRED_SCOPES: Record<Intent, { scopes: string[]; workScopes: string[] }> = {
-    email: { scopes: ['Mail.Read'], workScopes: [] },
-    calendar: { scopes: ['Calendars.Read'], workScopes: [] },
-    files: { scopes: ['Files.Read'], workScopes: ['Sites.Read.All'] },
-    people: { scopes: ['People.Read', 'User.Read'], workScopes: ['User.Read.All'] },
-    teams: { scopes: [], workScopes: ['Chat.Read', 'ChatMessage.Read'] },
-    tasks: { scopes: ['Tasks.Read'], workScopes: [] },
-    search: { scopes: ['Mail.Read', 'Files.Read'], workScopes: ['Sites.Read.All'] },
-    sharepoint: { scopes: [], workScopes: ['Sites.Read.All', 'Sites.Selected'] },
-    notes: { scopes: ['Notes.Read'], workScopes: [] },
-    planner: { scopes: ['Tasks.Read'], workScopes: [] },
-    contacts: { scopes: ['Contacts.Read'], workScopes: [] },
-    meetings: { scopes: ['OnlineMeetings.Read'], workScopes: [] },
-    bookings: { scopes: ['Bookings.Read.All'], workScopes: [] },
-    insights: { scopes: [], workScopes: ['Sites.Read.All'] },
-    mixed: { scopes: ['Mail.Read', 'Calendars.Read', 'Files.Read'], workScopes: [] },
-  };
 
   // Check if user likely has permissions (based on common errors)
   function getPermissionWarning(intent: Intent, lang: 'de' | 'en'): string | null {
@@ -3302,7 +3275,7 @@ export function registerCompoundTools(
             const searchStrategies: Array<Record<string, string>> = [
               { $search: `"${searchQuery}"` }, // Exact phrase
               { $search: searchQuery }, // Without quotes for partial matches
-              { $filter: `startswith(displayName,'${searchQuery}')` }, // Starts with
+              { $filter: buildStartsWithFilter('displayName', searchQuery) }, // Starts with
             ];
 
             let allPeople: unknown[] = [];
@@ -7199,7 +7172,7 @@ Use this for "What's the status of Project Apollo?", "Give me an overview of the
                       {
                         method: 'GET',
                         queryParams: {
-                          $filter: `contains(title, '${projectName}')`,
+                          $filter: buildContainsFilter('title', projectName),
                           $top: '20',
                         },
                       }
@@ -7372,7 +7345,7 @@ Use this for "Who do we know at Microsoft?", "Find all contacts from Acme Corp",
             const contactsResponse = await graphClient.makeRequest('/me/contacts', {
               method: 'GET',
               queryParams: {
-                $filter: `contains(companyName, '${companyName}')`,
+                $filter: buildContainsFilter('companyName', companyName),
                 $top: '50',
                 $select: 'displayName,emailAddresses,companyName,jobTitle,businessPhones',
               },

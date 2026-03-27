@@ -7,6 +7,13 @@
 
 The Join Microsoft 365 MCP Server provides a comprehensive set of tools for interacting with Microsoft 365 services. All tools follow the Model Context Protocol (MCP) specification.
 
+## Tool Registration Modes
+
+- `MS365_MCP_TOOL_MODE=super`: Register consolidated super-tools as default front door.
+- `MS365_MCP_TOOL_MODE=hybrid`: Register super-tools plus compound tools.
+- `MS365_MCP_TOOL_MODE=classic`: Register individual graph tools plus compound tools (compatibility mode).
+- Backward compatibility: `MS365_MCP_USE_SUPER_TOOLS=true` still maps to `super`.
+
 ## Tool Categories
 
 ### Authentication Tools

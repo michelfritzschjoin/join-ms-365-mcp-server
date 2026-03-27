@@ -11,8 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Bug Fixes
 
-* **server:** handle mcp session reuse and cleanup endpoint ([3172ce4](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3172ce489f5969b66c4484793ed820b8c77a5844))
-* **server:** stabilize chat memory by mcp session id ([167fa61](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/167fa6117c7cd829b76dc08be53a9940674b07fd))
+- **server:** handle mcp session reuse and cleanup endpoint ([3172ce4](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3172ce489f5969b66c4484793ed820b8c77a5844))
+- **server:** stabilize chat memory by mcp session id ([167fa61](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/167fa6117c7cd829b76dc08be53a9940674b07fd))
 
 ## [1.23.0](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.22.2...v1.23.0) (2026-03-23)
 

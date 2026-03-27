@@ -58,6 +58,11 @@ import {
 import { getGraphMaxRetries, getGraphRetryMaxDelayMs } from './perf-config.js';
 import { fetchAllODataPages } from './utils/graph-pagination.js';
 import {
+  buildTaskTitleSearchFilter,
+  buildGroupSearchFilter,
+  buildPersonInfoMailFilter,
+} from './super-tools/search-domain.js';
+import {
   isLoopFile,
   detectLoopFile,
   parseLoopContent,
@@ -4048,7 +4053,7 @@ async function handleNotes(
       if (input.search) {
         thinking.push(`Searching all OneNote pages for: "${input.search}"`);
         // Use $filter to search by title contains
-        params.$filter = `contains(title,'${input.search.replace(/'/g, "''")}')`;
+        params.$filter = buildTaskTitleSearchFilter(input.search);
         params.$orderby = 'lastModifiedDateTime desc';
         const result = await callGraph(graphClient, 'GET', '/me/onenote/pages', params);
         return formatAndReturnToolResponse(result, thinking);
@@ -4075,7 +4080,7 @@ async function handleNotes(
       thinking.push(`Searching all OneNote pages for: "${input.search}"`);
       const params: Record<string, string> = {
         $top: String(input.top || 50),
-        $filter: `contains(title,'${input.search.replace(/'/g, "''")}')`,
+        $filter: buildTaskTitleSearchFilter(input.search),
         $orderby: 'lastModifiedDateTime desc',
       };
       const result = await callGraph(graphClient, 'GET', '/me/onenote/pages', params);
@@ -6708,7 +6713,7 @@ async function searchProduct(
     } else if (product === 'Groups') {
       // Search groups - use filter since $search may not be supported
       const result = await callGraph(graphClient, 'GET', '/groups', {
-        $filter: `contains(displayName,'${query}') or contains(mail,'${query}') or contains(description,'${query}')`,
+        $filter: buildGroupSearchFilter(query),
         $top: String(topResults),
         $select: 'id,displayName,mail,description',
       });
@@ -7379,7 +7384,7 @@ async function handleAssistant(
       thinking.push(`Getting all info about: ${input.person}`);
 
       const emailsResult = await callGraph(graphClient, 'GET', '/me/messages', {
-        $filter: `from/emailAddress/address eq '${input.person}' or contains(from/emailAddress/name, '${input.person}')`,
+        $filter: buildPersonInfoMailFilter(input.person),
         $top: String(limit),
       });
       results.emails = JSON.parse(emailsResult);
