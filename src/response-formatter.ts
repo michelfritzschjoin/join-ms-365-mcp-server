@@ -488,6 +488,25 @@ export function getServerTimezone(): string {
   }
 }
 
+/** DD.MM.YYYY using UTC calendar components (for query window labels; avoids “27.–28.” when the range is one UTC day). */
+function formatGermanDateUtc(d: Date): string {
+  if (!(d instanceof Date) || isNaN(d.getTime())) {
+    return '';
+  }
+  const day = d.getUTCDate().toString().padStart(2, '0');
+  const month = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+  const year = d.getUTCFullYear();
+  return `${day}.${month}.${year}`;
+}
+
+function parseQueryInstant(iso: string): Date {
+  const s = iso.trim();
+  if (s.endsWith('Z') || /[+-]\d{2}:?\d{2}$/.test(s)) {
+    return new Date(s);
+  }
+  return new Date(s.endsWith('Z') ? s : `${s}Z`);
+}
+
 /**
  * Format a single calendar event from Graph API response
  */
@@ -690,9 +709,21 @@ export function formatCalendarResponse(
   let dateRange = '';
   try {
     if (startDateTime && endDateTime) {
-      const start = utcToLocalTime(startDateTime);
-      const end = utcToLocalTime(endDateTime);
-      dateRange = `${formatLocalDate(start)} - ${formatLocalDate(end)}`;
+      const start = parseQueryInstant(startDateTime);
+      const end = parseQueryInstant(endDateTime);
+      const sameUtcDay =
+        start.getUTCFullYear() === end.getUTCFullYear() &&
+        start.getUTCMonth() === end.getUTCMonth() &&
+        start.getUTCDate() === end.getUTCDate();
+      // One UTC calendar day (typical "today" view): show a single date. Using local end date made
+      // "27.03. - 28.03." for 23:59:59Z and confused small models into saying "no events today".
+      if (sameUtcDay) {
+        dateRange = formatGermanDateUtc(start);
+      } else {
+        const startLocal = utcToLocalTime(startDateTime);
+        const endLocal = utcToLocalTime(endDateTime);
+        dateRange = `${formatLocalDate(startLocal)} - ${formatLocalDate(endLocal)}`;
+      }
     } else if (formattedEvents.length > 0) {
       const firstDate = formattedEvents[0]?.startDate;
       const lastDate = formattedEvents[formattedEvents.length - 1]?.startDate;
@@ -727,6 +758,13 @@ export function calendarResponseToText(response: FormattedCalendarResponse): str
   // Header
   lines.push('📅 KALENDERÜBERSICHT');
   lines.push('═'.repeat(60));
+
+  if (response.summary.totalEvents > 0) {
+    lines.push(
+      `✅ ANTWORT (maßgeblich): Es sind ${response.summary.totalEvents} Termin(e) in diesem Zeitraum — nicht „keine Termine“ sagen, wenn diese Zahl > 0 ist.`
+    );
+    lines.push('─'.repeat(60));
+  }
 
   // Comprehensive summary at the top
   lines.push(`📊 Anzahl Termine: ${response.summary.totalEvents}`);
@@ -913,6 +951,12 @@ export function calendarResponseToMarkdown(response: FormattedCalendarResponse):
 
   lines.push('# 📅 Kalenderübersicht');
   lines.push('');
+  if (response.summary.totalEvents > 0) {
+    lines.push(
+      `> **Antwort (maßgeblich):** Es sind **${response.summary.totalEvents}** Termin(e) in diesem Zeitraum eingetragen. Wenn diese Zahl größer als 0 ist, **nicht** mit „keine Termine“ oder „nichts geplant“ antworten.`
+    );
+    lines.push('');
+  }
   lines.push('## Zusammenfassung');
   lines.push('');
   lines.push('| **Feld** | **Wert** |');

@@ -52,6 +52,7 @@ import {
   preferSharePointEntityTypesForQuery,
   validateEntityTypeCombinations,
 } from './utils/entity-type-validator.js';
+import { getUtcRangeForCalendarDayInTimeZone } from './utils/zoned-day-range.js';
 import { applyResponseLimit } from './utils/response-limiter.js';
 import {
   formatEmailSearchQuery,
@@ -1507,6 +1508,36 @@ function setEndOfDay(date: Date): Date {
   return result;
 }
 
+/** IANA timezone of the Node host (used as default for "heute" day boundaries). */
+function getServerIanaTimeZone(): string {
+  try {
+    const z = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return typeof z === 'string' && z.length > 0 ? z : 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
+/**
+ * Effective IANA timezone: explicit tool param, then MS365_MCP_CALENDAR_DEFAULT_TIMEZONE,
+ * then the server's host timezone (so "today" matches the server's calendar day when unset).
+ */
+function resolveCalendarTimeZone(inputTz: string | undefined): string {
+  return (
+    inputTz?.trim() ||
+    process.env.MS365_MCP_CALENDAR_DEFAULT_TIMEZONE?.trim() ||
+    getServerIanaTimeZone()
+  );
+}
+
+/**
+ * Current instant on the MCP server — the only reference clock for "heute" / default day ranges.
+ * Do not substitute client or user-invented dates.
+ */
+function getServerReferenceInstant(): Date {
+  return new Date();
+}
+
 // Read-only mode check helper
 function checkReadOnly(readOnly: boolean, action: string): void {
   if (readOnly) {
@@ -2188,20 +2219,21 @@ const calendarSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Start date/time (ISO format). When omitted for action "view", start of current day is used.'
+      'Start date/time (ISO 8601). For "today/heute" queries: OMIT this and endDateTime — do not invent past years or random dates. When omitted for action "view", the server uses start of the current calendar day in the effective timezone.'
     ),
   endDateTime: z
     .string()
     .optional()
     .describe(
-      'End date/time (ISO format). When omitted for action "view", end of current day is used.'
+      'End date/time (ISO 8601). For "today/heute": OMIT with startDateTime. When omitted for action "view", the server uses end of the current calendar day in the effective timezone.'
     ),
   // Timezone
   timezone: z
     .string()
     .optional()
-    .default('UTC')
-    .describe('Timezone for date/time values (e.g., "Europe/Berlin")'),
+    .describe(
+      'IANA timezone for Graph Prefer header and for computing "current day" when startDateTime/endDateTime are omitted. If omitted: MS365_MCP_CALENDAR_DEFAULT_TIMEZONE when set, otherwise the MCP host timezone (Intl, e.g. Europe/Berlin). "Heute" always uses the server clock instant as reference, not the client.'
+    ),
   // For create/update event
   subject: z
     .string()
@@ -2283,10 +2315,11 @@ async function handleCalendar(
   readOnly: boolean
 ): Promise<string> {
   const thinking: string[] = [];
-  const headers: Record<string, string> = {};
-  if (input.timezone) {
-    headers['Prefer'] = `outlook.timezone="${input.timezone}"`;
-  }
+  const serverReferenceInstant = getServerReferenceInstant();
+  const effectiveTz = resolveCalendarTimeZone(input.timezone);
+  const headers: Record<string, string> = {
+    Prefer: `outlook.timezone="${effectiveTz}"`,
+  };
 
   // Check write operations against readOnly mode
   if (['create-event', 'update-event', 'delete-event'].includes(input.action)) {
@@ -2316,12 +2349,9 @@ async function handleCalendar(
       let parsedResult: unknown;
       if (parsed.attendeeFilter !== null) {
         // Use calendar view with date range, then filter by attendee client-side
-        const now = new Date();
-        const startOfToday = new Date(
-          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
-        );
-        const endOfToday = new Date(
-          Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
+        const { start: startOfToday, end: endOfToday } = getUtcRangeForCalendarDayInTimeZone(
+          serverReferenceInstant,
+          effectiveTz
         );
         const startDateTime =
           parsed.startDateTime ?? input.startDateTime ?? startOfToday.toISOString();
@@ -2426,17 +2456,15 @@ async function handleCalendar(
     }
 
     case 'view': {
-      const now = new Date();
-      // When no date/time is given: use current day (start and end of day UTC)
-      const startOfToday = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
-      );
-      const endOfToday = new Date(
-        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999)
+      const { start: startOfToday, end: endOfToday } = getUtcRangeForCalendarDayInTimeZone(
+        serverReferenceInstant,
+        effectiveTz
       );
       const startDateTime = input.startDateTime ?? startOfToday.toISOString();
       const endDateTime = input.endDateTime ?? endOfToday.toISOString();
-      thinking.push(`Getting calendar view from ${startDateTime} to ${endDateTime}`);
+      thinking.push(
+        `Getting calendar view (server ref ${serverReferenceInstant.toISOString()}, ${effectiveTz}) from ${startDateTime} to ${endDateTime}`
+      );
       const params: Record<string, string> = {
         startDateTime,
         endDateTime,
@@ -2508,12 +2536,11 @@ async function handleCalendar(
 
     // Write operations (blocked in read-only mode - check happens at function start)
     case 'create-event': {
-      const now = new Date();
-      const defaultEnd = new Date(now.getTime() + 60 * 60 * 1000);
+      const defaultEnd = new Date(serverReferenceInstant.getTime() + 60 * 60 * 1000);
       const subject = input.subject ?? 'Untitled Event';
-      const startDateTime = input.startDateTime ?? now.toISOString();
+      const startDateTime = input.startDateTime ?? serverReferenceInstant.toISOString();
       const endDateTime = input.endDateTime ?? defaultEnd.toISOString();
-      const tz = input.timezone ?? 'UTC';
+      const tz = resolveCalendarTimeZone(input.timezone);
       thinking.push(`Creating event: ${subject}`);
       const event: Record<string, unknown> = {
         subject,
@@ -2541,9 +2568,15 @@ async function handleCalendar(
       if (input.body) updates.body = { contentType: 'Text', content: input.body };
       if (input.location) updates.location = { displayName: input.location };
       if (input.startDateTime)
-        updates.start = { dateTime: input.startDateTime, timeZone: input.timezone || 'UTC' };
+        updates.start = {
+          dateTime: input.startDateTime,
+          timeZone: resolveCalendarTimeZone(input.timezone),
+        };
       if (input.endDateTime)
-        updates.end = { dateTime: input.endDateTime, timeZone: input.timezone || 'UTC' };
+        updates.end = {
+          dateTime: input.endDateTime,
+          timeZone: resolveCalendarTimeZone(input.timezone),
+        };
       const result = await callGraph(
         graphClient,
         'PATCH',
@@ -9242,7 +9275,7 @@ export function registerSuperTools(
   // 2. Calendar
   server.tool(
     'calendar',
-    `Unified calendar operations for Outlook Calendar. Read operations: list events (with filtering and pagination), get event details, view calendar events in date range, list available calendars. ${readOnly ? '' : 'Write operations: create new events, update existing events, delete events.'} Supports timezone handling, date range queries, attendee management, and online meeting creation. Use this tool when working with calendar events, scheduling, or meeting information.`,
+    `Unified calendar operations for Outlook Calendar. Read operations: list events (with filtering and pagination), get event details, view calendar events in date range, list available calendars. ${readOnly ? '' : 'Write operations: create new events, update existing events, delete events.'} For questions like "today's meetings", "Termine heute", or "what is on my calendar today": use action "view" and OMIT startDateTime and endDateTime — the server fills the correct current day using timezone (set timezone e.g. Europe/Berlin, or MS365_MCP_CALENDAR_DEFAULT_TIMEZONE on the server). Never invent historical dates or random years. After the tool returns, summarize using the stated event count and list — if the count is greater than zero, do not say the user has no appointments. Supports timezone handling, date range queries, attendee management, and online meeting creation.`,
     calendarSchema.shape,
     async (input: CalendarInput) => {
       try {
