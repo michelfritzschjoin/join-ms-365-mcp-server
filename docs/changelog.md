@@ -7,6 +7,13 @@ All notable changes to the Join Microsoft 365 MCP Server are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.23.2...v1.23.3) (2026-03-27)
+
+### Bug Fixes
+
+* **mcp:** use stateless streamable http transport ([58dfd89](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/58dfd897ee1b25475a4b92e5195051e9d1bb7ebd))
+* **search:** route sharepoint nl queries and clarify tool guidance ([9086b14](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/9086b14d4eec5c769843dee640080e8e31e928d4))
+
 ## [1.23.2](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/compare/v1.23.1...v1.23.2) (2026-03-27)
 
 ### Bug Fixes
