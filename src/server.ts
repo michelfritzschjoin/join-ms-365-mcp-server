@@ -63,7 +63,7 @@ import { getChatMemoryStore } from './chat-memory.js';
  * @param req - Express request object
  * @returns Chat ID string
  */
-function extractChatId(req: Request): string {
+function extractChatId(req: Request, fallbackSessionId?: string): string {
   const chatId =
     req.get('X-OpenWebUI-Chat-ID') ||
     req.get('X-Chat-ID') ||
@@ -79,7 +79,7 @@ function extractChatId(req: Request): string {
   }
 
   // For MCP streamable-http clients, stabilize chat memory by reusing MCP session id.
-  const mcpSessionId = extractMcpSessionId(req);
+  const mcpSessionId = extractMcpSessionId(req) ?? fallbackSessionId;
   if (mcpSessionId) {
     return `mcp-${mcpSessionId}`;
   }
@@ -2311,7 +2311,7 @@ class MicrosoftGraphServer {
 
           try {
             // Extract chat ID and user ID for memory context
-            const chatId = extractChatId(req);
+            const chatId = extractChatId(req, sessionId);
             const userId = extractUserId(req);
 
             logger.debug('MCP GET request context', {
@@ -2554,7 +2554,7 @@ class MicrosoftGraphServer {
             const sessionId = extractMcpSessionId(req) ?? generateSessionId();
 
             // Extract chat ID and user ID for memory context
-            const chatId = extractChatId(req);
+            const chatId = extractChatId(req, sessionId);
             const userId = extractUserId(req);
 
             // Log tool call to QueryStore when dashboard is enabled
@@ -2678,7 +2678,7 @@ class MicrosoftGraphServer {
           res: Response
         ) => {
           const sessionId = extractMcpSessionId(req) ?? generateSessionId();
-          const chatId = extractChatId(req);
+          const chatId = extractChatId(req, sessionId);
           const userId = extractUserId(req);
 
           logger.info('MCP session cleanup request received', {
