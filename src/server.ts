@@ -78,6 +78,12 @@ function extractChatId(req: Request): string {
     return chatId;
   }
 
+  // For MCP streamable-http clients, stabilize chat memory by reusing MCP session id.
+  const mcpSessionId = extractMcpSessionId(req);
+  if (mcpSessionId) {
+    return `mcp-${mcpSessionId}`;
+  }
+
   // Generate a unique ID for this request if no chat ID provided
   // This ensures each "anonymous" session still gets tracked
   return `anon-${generateSessionId()}`;

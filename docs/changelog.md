@@ -11,43 +11,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
-* add example questions and get-example-questions to MCP server ([bd495e8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bd495e8077bd16729469bcd766413625f80bae27))
-* add summarize-recent-meetings tool with loop file support ([a192084](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/a1920840313a5dde7f49a1687ed80324add53ee7))
-* **email:** resolve person name to email before searching messages ([fcd295b](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/fcd295bf79f64f18607609d0c56875fc724f0418))
-* **email:** search by sender with 30d then 365d fallback ([d913701](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d913701ab71703514c45e63ecb1ca0ad6e9e6610))
-* implement automatic query optimization system ([84dfa3a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/84dfa3a6d0cf08bbd9fee813eed1278f3cab65fb))
-* implement automatic server-side execution of tool suggestions ([82c3544](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/82c3544f6b238c67c26fd8a829a11b3c363c4a91))
-* **mcp:** implement Microsoft 365 MCP improvements for better results ([271ff63](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/271ff6373ef9b06f2e2951c112bad69fe437dd1c))
-* office content, pagination, and graph client patch fixes ([1844785](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/18447856081f63704deaa1eaa4cb66f3c206a9d1))
-* **search:** add query intelligence, abbreviation expansion, typo correction and variant fallback ([d4a7783](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d4a77837fb8c3b743ecfb0315c4326c47e5838a7))
+- add example questions and get-example-questions to MCP server ([bd495e8](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/bd495e8077bd16729469bcd766413625f80bae27))
+- add summarize-recent-meetings tool with loop file support ([a192084](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/a1920840313a5dde7f49a1687ed80324add53ee7))
+- **email:** resolve person name to email before searching messages ([fcd295b](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/fcd295bf79f64f18607609d0c56875fc724f0418))
+- **email:** search by sender with 30d then 365d fallback ([d913701](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d913701ab71703514c45e63ecb1ca0ad6e9e6610))
+- implement automatic query optimization system ([84dfa3a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/84dfa3a6d0cf08bbd9fee813eed1278f3cab65fb))
+- implement automatic server-side execution of tool suggestions ([82c3544](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/82c3544f6b238c67c26fd8a829a11b3c363c4a91))
+- **mcp:** implement Microsoft 365 MCP improvements for better results ([271ff63](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/271ff6373ef9b06f2e2951c112bad69fe437dd1c))
+- office content, pagination, and graph client patch fixes ([1844785](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/18447856081f63704deaa1eaa4cb66f3c206a9d1))
+- **search:** add query intelligence, abbreviation expansion, typo correction and variant fallback ([d4a7783](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/d4a77837fb8c3b743ecfb0315c4326c47e5838a7))
 
 ### Bug Fixes
 
-* add getSuggestedQueryVariants to LearningSystem for intelligent-search ([27c3aa3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/27c3aa38a42155194520c6d9042a5867f22ea740))
-* add markdown formatters to response-formatter default export ([40300bf](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/40300bffb5863559d0a7567e913fdcd568087b18))
-* **calendar): default start/end for view; fix(sharepoint:** resolve site by name and accept siteld ([a326939](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/a3269399ec9e005fbb2cdc93f1ede0be6d0074b4))
-* **ci:** patch get-chat endpoint after generate (unterminated template literal) ([052b641](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/052b641d408b2d1c6d54f8b00a5129eb859c9473))
-* **ci:** security audit allowlist, CodeQL v4, and security-events permission ([390044a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/390044a54c0ce07eff95f80fa1b2d6c7fa1ef475))
-* CLI test mock and robust get-chat patch for CI ([46f0dae](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/46f0dae8142ef806edf904388f785d2c8a15a54d))
-* **cli:** allow excess arguments for MCP host compatibility ([9419650](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/9419650bcf8e237fee70b9153b860a4f5c641ef0))
-* correct Microsoft Graph API search query formatting for property filters with spaces ([3aef597](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3aef59741b3786bc9c31bec812c56056a19d9638))
-* **mail:** find-emails-with-person Graph API and external email support ([46701a3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/46701a3d368e756bc080f1260e38944e6e71c459))
-* **mail:** normalize composite OR search queries and add from:email fallback ([c9aa05c](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/c9aa05cf29210ed9ded6e38a118daffe351f85c7))
-* Prettier endOfLine and OpenAPI spec loading in tests ([19b7185](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/19b71852b3e21f37f2456f6d592aaa84f17cf2f2))
-* remove unnecessary escape characters in content-extractor regex patterns ([26d2179](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/26d217949206b20f2bdd3463dbc7ba77b62b5914))
-* resolve all typescript compilation errors ([85bda67](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/85bda670445cd9d6c08c7af496c068cec935f150))
-* resolve docker build tag format error in github actions workflow ([0f07b67](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/0f07b67b0c4042727cf68a0e30807035ab8d173c))
-* resolve TS errors in suggestedNextTools and adjust graph-client coverage thresholds ([3ec938a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3ec938a7e22c6bd88562ceb5737d60443ede5ff1))
-* resolve typecheck errors for calendar/assistant inputs and generated client ([352bf4e](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/352bf4e53cd6c341d329623f7c89e65322f9e141))
-* robust get-chat patch for truncated or unterminated client.ts in CI ([f1c795f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/f1c795f2d778360d57637eb2116ca74b5dfa7a15))
+- add getSuggestedQueryVariants to LearningSystem for intelligent-search ([27c3aa3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/27c3aa38a42155194520c6d9042a5867f22ea740))
+- add markdown formatters to response-formatter default export ([40300bf](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/40300bffb5863559d0a7567e913fdcd568087b18))
+- **calendar): default start/end for view; fix(sharepoint:** resolve site by name and accept siteld ([a326939](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/a3269399ec9e005fbb2cdc93f1ede0be6d0074b4))
+- **ci:** patch get-chat endpoint after generate (unterminated template literal) ([052b641](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/052b641d408b2d1c6d54f8b00a5129eb859c9473))
+- **ci:** security audit allowlist, CodeQL v4, and security-events permission ([390044a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/390044a54c0ce07eff95f80fa1b2d6c7fa1ef475))
+- CLI test mock and robust get-chat patch for CI ([46f0dae](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/46f0dae8142ef806edf904388f785d2c8a15a54d))
+- **cli:** allow excess arguments for MCP host compatibility ([9419650](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/9419650bcf8e237fee70b9153b860a4f5c641ef0))
+- correct Microsoft Graph API search query formatting for property filters with spaces ([3aef597](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3aef59741b3786bc9c31bec812c56056a19d9638))
+- **mail:** find-emails-with-person Graph API and external email support ([46701a3](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/46701a3d368e756bc080f1260e38944e6e71c459))
+- **mail:** normalize composite OR search queries and add from:email fallback ([c9aa05c](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/c9aa05cf29210ed9ded6e38a118daffe351f85c7))
+- Prettier endOfLine and OpenAPI spec loading in tests ([19b7185](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/19b71852b3e21f37f2456f6d592aaa84f17cf2f2))
+- remove unnecessary escape characters in content-extractor regex patterns ([26d2179](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/26d217949206b20f2bdd3463dbc7ba77b62b5914))
+- resolve all typescript compilation errors ([85bda67](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/85bda670445cd9d6c08c7af496c068cec935f150))
+- resolve docker build tag format error in github actions workflow ([0f07b67](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/0f07b67b0c4042727cf68a0e30807035ab8d173c))
+- resolve TS errors in suggestedNextTools and adjust graph-client coverage thresholds ([3ec938a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/3ec938a7e22c6bd88562ceb5737d60443ede5ff1))
+- resolve typecheck errors for calendar/assistant inputs and generated client ([352bf4e](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/352bf4e53cd6c341d329623f7c89e65322f9e141))
+- robust get-chat patch for truncated or unterminated client.ts in CI ([f1c795f](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/f1c795f2d778360d57637eb2116ca74b5dfa7a15))
 
 ### Performance Improvements
 
-* reduce response times with timeouts, fast mode, and configurable limits ([78ae851](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/78ae851c63dca24f986ea3d7ed5b6b32a015900b))
+- reduce response times with timeouts, fast mode, and configurable limits ([78ae851](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/78ae851c63dca24f986ea3d7ed5b6b32a015900b))
 
 ### Documentation
 
-* **changelog:** document generated client get-chat endpoint fix ([65b923a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/65b923a0c61c11391b468f839ea4131fdf2a2d07))
+- **changelog:** document generated client get-chat endpoint fix ([65b923a](https://github.com/michelfritzschjoin/join-ms-365-mcp-server/commit/65b923a0c61c11391b468f839ea4131fdf2a2d07))
 
 ## [Unreleased]
 
